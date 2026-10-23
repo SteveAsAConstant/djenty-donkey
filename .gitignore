@@ -10,3 +10,4 @@ out/
 *.raw
 spice/*.db
 spice/*.op.raw
+nam_listen/

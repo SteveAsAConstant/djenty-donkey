@@ -74,3 +74,7 @@ target_include_directories(dsp_test PRIVATE Source)
 # Tone regression: current DSP vs the frozen v0.3.0 DSP in tests/baseline (null test + speed)
 add_executable(tone_regress tests/tone_regress.cpp)
 target_include_directories(tone_regress PRIVATE Source tests)
+
+# Comparison against a NAM capture of a real amp (pass the .nam file; captures are not redistributed)
+add_executable(nam_compare tests/nam_compare.cpp)
+target_include_directories(nam_compare PRIVATE Source)
