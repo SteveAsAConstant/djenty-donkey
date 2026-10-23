@@ -17,6 +17,7 @@ VibeAmpProcessor::VibeAmpProcessor()
 
     pInGain = get (ids::inGain);
     pGateOn = get (ids::gateOn); pGateThresh = get (ids::gateThresh); pGateRelease = get (ids::gateRelease);
+    pGateLow = get (ids::gateLow); pGateMid = get (ids::gateMid); pGateHigh = get (ids::gateHigh);
     pTranspose = get (ids::transpose);
     pCompOn = get (ids::compOn); pCompThresh = get (ids::compThresh); pCompRatio = get (ids::compRatio);
     pCompAttack = get (ids::compAttack); pCompRelease = get (ids::compRelease); pCompMakeup = get (ids::compMakeup);
@@ -53,6 +54,7 @@ void VibeAmpProcessor::prepareToPlay (double sampleRate, int samplesPerBlock)
     maxBlock = juce::jmax (1, samplesPerBlock);
 
     monoBuf.setSize (1, maxBlock);
+    keyBuf.setSize (1, maxBlock);
     stereoBuf.setSize (2, maxBlock);
 
     const juce::dsp::ProcessSpec monoSpec { sampleRate, (juce::uint32) maxBlock, 1 };
@@ -62,9 +64,7 @@ void VibeAmpProcessor::prepareToPlay (double sampleRate, int samplesPerBlock)
     compMakeup.prepare (monoSpec); compMakeup.setRampDurationSeconds (0.05);
     outputGain.prepare (stereoSpec); outputGain.setRampDurationSeconds (0.05);
 
-    gate.prepare (monoSpec);
-    gate.setRatio (10.0f);
-    gate.setAttack (1.0f);
+    gate.prepare (sampleRate);
 
     shifter.prepare (sampleRate);
     comp.prepare (monoSpec);
@@ -100,9 +100,14 @@ void VibeAmpProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Mid
     // ---- read parameters once per block ----
     inputGain.setGainDecibels (pInGain->load());
 
-    gateOn = pGateOn->load() > 0.5f;
-    gate.setThreshold (pGateThresh->load());
-    gate.setRelease (pGateRelease->load());
+    const bool newGateOn = pGateOn->load() > 0.5f;
+    if (newGateOn && ! gateOn) gate.reset();
+    gateOn = newGateOn;
+    gateSettings.threshDb = pGateThresh->load();
+    gateSettings.releaseMs = pGateRelease->load();
+    gateSettings.depth[0] = pGateLow->load() * 0.01f;
+    gateSettings.depth[1] = pGateMid->load() * 0.01f;
+    gateSettings.depth[2] = pGateHigh->load() * 0.01f;
 
     shifter.setSemitones (juce::roundToInt (pTranspose->load()));
 
@@ -181,10 +186,10 @@ void VibeAmpProcessor::processChunk (juce::AudioBuffer<float>& buffer, int start
     auto monoBlock = juce::dsp::AudioBlock<float> (monoBuf).getSubBlock (0, (size_t) len);
     juce::dsp::ProcessContextReplacing<float> monoCtx (monoBlock);
 
-    // ---- pre-amp: input -> gate -> transpose -> comp ----
+    // ---- pre-amp: input -> transpose -> comp ----
     inputGain.process (monoCtx);
     updatePeak (inputPeak, monoBuf.getMagnitude (0, 0, len)); // what the amp sees (after the Input knob)
-    if (gateOn) gate.process (monoCtx);
+    keyBuf.copyFrom (0, 0, monoBuf, 0, 0, len);               // clean guitar = noise gate detector key
     shifter.process (mono, len);
     if (compOn)
     {
@@ -194,6 +199,18 @@ void VibeAmpProcessor::processChunk (juce::AudioBuffer<float>& buffer, int start
 
     // ---- amp (boost lives inside the oversampled amp loop) ----
     amp.process (mono, len, ampSettings);
+
+    // ---- 3-band noise gate: keyed by the clean input, acting on the amp output ----
+    if (gateOn)
+    {
+        gate.process (mono, keyBuf.getReadPointer (0), len, gateSettings);
+        for (int b = 0; b < 3; ++b)
+            gateBandGain[b].store (gate.getBandGain (b));
+    }
+    else
+    {
+        for (auto& g : gateBandGain) g.store (1.0f);
+    }
 
     // ---- cabinet ----
     if (cabOn)

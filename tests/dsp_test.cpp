@@ -4,6 +4,7 @@
 #include <cmath>
 #include <cstdio>
 #include <vector>
+#include "dsp/MultibandGate.h"
 #include "dsp/Preamp5150.h"
 #include "dsp/PrecisionDrive.h"
 
@@ -137,8 +138,56 @@ static void channelLevels()
     }
 }
 
+static void gateTests()
+{
+    constexpr double gfs = 48000.0;
+
+    std::printf ("\n== 3-band gate: open-gate frequency response (should be flat) ==\n");
+    for (double f : { 50.0, 150.0, 300.0, 1000.0, 3000.0, 8000.0, 15000.0 })
+    {
+        MultibandGate g;
+        g.prepare (gfs);
+        MultibandGate::Settings s;
+        s.depth[0] = s.depth[1] = s.depth[2] = 0.0f;
+        std::vector<float> a ((size_t) gfs), k ((size_t) gfs, 0.0f);
+        for (size_t i = 0; i < a.size(); ++i) a[i] = (float) std::sin (2.0 * kPi * f * i / gfs);
+        g.process (a.data(), k.data(), (int) a.size(), s);
+        double sq = 0; int cnt = 0;
+        for (size_t i = a.size() / 2; i < a.size(); ++i) { sq += (double) a[i] * a[i]; ++cnt; }
+        std::printf ("%6.0f Hz: %+.3f dB\n", f, 10.0 * std::log10 (sq / cnt / 0.5)); // RMS vs unit sine
+    }
+
+    std::printf ("\n== 3-band gate: decaying note (key -10 dBFS, -30 dB/s), thresh -60 dB ==\n");
+    MultibandGate g;
+    g.prepare (gfs);
+    MultibandGate::Settings s; // defaults: depth 30 / 60 / 100 %
+    const int n = (int) (gfs * 3.0);
+    std::vector<float> a ((size_t) n), k ((size_t) n);
+    unsigned rng = 1;
+    for (int i = 0; i < n; ++i)
+    {
+        const double t = i / gfs;
+        k[(size_t) i] = (float) (std::pow (10.0, (-10.0 - 30.0 * t) / 20.0) * std::sin (2.0 * kPi * 110.0 * t));
+        rng = rng * 1664525u + 1013904223u;
+        a[(size_t) i] = (float) ((rng >> 8) / 8388608.0 - 1.0) * 0.1f; // white "amp hiss"
+    }
+    double closeTime[3] = { -1, -1, -1 };
+    const int chunk = 64;
+    for (int i = 0; i < n; i += chunk)
+    {
+        g.process (a.data() + i, k.data() + i, std::min (chunk, n - i), s);
+        for (int b = 0; b < 3; ++b)
+            if (closeTime[b] < 0 && g.getBandGain (b) < 0.5f) closeTime[b] = i / gfs;
+    }
+    const char* names[] = { "low ", "mid ", "high" };
+    for (int b = 0; b < 3; ++b)
+        std::printf ("%s band falls below -6 dB at %.3f s (final gain %.1f dB)\n", names[b], closeTime[b],
+                     20.0 * std::log10 (g.getBandGain (b) + 1e-9));
+}
+
 int main()
 {
+    gateTests();
     channelLevels();
     leadPreampVsSpice();
     toneStackResponse();

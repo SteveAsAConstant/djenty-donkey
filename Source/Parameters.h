@@ -7,6 +7,9 @@ inline constexpr const char* inGain      = "inGain";
 inline constexpr const char* gateOn      = "gateOn";
 inline constexpr const char* gateThresh  = "gateThresh";
 inline constexpr const char* gateRelease = "gateRelease";
+inline constexpr const char* gateLow     = "gateLow";
+inline constexpr const char* gateMid     = "gateMid";
+inline constexpr const char* gateHigh    = "gateHigh";
 inline constexpr const char* transpose   = "transpose";
 inline constexpr const char* compOn      = "compOn";
 inline constexpr const char* compThresh  = "compThresh";
@@ -83,6 +86,9 @@ inline juce::AudioProcessorValueTreeState::ParameterLayout createParameterLayout
     layout.add (makeBool  (ids::gateOn, "Gate On", true));
     layout.add (makeFloat (ids::gateThresh, "Gate Threshold", -90.0f, 0.0f, -60.0f, " dB"));
     layout.add (makeFloat (ids::gateRelease, "Gate Release", 5.0f, 500.0f, 80.0f, " ms", 0, 80.0f));
+    layout.add (makeFloat (ids::gateLow, "Gate Low Depth", 0.0f, 100.0f, 30.0f, " %", 0));
+    layout.add (makeFloat (ids::gateMid, "Gate Mid Depth", 0.0f, 100.0f, 60.0f, " %", 0));
+    layout.add (makeFloat (ids::gateHigh, "Gate High Depth", 0.0f, 100.0f, 100.0f, " %", 0));
 
     layout.add (std::make_unique<juce::AudioParameterInt> (juce::ParameterID { ids::transpose, 1 }, "Transpose", -12, 12, 0));
 

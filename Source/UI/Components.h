@@ -279,6 +279,55 @@ private:
 };
 
 // ---------------------------------------------------------------------------
+// Shows how far each noise-gate band is closed (L / M / H).
+class GateBandMeter : public juce::Component, public juce::SettableTooltipClient, private juce::Timer
+{
+public:
+    explicit GateBandMeter (std::function<float (int)> bandGainSource) : source (std::move (bandGainSource))
+    {
+        setTooltip ("Gate activity per band: full bar = open, empty = closed. "
+                    "Highs close first to remove hiss, lows close last to keep the sustain.");
+        startTimerHz (30);
+    }
+
+    void paint (juce::Graphics& g) override
+    {
+        auto b = getLocalBounds().reduced (2, 0);
+        g.setFont (font (12.0f, true));
+        g.setColour (colours::text);
+        g.drawText ("Bands", b.removeFromTop (16), juce::Justification::centred);
+        auto labels = b.removeFromBottom (16);
+        b.reduce (0, 6);
+
+        const char* names[] = { "L", "M", "H" };
+        const int w = b.getWidth() / 3;
+        for (int i = 0; i < 3; ++i)
+        {
+            auto col = b.removeFromLeft (w).toFloat().withSizeKeepingCentre (10.0f, (float) b.getHeight());
+            g.setColour (juce::Colour (0xff101014));
+            g.fillRoundedRectangle (col, 3.0f);
+            // 0 dB .. -40 dB of gain reduction
+            const float db = juce::Decibels::gainToDecibels (gains[i], -40.0f);
+            const float n = 1.0f + db / 40.0f;
+            g.setColour (colours::teal.withAlpha (0.35f + 0.65f * n));
+            g.fillRoundedRectangle (col.withTop (col.getBottom() - n * col.getHeight()), 3.0f);
+            g.setColour (colours::text);
+            g.drawText (names[i], labels.removeFromLeft (w), juce::Justification::centred);
+        }
+    }
+
+private:
+    void timerCallback() override
+    {
+        for (int i = 0; i < 3; ++i) gains[i] = source ? source (i) : 1.0f;
+        repaint();
+    }
+
+    std::function<float (int)> source;
+    float gains[3] { 1.0f, 1.0f, 1.0f };
+};
+
+// ---------------------------------------------------------------------------
 class Toggle : public juce::Component
 {
 public:

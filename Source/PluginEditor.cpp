@@ -108,9 +108,13 @@ VibeAmpEditor::VibeAmpEditor (VibeAmpProcessor& p) : AudioProcessorEditor (&p), 
     inSec->add<Knob> (s, ids::inGain, "Level", colours::text);
     inSec->add<LevelMeter> ([this] { return proc.popInputPeak(); }, true);
 
-    gateSec = std::make_unique<Section> ("GATE", colours::teal, &s, ids::gateOn);
+    gateSec = std::make_unique<Section> ("3-BAND GATE", colours::teal, &s, ids::gateOn);
     gateSec->add<Knob> (s, ids::gateThresh, "Thresh", colours::teal);
     gateSec->add<Knob> (s, ids::gateRelease, "Release", colours::teal);
+    gateSec->add<Knob> (s, ids::gateLow, "Low", colours::teal);
+    gateSec->add<Knob> (s, ids::gateMid, "Mid", colours::teal);
+    gateSec->add<Knob> (s, ids::gateHigh, "High", colours::teal);
+    gateSec->add<GateBandMeter> ([this] (int b) { return proc.getGateBandGain (b); });
 
     pitchSec = std::make_unique<Section> ("TRANSPOSE", colours::purple);
     pitchSec->add<Knob> (s, ids::transpose, "Semitones", colours::purple);
@@ -176,8 +180,8 @@ VibeAmpEditor::VibeAmpEditor (VibeAmpProcessor& p) : AudioProcessorEditor (&p), 
         addAndMakeVisible (sec);
 
     setResizable (true, true);
-    setResizeLimits (960, 640, 1920, 1280);
-    setSize (1200, 780);
+    setResizeLimits (1100, 680, 2200, 1400);
+    setSize (1360, 820);
 }
 
 VibeAmpEditor::~VibeAmpEditor()
@@ -241,9 +245,9 @@ void VibeAmpEditor::resized()
     auto row3 = b.removeFromTop (juce::roundToInt (h * 0.27f)); b.removeFromTop (gap);
     auto row4 = b;
 
-    layoutRow (row1, { { inSec.get(), 2.0f }, { gateSec.get(), 2.2f }, { pitchSec.get(), 1.3f },
-                       { compSec.get(), 5.0f }, { boostSec.get(), 4.0f } });
-    layoutRow (row2, { { ampSec.get(), 1.0f } });
+    layoutRow (row1, { { inSec.get(), 2.0f }, { gateSec.get(), 6.0f }, { pitchSec.get(), 1.4f },
+                       { compSec.get(), 5.0f } });
+    layoutRow (row2, { { boostSec.get(), 4.0f }, { ampSec.get(), 8.5f } });
     layoutRow (row3, { { cabSec.get(), 3.0f }, { eqSec.get(), 7.0f } });
     layoutRow (row4, { { phaserSec.get(), 4.0f }, { delaySec.get(), 4.0f },
                        { reverbSec.get(), 4.0f }, { outSec.get(), 2.0f } });

@@ -3,6 +3,7 @@
 #include <juce_dsp/juce_dsp.h>
 #include "dsp/AmpSim.h"
 #include "dsp/Filters.h"
+#include "dsp/MultibandGate.h"
 #include "dsp/PitchShifter.h"
 #include "dsp/StereoDelay.h"
 
@@ -46,6 +47,9 @@ public:
     float popInputPeak()  { return inputPeak.exchange (0.0f); }
     float popOutputPeak() { return outputPeak.exchange (0.0f); }
 
+    // Noise gate band gains (0..1: low, mid, high) for the UI
+    float getGateBandGain (int band) const { return gateBandGain[band].load(); }
+
     juce::AudioProcessorValueTreeState apvts;
 
 private:
@@ -54,6 +58,7 @@ private:
     // cached parameter pointers
     std::atomic<float>* pInGain {}; std::atomic<float>* pGateOn {}; std::atomic<float>* pGateThresh {};
     std::atomic<float>* pGateRelease {}; std::atomic<float>* pTranspose {};
+    std::atomic<float>* pGateLow {}; std::atomic<float>* pGateMid {}; std::atomic<float>* pGateHigh {};
     std::atomic<float>* pCompOn {}; std::atomic<float>* pCompThresh {}; std::atomic<float>* pCompRatio {};
     std::atomic<float>* pCompAttack {}; std::atomic<float>* pCompRelease {}; std::atomic<float>* pCompMakeup {};
     std::atomic<float>* pBoostOn {}; std::atomic<float>* pBoostDrive {}; std::atomic<float>* pBoostTone {};
@@ -72,11 +77,12 @@ private:
 
     double sampleRateHz = 44100.0;
     int maxBlock = 512;
-    juce::AudioBuffer<float> monoBuf, stereoBuf;
+    juce::AudioBuffer<float> monoBuf, stereoBuf, keyBuf;
 
     // signal chain
     juce::dsp::Gain<float> inputGain, compMakeup, outputGain;
-    juce::dsp::NoiseGate<float> gate;
+    vamp::MultibandGate gate;
+    vamp::MultibandGate::Settings gateSettings;
     vamp::PitchShifter shifter;
     juce::dsp::Compressor<float> comp;
     vamp::AmpSim amp;
@@ -100,6 +106,7 @@ private:
     }
 
     std::atomic<float> inputPeak { 0.0f }, outputPeak { 0.0f };
+    std::atomic<float> gateBandGain[3] { { 1.0f }, { 1.0f }, { 1.0f } };
     std::atomic<bool> irLoaded { false };
     mutable juce::SpinLock irLock;
     juce::String irPath;
