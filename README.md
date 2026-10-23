@@ -37,6 +37,8 @@ Input ─ Gate ─ Transpose ─ Compressor ─┬─ [8x oversampled] ───
 | **3-band gate** | Keyed by the clean input, applied after the amp on LR4 bands (300 Hz / 3 kHz): highs close first/fastest/deepest (kills hiss), lows last/slowest/shallowest (keeps the sustain). |
 | **Transpose** | *LIVE*: waveform-aligned WSOLA, ~6 ms attack latency. *HQ*: phase-vocoder time-stretch + resampling with identity phase locking and transient phase reset, ~43 ms (reported to the host). Both accurate to a few cents. |
 
+Validation against a real amp (v0.4): 14 [NAM](https://github.com/sdatkinson/neural-amp-modeler) captures of a Peavey 6505 (lead channel, various gain / EQ settings) — with the knobs at the capture's dial positions the 1/3-octave spectra match within 1–2 dB on average and the odd harmonics within ~2–3 dB. See [docs/nam_calibration.md](docs/nam_calibration.md).
+
 Validation against LTspice: [docs/spice_reference_lead.md](docs/spice_reference_lead.md), [docs/power_amp.md](docs/power_amp.md).
 Circuit notes: [docs/5150_schematic_notes.md](docs/5150_schematic_notes.md), [docs/precision_drive.md](docs/precision_drive.md), [docs/gate_and_transpose.md](docs/gate_and_transpose.md).
 
@@ -85,7 +87,9 @@ installer/              Inno Setup script + packaging
 - [x] 3-band noise gate
 - [x] LIVE / HQ pitch shifter
 - [ ] Cathode follower (V3B) compression
-- [ ] CPU: "eco" mode (lower oversampling for the power amp)
+- [x] Gain / Master / tone path calibrated against NAM captures of a real 6505
+- [ ] Preamp asymmetry (even harmonics, small-signal breakup) vs the real amp
+- [ ] CPU: "eco" mode / hardware port (Raspberry Pi class)
 - [ ] Preset browser
 
 ## License
