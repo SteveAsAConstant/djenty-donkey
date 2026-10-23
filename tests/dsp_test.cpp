@@ -323,6 +323,110 @@ struct LegacyShifter
     }
 };
 
+// Per-module CPU on a guitar-like DI (palm-muted chugs + idle hiss between notes), at the rates the
+// plugin runs them (non-linear amp at 4x = 192 kHz, the rest at 48 kHz). Reports the average load and
+// the worst 64-sample block: on dedicated hardware the per-block deadline is what matters.
+static std::vector<double> guitarDI (double rate, double seconds)
+{
+    std::vector<double> x ((size_t) (rate * seconds));
+    unsigned rng = 12345;
+    const double f[] = { 41.2, 61.7, 82.4 }; // drop-D-ish power chord
+    for (size_t i = 0; i < x.size(); ++i)
+    {
+        const double t = i / rate;
+        const double ph = std::fmod (t, 1.0);
+        double v = 0;
+        if (ph < 0.75) // 6 chugs, then 0.25 s of idle hiss
+        {
+            const double env = std::exp (-std::fmod (ph, 0.125) * 30.0);
+            for (double fr : f)
+                for (int h = 1; h <= 6; ++h)
+                    v += env * 0.25 / h * std::sin (2 * kPi * fr * h * t + h);
+        }
+        rng = rng * 1664525u + 1013904223u;
+        v += 0.0005 * ((rng >> 8) / 8388608.0 - 1.0); // ~-66 dBFS
+        x[i] = v;
+    }
+    return x;
+}
+
+template <typename Fn>
+static void timeModule (const char* name, double rate, int block, int n, Fn&& run)
+{
+    using clk = std::chrono::high_resolution_clock;
+    double total = 0, worst = 0;
+    for (int start = 0; start < n; start += block)
+    {
+        const int len = std::min (block, n - start);
+        const auto t0 = clk::now();
+        run (start, len);
+        const double us = std::chrono::duration<double, std::micro> (clk::now() - t0).count();
+        total += us; worst = std::max (worst, us);
+    }
+    std::printf ("%-36s avg %6.2f%%   worst block %6.1f%%\n", name,
+                 100.0 * total / (1e6 * n / rate), 100.0 * worst / (1e6 * block / rate));
+}
+
+static void cpuModules()
+{
+    constexpr double base = 48000.0, os = 4 * base, secs = 4.0;
+    const auto diOs = guitarDI (os, secs);
+    const auto di = guitarDI (base, secs);
+    const int nOs = (int) diOs.size(), n = (int) di.size();
+    volatile double sink = 0;
+    auto loop = [&] (auto& fn) { return [&] (int s, int l) { double a = 0; for (int i = s; i < s + l; ++i) a += fn (i); sink = sink + a; }; };
+
+    std::printf ("\n== CPU per module (%% of one core; 48 kHz host, 64-sample buffer = 256 samples at 4x) ==\n");
+
+    {
+        PrecisionDrive pd; pd.prepare (os); pd.setControls (0.5, 0.5, 3, 0.7);
+        auto fn = [&] (int i) { return pd.process (diOs[(size_t) i]); };
+        timeModule ("Precision Drive (4x)", os, 256, nOs, loop (fn));
+    }
+
+    const char* names[] = { "Preamp RED   gain 0.7 (4x)", "Preamp BLUE  gain 0.7 (4x)", "Preamp CLEAN gain 0.7 (4x)" };
+    for (int mode : { 0, 1, 2 })
+    {
+        Preamp5150 pre; pre.prepare (os); pre.setMode (mode); pre.setControls (0.7, 0.5, 0.5, 0.6, 0.5);
+        auto fn = [&] (int i) { return pre.process (diOs[(size_t) i]); };
+        timeModule (names[mode], os, 256, nOs, loop (fn));
+    }
+    {
+        Preamp5150 pre; pre.prepare (os); pre.setMode (0); pre.setControls (1.0, 0.5, 0.5, 0.6, 0.5);
+        auto fn = [&] (int i) { return pre.process (diOs[(size_t) i]); };
+        timeModule ("Preamp RED   gain 1.0 (4x)", os, 256, nOs, loop (fn));
+    }
+    {
+        // feed the power amp the real preamp output so its operating point is realistic
+        Preamp5150 pre; pre.prepare (os); pre.setMode (0); pre.setControls (0.7, 0.5, 0.5, 0.6, 0.5);
+        std::vector<double> pv ((size_t) nOs);
+        for (int i = 0; i < nOs; ++i) pv[(size_t) i] = pre.process (diOs[(size_t) i]) * 25.0;
+        PowerAmp5150 pa; pa.setControls (0.5, 0.5); pa.prepare (os);
+        auto fn = [&] (int i) { return pa.process (pv[(size_t) i]); };
+        timeModule ("Power amp (4x)", os, 256, nOs, loop (fn));
+    }
+    {
+        PrecisionDrive pd; pd.prepare (os); pd.setControls (0.5, 0.5, 3, 0.7);
+        Preamp5150 pre; pre.prepare (os); pre.setMode (0); pre.setControls (0.7, 0.5, 0.5, 0.6, 0.5);
+        PowerAmp5150 pa; pa.setControls (0.5, 0.5); pa.prepare (os);
+        auto fn = [&] (int i) { return pa.process (pre.process (pd.process (diOs[(size_t) i])) * 25.0); };
+        timeModule ("FULL amp: drive+RED+power (4x)", os, 256, nOs, loop (fn));
+    }
+
+    std::vector<float> buf ((size_t) n), key ((size_t) n);
+    auto reload = [&] { for (int i = 0; i < n; ++i) buf[(size_t) i] = key[(size_t) i] = (float) di[(size_t) i]; };
+    {
+        reload(); MultibandGate g; g.prepare (base); MultibandGate::Settings st;
+        timeModule ("3-band gate", base, 64, n, [&] (int s, int l) { g.process (buf.data() + s, key.data() + s, l, st); });
+    }
+    for (int mode : { (int) PitchShifter::Live, (int) PitchShifter::HQ })
+    {
+        reload(); PitchShifter ps; ps.prepare (base); ps.setParams (-2, mode);
+        timeModule (mode == PitchShifter::Live ? "Transpose LIVE (-2 st)" : "Transpose HQ (-2 st)", base, 64, n,
+                    [&] (int s, int l) { ps.process (buf.data() + s, l); });
+    }
+}
+
 static void transposeTests()
 {
     constexpr double tfs = 48000.0;
@@ -480,6 +584,7 @@ static void chainLevels()
 
 int main (int argc, char** argv)
 {
+    if (argc > 1 && std::string (argv[1]) == "cpu") { cpuModules(); return 0; }
     if (argc > 1 && std::string (argv[1]) == "chain") { chainLevels(); return 0; }
     if (argc > 1 && std::string (argv[1]) == "transpose") { transposeTests(); return 0; }
     if (argc > 1 && std::string (argv[1]) == "ingate") { inputGateTest(); return 0; }

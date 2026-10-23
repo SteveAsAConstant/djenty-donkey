@@ -70,3 +70,7 @@ target_link_libraries(DjentyDonkey
 # Offline DSP checks against the LTspice reference (no JUCE)
 add_executable(dsp_test tests/dsp_test.cpp)
 target_include_directories(dsp_test PRIVATE Source)
+
+# Tone regression: current DSP vs the frozen v0.3.0 DSP in tests/baseline (null test + speed)
+add_executable(tone_regress tests/tone_regress.cpp)
+target_include_directories(tone_regress PRIVATE Source tests)

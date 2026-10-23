@@ -1,0 +1,274 @@
+#pragma once
+#include <algorithm>
+#include <cmath>
+
+namespace vamp_baseline
+{
+// Norman Koren's triode model (same equations as spice/12AX7.inc)
+struct KorenTriode
+{
+    double mu = 100.0, ex = 1.4, kg1 = 1060.0, kp = 600.0, kvb = 300.0;
+
+    // Plate current and its partial derivatives w.r.t. Vpk and Vgk
+    inline void eval (double vpk, double vgk, double& ip, double& dVpk, double& dVgk) const
+    {
+        const double s = std::sqrt (kvb + vpk * vpk);
+        const double x = kp * (1.0 / mu + vgk / s);
+
+        double sp, sig;
+        if (x > 30.0)       { sp = x; sig = 1.0; }
+        else if (x < -30.0) { sp = std::exp (x); sig = sp; }
+        else
+        {
+            const double e = std::exp (x);
+            sp = std::log1p (e);
+            sig = e / (1.0 + e);
+        }
+
+        const double E = vpk / kp * sp;
+        if (E <= 0.0) { ip = 0.0; dVpk = 0.0; dVgk = 0.0; return; }
+
+        const double Ep = std::exp ((ex - 1.0) * std::log (E)); // == pow (E, ex - 1), faster
+        ip = 2.0 * Ep * E / kg1;
+        const double dIdE = 2.0 * ex * Ep / kg1;
+        dVgk = dIdE * (vpk * sig / s);
+        dVpk = dIdE * (sp / kp - vpk * vpk * vgk * sig / (s * s * s));
+    }
+};
+
+// Grid conduction: diode-like knee (~0.25 V) into ~2k grid resistance
+inline void gridCurrent (double vgk, double& ig, double& dIg)
+{
+    constexpr double von = 0.25, vd = 0.03, rgk = 2000.0;
+    const double x = (vgk - von) / vd;
+    if (x > 30.0)       { ig = (vgk - von) / rgk; dIg = 1.0 / rgk; return; }
+    if (x < -30.0)      { ig = 0.0; dIg = 0.0; return; }
+    const double e = std::exp (x);
+    ig = vd / rgk * std::log1p (e);
+    dIg = e / (1.0 + e) / rgk;
+}
+
+// One common-cathode 12AX7 stage with its input coupling network:
+//
+//   vin --[rsrc]--||cc||-- A --[rs]-- grid        plate --[rp]-- B+
+//                          |           |          cathode --[rk || ck || (rk2 + ck2)]-- gnd
+//                       [ra||caShunt] [rb]        optional rfb: AC plate -> grid feedback
+//                          |           |
+//                         gnd         gnd
+struct TriodeConfig
+{
+    double vb = 320.0;
+    double rsrc = 1.0;     // series resistance before the coupling cap
+    double cc = 0.0;       // coupling cap (0 = DC coupled)
+    double ra = 0.0;       // node A to ground (0 = none)
+    double caShunt = 0.0;  // node A cap to ground (0 = none)
+    double rs = 1000.0;    // node A to grid
+    double rb = 0.0;       // grid to ground (0 = none)
+    double rp = 100e3;
+    double rk = 1.5e3;
+    double ck = 0.0;       // cathode bypass cap (0 = unbypassed)
+    double rk2 = 0.0, ck2 = 0.0; // extra series R-C cathode branch (ck2 = 0 -> none)
+    double rfb = 0.0;      // plate-to-grid feedback resistor (0 = none)
+};
+
+class TriodeStage
+{
+public:
+    void configure (const TriodeConfig& c, double sampleRate)
+    {
+        cfg = c;
+        T = 1.0 / sampleRate;
+        derive();
+        initDC();
+    }
+
+    // vin is the AC input voltage, returns the AC plate voltage (plate - quiescent plate)
+    double process (double vin)
+    {
+        const double alpha = (Gs * (vin - h) + IeqA) / GAtot;
+        const double beta = Grs / GAtot;
+
+        // Newton solve of the 3 node equations (grid, cathode, plate); true when the KCL residual < 1 nA
+        auto newton = [&] (double& g, double& k, double& p, int maxIt)
+        {
+          for (int it = 0; it < maxIt; ++it)
+          {
+            double ip, ipp, ipg, ig, igd;
+            tube.eval (p - k, g - k, ip, ipp, ipg);
+            gridCurrent (g - k, ig, igd);
+
+            const double pac = p - vPdc;
+            const double iGP = Gcgp * (g - p) - IeqGP; // grid-plate (Miller) capacitance
+            const double iGK = Gcgk * (g - k) - IeqGK; // grid-cathode capacitance
+            const double F1 = Grs * (alpha + beta * g - g) - Gb * g - ig + Gfb * (pac - g) - iGP - iGK;
+            const double F2 = ip + ig - (Gk + GcK) * k + IeqK - Gk2 * (k - h2) + iGK;
+            const double F3 = (cfg.vb - p) * Gp - ip - Gfb * (pac - g) + iGP;
+
+            if (std::abs (F1) + std::abs (F2) + std::abs (F3) < 2e-9) // ~0.2 mV on a 100k node
+                return true;
+
+            double J[3][4] = {
+                { Grs * (beta - 1.0) - Gb - igd - Gfb - Gcgp - Gcgk, igd + Gcgk,                                  Gfb + Gcgp,               -F1 },
+                { ipg + igd + Gcgk,                                   -ipg - ipp - igd - Gk - GcK - Gk2 - Gcgk,   ipp,                      -F2 },
+                { -ipg + Gfb + Gcgp,                                  ipg + ipp,                                  -Gp - ipp - Gfb - Gcgp,   -F3 },
+            };
+
+            double d[3];
+            if (! solve3 (J, d))
+                return false;
+
+            d[0] = std::clamp (d[0], -5.0, 5.0);
+            d[1] = std::clamp (d[1], -5.0, 5.0);
+            d[2] = std::clamp (d[2], -50.0, 50.0);
+            g += d[0]; k += d[1]; p += d[2];
+          }
+          return false;
+        };
+
+        // fast path: start from a linear extrapolation of the last two solutions;
+        // fallback: restart from the previous solution with more iterations
+        double g = 2.0 * vG - prevG, k = 2.0 * vK - prevK, p = 2.0 * vP - prevP;
+        if (! newton (g, k, p, 6))
+        {
+            g = vG; k = vK; p = vP;
+            newton (g, k, p, 30);
+        }
+        prevG = vG; prevK = vK; prevP = vP;
+
+        if (! std::isfinite (g + k + p) || p < -50.0 || p > cfg.vb + 50.0)
+        {
+            initDC();
+            return 0.0;
+        }
+
+        vG = g; vK = k; vP = p;
+        vA = alpha + beta * g;
+
+        // update reactive element states (trapezoidal rule)
+        {
+            const double i = Gs * (vin - vA - h);
+            if (cfg.cc > 0.0)
+            {
+                const double vc = h + halfTc * i;
+                h = vc + halfTc * i;
+            }
+        }
+        if (GcA > 0.0) { const double i = GcA * vA - IeqA; IeqA = GcA * vA + i; }
+        if (GcK > 0.0) { const double i = GcK * k - IeqK;  IeqK = GcK * k + i; }
+        {
+            const double vgp = g - p, vgk = g - k;
+            const double iGP = Gcgp * vgp - IeqGP; IeqGP = Gcgp * vgp + iGP;
+            const double iGK = Gcgk * vgk - IeqGK; IeqGK = Gcgk * vgk + iGK;
+        }
+        if (Gk2 > 0.0)
+        {
+            const double i = Gk2 * (k - h2);
+            const double vc = h2 + halfTk2 * i;
+            h2 = vc + halfTk2 * i;
+        }
+
+        return p - vPdc;
+    }
+
+    double getVk() const { return vK; }
+    double getVp() const { return vP; }
+    double getVpDC() const { return vPdc; }
+    const TriodeConfig& getConfig() const { return cfg; }
+
+private:
+    static bool solve3 (double (&m)[3][4], double (&x)[3])
+    {
+        for (int col = 0; col < 3; ++col)
+        {
+            int piv = col;
+            for (int r = col + 1; r < 3; ++r)
+                if (std::abs (m[r][col]) > std::abs (m[piv][col])) piv = r;
+            if (std::abs (m[piv][col]) < 1e-300) return false;
+            if (piv != col)
+                for (int j = 0; j < 4; ++j) std::swap (m[col][j], m[piv][j]);
+
+            for (int r = col + 1; r < 3; ++r)
+            {
+                const double f = m[r][col] / m[col][col];
+                for (int j = col; j < 4; ++j) m[r][j] -= f * m[col][j];
+            }
+        }
+        for (int r = 2; r >= 0; --r)
+        {
+            double s = m[r][3];
+            for (int j = r + 1; j < 3; ++j) s -= m[r][j] * x[j];
+            x[r] = s / m[r][r];
+        }
+        return true;
+    }
+
+    void derive()
+    {
+        halfTc = cfg.cc > 0.0 ? T / (2.0 * cfg.cc) : 0.0;
+        Gs = 1.0 / (std::max (cfg.rsrc, 1.0) + halfTc);
+        Ga = cfg.ra > 0.0 ? 1.0 / cfg.ra : 0.0;
+        GcA = cfg.caShunt > 0.0 ? 2.0 * cfg.caShunt / T : 0.0;
+        Grs = 1.0 / std::max (cfg.rs, 1.0);
+        Gb = cfg.rb > 0.0 ? 1.0 / cfg.rb : 0.0;
+        Gp = 1.0 / cfg.rp;
+        Gk = 1.0 / cfg.rk;
+        GcK = cfg.ck > 0.0 ? 2.0 * cfg.ck / T : 0.0;
+        if (cfg.ck2 > 0.0)
+        {
+            halfTk2 = T / (2.0 * cfg.ck2);
+            Gk2 = 1.0 / (std::max (cfg.rk2, 1.0) + halfTk2);
+        }
+        else
+        {
+            halfTk2 = 0.0;
+            Gk2 = 0.0;
+        }
+        Gfb = cfg.rfb > 0.0 ? 1.0 / cfg.rfb : 0.0;
+        GAtot = Gs + Ga + GcA + Grs;
+        Gcgp = 2.0 * 2.4e-12 / T; // 12AX7 Cgp
+        Gcgk = 2.0 * 2.3e-12 / T; // 12AX7 Cgk
+    }
+
+    // Quiescent point: grid at 0 V, caps open
+    void initDC()
+    {
+        double k = 1.5, p = cfg.vb * 0.6;
+        for (int it = 0; it < 200; ++it)
+        {
+            double ip, dpk, dgk;
+            tube.eval (p - k, -k, ip, dpk, dgk);
+            const double f1 = ip - k * Gk;
+            const double f2 = (cfg.vb - p) * Gp - ip;
+            const double a11 = -(dpk + dgk) - Gk, a12 = dpk;
+            const double a21 = dpk + dgk,         a22 = -Gp - dpk;
+            const double det = a11 * a22 - a12 * a21;
+            if (std::abs (det) < 1e-300) break;
+            const double dk = (-f1 * a22 + a12 * f2) / det;
+            const double dp = (-a11 * f2 + a21 * f1) / det;
+            k += std::clamp (dk, -1.0, 1.0);
+            p += std::clamp (dp, -20.0, 20.0);
+            if (std::abs (dk) + std::abs (dp) < 1e-9) break;
+        }
+        vK = k; vP = p; vPdc = p; vG = 0.0; vA = 0.0;
+        prevG = vG; prevK = vK; prevP = vP;
+        h = 0.0;
+        IeqA = 0.0;
+        IeqK = GcK * vK;
+        h2 = vK;
+        IeqGP = Gcgp * (0.0 - vP);
+        IeqGK = Gcgk * (0.0 - vK);
+    }
+
+    KorenTriode tube;
+    TriodeConfig cfg;
+    double T = 1.0 / 192000.0;
+
+    double Gs = 0, halfTc = 0, Ga = 0, GcA = 0, Grs = 0, Gb = 0, Gp = 0, Gk = 0, GcK = 0;
+    double Gk2 = 0, halfTk2 = 0, Gfb = 0, GAtot = 1, Gcgp = 0, Gcgk = 0;
+
+    double vG = 0, vK = 0, vP = 0, vA = 0, vPdc = 0;
+    double prevG = 0, prevK = 0, prevP = 0;
+    double h = 0, IeqA = 0, IeqK = 0, h2 = 0, IeqGP = 0, IeqGK = 0;
+};
+
+} // namespace vamp_baseline
