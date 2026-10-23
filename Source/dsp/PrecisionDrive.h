@@ -65,20 +65,22 @@ public:
         iLeg = iNew;
 
         // feedback voltage vf: 2Cf/T (vf - vf0) = g(vf) + g0,  g(v) = iLeg - v/Rf - 2 Is sinh(v/nVt)
-        const double k2 = 2.0 * Cf / T;
+        // sinh and cosh from one exp: 2 Is sinh(u) = Is (e - 1/e), 2 Is cosh(u) = Is (e + 1/e)
+        const double k2 = 2.0 * Cf / T, invRf = 1.0 / Rf;
+        constexpr double invNVt = 1.0 / nVt;
         double x = vf;
         for (int it = 0; it < 16; ++it)
         {
-            const double xs = std::clamp (x / nVt, -40.0, 40.0);
-            const double sh = std::sinh (xs), ch = std::cosh (xs);
-            const double F = k2 * (x - vf) - (iLeg - x / Rf - 2.0 * Is * sh) - g0;
-            const double dF = k2 + 1.0 / Rf + 2.0 * Is / nVt * ch;
+            const double e = std::exp (std::clamp (x * invNVt, -40.0, 40.0)), ie = 1.0 / e;
+            const double F = k2 * (x - vf) - (iLeg - x * invRf - Is * (e - ie)) - g0;
+            const double dF = k2 + invRf + Is * invNVt * (e + ie);
             const double dx = std::clamp (-F / dF, -0.1, 0.1);
             x += dx;
             if (std::abs (dx) < 1e-9) break;
         }
         vf = x;
-        g0 = iLeg - vf / Rf - 2.0 * Is * std::sinh (std::clamp (vf / nVt, -40.0, 40.0));
+        const double e = std::exp (std::clamp (vf * invNVt, -40.0, 40.0));
+        g0 = iLeg - vf * invRf - Is * (e - 1.0 / e);
 
         // op-amp output (relative to Vref), limited by the 9 V rails
         const double out1 = std::clamp (v + vf, -3.5, 3.5);

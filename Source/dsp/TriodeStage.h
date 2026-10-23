@@ -166,8 +166,8 @@ public:
     // vin is the AC input voltage, returns the AC plate voltage (plate - quiescent plate)
     double process (double vin)
     {
-        const double alpha = (Gs * (vin - h) + IeqA) / GAtot;
-        const double beta = Grs / GAtot;
+        const double alpha = (Gs * (vin - h) + IeqA) * invGAtot;
+        const double beta = betaA;
 
         // Newton solve of the 3 node equations (grid, cathode, plate); true when the KCL residual < 1 nA
         auto newton = [&] (double& g, double& k, double& p, int maxIt)
@@ -275,8 +275,10 @@ public:
     const TriodeConfig& getConfig() const { return cfg; }
 
 private:
+    // Gaussian elimination with partial pivoting; one division per pivot
     static bool solve3 (double (&m)[3][4], double (&x)[3])
     {
+        double invPivot[3];
         for (int col = 0; col < 3; ++col)
         {
             int piv = col;
@@ -286,9 +288,10 @@ private:
             if (piv != col)
                 for (int j = 0; j < 4; ++j) std::swap (m[col][j], m[piv][j]);
 
+            invPivot[col] = 1.0 / m[col][col];
             for (int r = col + 1; r < 3; ++r)
             {
-                const double f = m[r][col] / m[col][col];
+                const double f = m[r][col] * invPivot[col];
                 for (int j = col; j < 4; ++j) m[r][j] -= f * m[col][j];
             }
         }
@@ -296,7 +299,7 @@ private:
         {
             double s = m[r][3];
             for (int j = r + 1; j < 3; ++j) s -= m[r][j] * x[j];
-            x[r] = s / m[r][r];
+            x[r] = s * invPivot[r];
         }
         return true;
     }
@@ -324,6 +327,8 @@ private:
         }
         Gfb = cfg.rfb > 0.0 ? 1.0 / cfg.rfb : 0.0;
         GAtot = Gs + Ga + GcA + Grs;
+        invGAtot = 1.0 / GAtot;
+        betaA = Grs * invGAtot;
         Gcgp = 2.0 * 2.4e-12 / T; // 12AX7 Cgp
         Gcgk = 2.0 * 2.3e-12 / T; // 12AX7 Cgk
     }
@@ -370,7 +375,7 @@ private:
     double T = 1.0 / 192000.0;
 
     double Gs = 0, halfTc = 0, Ga = 0, GcA = 0, Grs = 0, Gb = 0, Gp = 0, Gk = 0, GcK = 0;
-    double Gk2 = 0, halfTk2 = 0, Gfb = 0, GAtot = 1, Gcgp = 0, Gcgk = 0;
+    double Gk2 = 0, halfTk2 = 0, Gfb = 0, GAtot = 1, invGAtot = 1, betaA = 0, Gcgp = 0, Gcgk = 0;
 
     double vG = 0, vK = 0, vP = 0, vA = 0, vPdc = 0;
     double prevG = 0, prevK = 0, prevP = 0;

@@ -403,8 +403,10 @@ private:
         }
     }
 
+    // Gaussian elimination with partial pivoting; one division per pivot (8 instead of 36)
     static bool solve (double (&m)[8][9], double (&x)[8])
     {
+        double invPivot[8];
         for (int col = 0; col < 8; ++col)
         {
             int piv = col;
@@ -413,9 +415,10 @@ private:
             if (std::abs (m[piv][col]) < 1e-300) return false;
             if (piv != col)
                 for (int j = 0; j < 9; ++j) std::swap (m[col][j], m[piv][j]);
+            invPivot[col] = 1.0 / m[col][col];
             for (int r = col + 1; r < 8; ++r)
             {
-                const double f = m[r][col] / m[col][col];
+                const double f = m[r][col] * invPivot[col];
                 if (f == 0.0) continue;
                 for (int j = col; j < 9; ++j) m[r][j] -= f * m[col][j];
             }
@@ -424,7 +427,7 @@ private:
         {
             double s = m[r][8];
             for (int j = r + 1; j < 8; ++j) s -= m[r][j] * x[j];
-            x[r] = s / m[r][r];
+            x[r] = s * invPivot[r];
         }
         return true;
     }
