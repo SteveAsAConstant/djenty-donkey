@@ -16,7 +16,9 @@
 // edges land a fraction of a sample apart. That shows in the nulls but not in the band levels.
 //
 // Verdicts: "exact" new-base < -100 dB (rounding level); "pass" new err < -60 dB (inaudible);
-// "FIXED" new err < -60 dB while v0.3.0 was worse than -60 dB (e.g. unconverged samples = clicks);
+// "FIXED" new err < -60 dB while v0.3.0 was worse than -60 dB against ref: solver fixes (unconverged samples =
+// clicks, small-signal bias) and, since v0.4, intended model changes (C60 low-pass, speaker damping), which
+// the frozen v0.3.0 DSP does not have. The gate is new vs ref (solver accuracy) and the band levels;
 // "as v0.3" new err no worse than v0.3.0's own error.
 // "FAIL" otherwise, or any band off by 0.5 dB or more. Exit code 1 on any FAIL, so this gates optimizations.
 //
@@ -363,7 +365,7 @@ int main (int argc, char** argv)
     driveCases (short_);
     chainCases (guitar);
 
-    std::printf ("\n%d cases, %d failed, %d fixed (v0.3.0 itself was off by more than -60 dB).\n"
+    std::printf ("\n%d cases, %d failed, %d differ from v0.3.0 by more than -60 dB (solver fixes + v0.4 model changes).\n"
                  "total time baseline %.0f ms, current %.0f ms -> %.2fx\n",
                  cases, failures, fixedCases, timeBase, timeNew, timeBase / std::max (timeNew, 1e-9));
     return failures > 0 ? 1 : 0;

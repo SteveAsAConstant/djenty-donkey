@@ -473,7 +473,7 @@ int main (int argc, char** argv)
     double dbu = 11.5, driveDb = 0.0, preOverride = -1.0;
     bool driveOverride = false;
     std::string wavDir;
-    bool fit = false;
+    bool fit = false, residual = false;
     for (int i = 2; i < argc; ++i)
     {
         const std::string a = argv[i];
@@ -482,6 +482,7 @@ int main (int argc, char** argv)
         else if (a == "--drive-db" && i + 1 < argc) { driveDb = std::atof (argv[++i]); driveOverride = true; }
         else if (a == "--wav" && i + 1 < argc) wavDir = argv[++i];
         else if (a == "--fit") fit = true;
+        else if (a == "--residual") residual = true;
     }
     rig.s = parseSettings (rig.nam.getName());
     rig.voltsPerFS = 0.7746 * std::pow (10.0, dbu / 20.0) * std::sqrt (2.0); // full-scale sine peak
@@ -493,6 +494,33 @@ int main (int argc, char** argv)
     std::printf ("%s\n%s, pre %.1f bass %.1f mid %.1f treble %.1f post %.1f res %.1f pres %.1f | input %.1f dBu -> 1.0 FS = %.2f V\n",
                  rig.nam.getName().c_str(), rig.s.mode == 2 ? "RED" : "BLUE", rig.s.pre * 10, rig.s.bass * 10, rig.s.mid * 10,
                  rig.s.treble * 10, rig.s.post * 10, rig.s.resonance * 10, rig.s.presence * 10, dbu, rig.voltsPerFS);
+
+    if (residual)
+    {
+        // one machine-readable line: dials, then ours - NAM per 1/3-octave band (63 Hz..12.5 kHz),
+        // averaged over the guitar signals after one global level match (for regressions over captures)
+        const auto tests = guitarTests (1.5);
+        const auto ref = makeReference (rig, tests);
+        std::vector<double> sum (ref.bandsNam[0].size(), 0.0);
+        std::vector<double> all;
+        for (size_t ti = 0; ti < tests.size(); ++ti)
+        {
+            const auto bo = bands (rig.ours (sample (tests[ti], rig.rateOurs), preOverride >= 0.0 ? preOverride : rig.s.pre,
+                                             driveCalibrated), rig.rateOurs);
+            for (size_t b = 0; b < bo.size(); ++b)
+            {
+                const double d = 10 * std::log10 (std::max (bo[b], 1e-30) / std::max (ref.bandsNam[ti][b], 1e-30));
+                sum[b] += d / (double) tests.size();
+                all.push_back (d);
+            }
+        }
+        double g = 0; for (double d : all) g += d; g /= (double) all.size();
+        std::printf ("RES %.2f %.2f %.2f %.2f %.2f %.2f", rig.s.pre * 10, rig.s.bass * 10, rig.s.mid * 10, rig.s.treble * 10,
+                     rig.s.presence * 10, rig.s.resonance * 10);
+        for (double s : sum) std::printf (" %.2f", s - g);
+        std::printf ("\n");
+        return 0;
+    }
 
     if (fit)
     {

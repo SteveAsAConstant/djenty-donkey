@@ -83,7 +83,7 @@ Cw o1 o2 2.5n
 Re s sp1 6
 Le sp1 sp2 0.5m
 Rle sp1 sp2 30
-Rm sp2 0 39
+Rm sp2 0 8
 Lm sp2 0 20.7m
 Cm sp2 0 122u
 

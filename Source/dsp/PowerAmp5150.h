@@ -119,6 +119,9 @@ public:
     static constexpr double kRload = 8.0;
     static constexpr double kLmagPrimary = 30.0; // OT magnetizing inductance (H)
     static constexpr double kCwinding = 2.5e-9;  // OT primary shunt capacitance (F)
+    // Resonance damping of the 4x12 load: 6 + 8 ohm peak at ~100 Hz. Fitted to NAM captures through a Suhr
+    // Reactive Load (docs/nam_calibration.md); v0.3 had a 6 + 39 ohm peak, which gave ~2-3 dB too much low end.
+    static constexpr double kSpeakerPeakR = 8.0;
 
     PowerAmp5150()
     {
@@ -168,7 +171,7 @@ public:
         dk.addR (nS, nSp1, 6.0);
         dk.addL (nSp1, nSp2, 0.5e-3);
         dk.addR (nSp1, nSp2, 30.0);
-        dk.addR (nSp2, G, 39.0);
+        dk.addR (nSp2, G, kSpeakerPeakR);
         dk.addL (nSp2, G, 20.7e-3);
         dk.addC (nSp2, G, 122e-6);
 

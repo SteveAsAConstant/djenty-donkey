@@ -85,6 +85,7 @@ public:
         leadNet.prepare (fs);
         rhythmNet.prepare (fs);
         toneStack.prepare (fs);
+        cfLp = cfLpY = 0.0;
         configureStages();
 
         // let coupling / cathode caps settle
@@ -155,6 +156,14 @@ public:
             }
         }
 
+        {
+            // R89 470k + the driving plate's output impedance into C60 at the V3B cathode-follower grid:
+            // first-order low-pass (bilinear). C60 is effective 60 pF: fitted to NAM captures of a real 6505
+            // (docs/nam_calibration.md); the schematic notes list 100 pF, its exact placement is unclear.
+            const double rc = (kR89 + (mode == Clean ? kRoutV1B : kRoutV5A)) * kC60, k = 2.0 * fs * rc;
+            const double y = (x + cfLp - (1.0 - k) * cfLpY) / (1.0 + k);
+            cfLp = x; cfLpY = y; x = y;
+        }
         lastPreampOut = x;
         return toneStack.process (x, 1) * postGain;
     }
@@ -215,11 +224,14 @@ private:
     static constexpr double kRoutV2A = 100e3 * (62e3 + 101 * 39e3) / (100e3 + 62e3 + 101 * 39e3);
     static constexpr double kRoutV2B = 220e3 * 62e3 / (220e3 + 62e3);
     static constexpr double kRoutV5B = 220e3 * (62e3 + 101 * 2.2e3) / (220e3 + 62e3 + 101 * 2.2e3);
+    static constexpr double kRoutV5A = 100e3 * (62e3 + 101 * 2.2e3) / (100e3 + 62e3 + 101 * 2.2e3);
+    static constexpr double kR89 = 470e3, kC60 = 60e-12;
 
     double fs = 192000.0;
     int mode = Red;
     double postGain = 0.1;
     double lastPreampOut = 0.0;
+    double cfLp = 0.0, cfLpY = 0.0;
 
     LinearNetwork<4> leadNet;
     LinearNetwork<5> rhythmNet;
