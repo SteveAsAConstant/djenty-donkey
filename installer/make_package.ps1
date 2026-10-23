@@ -4,7 +4,7 @@ $ErrorActionPreference = "Stop"
 Add-Type -AssemblyName System.IO.Compression
 Add-Type -AssemblyName System.IO.Compression.FileSystem
 
-$version  = "0.2.1"
+$version  = "0.3.0"
 $root     = Split-Path -Parent $PSScriptRoot
 $build    = Join-Path $env:USERPROFILE "vab-build\DjentyDonkey_artefacts\Release"
 $dist     = Join-Path $root "dist"

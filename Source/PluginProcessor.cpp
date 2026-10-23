@@ -18,7 +18,7 @@ VibeAmpProcessor::VibeAmpProcessor()
     pInGain = get (ids::inGain);
     pGateOn = get (ids::gateOn); pGateThresh = get (ids::gateThresh); pGateRelease = get (ids::gateRelease);
     pGateLow = get (ids::gateLow); pGateMid = get (ids::gateMid); pGateHigh = get (ids::gateHigh);
-    pTranspose = get (ids::transpose);
+    pTranspose = get (ids::transpose); pTransposeMode = get (ids::transposeMode);
     pCompOn = get (ids::compOn); pCompThresh = get (ids::compThresh); pCompRatio = get (ids::compRatio);
     pCompAttack = get (ids::compAttack); pCompRelease = get (ids::compRelease); pCompMakeup = get (ids::compMakeup);
     pBoostOn = get (ids::boostOn); pBoostDrive = get (ids::boostDrive); pBoostTone = get (ids::boostTone);
@@ -86,7 +86,11 @@ void VibeAmpProcessor::prepareToPlay (double sampleRate, int samplesPerBlock)
     delay.prepare (sampleRate);
     reverb.prepare (stereoSpec);
 
-    setLatencySamples (amp.getLatencySamples());
+    keyDelayBuf.assign (16384, 0.0f);
+    keyDelayPos = 0;
+
+    targetLatency = amp.getLatencySamples() + shifter.getReportedLatency();
+    setLatencySamples (targetLatency.load());
 }
 
 void VibeAmpProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::MidiBuffer&)
@@ -109,7 +113,17 @@ void VibeAmpProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Mid
     gateSettings.depth[1] = pGateMid->load() * 0.01f;
     gateSettings.depth[2] = pGateHigh->load() * 0.01f;
 
-    shifter.setSemitones (juce::roundToInt (pTranspose->load()));
+    shifter.setParams (juce::roundToInt (pTranspose->load()), juce::roundToInt (pTransposeMode->load()));
+    keyDelay = juce::jlimit (0, (int) keyDelayBuf.size() - 1,
+                             juce::roundToInt (pTransposeMode->load()) == vamp::PitchShifter::HQ ? shifter.getAverageDelay() : 0);
+
+    // HQ transpose adds a fixed latency: report it to the host (on the message thread)
+    const int latency = amp.getLatencySamples() + shifter.getReportedLatency();
+    if (latency != targetLatency.load())
+    {
+        targetLatency = latency;
+        triggerAsyncUpdate();
+    }
 
     compOn = pCompOn->load() > 0.5f;
     comp.setThreshold (pCompThresh->load());
@@ -189,7 +203,17 @@ void VibeAmpProcessor::processChunk (juce::AudioBuffer<float>& buffer, int start
     // ---- pre-amp: input -> transpose -> comp ----
     inputGain.process (monoCtx);
     updatePeak (inputPeak, monoBuf.getMagnitude (0, 0, len)); // what the amp sees (after the Input knob)
-    keyBuf.copyFrom (0, 0, monoBuf, 0, 0, len);               // clean guitar = noise gate detector key
+    {
+        // clean guitar = noise gate detector key, delayed to line up with the transposed signal
+        float* key = keyBuf.getWritePointer (0);
+        const int mask = (int) keyDelayBuf.size() - 1;
+        for (int i = 0; i < len; ++i)
+        {
+            keyDelayBuf[(size_t) keyDelayPos] = mono[i];
+            key[i] = keyDelayBuf[(size_t) ((keyDelayPos - keyDelay) & mask)];
+            keyDelayPos = (keyDelayPos + 1) & mask;
+        }
+    }
     shifter.process (mono, len);
     if (compOn)
     {

@@ -7,6 +7,7 @@
 #include <string>
 #include <vector>
 #include "dsp/MultibandGate.h"
+#include "dsp/PitchShifter.h"
 #include "dsp/PowerAmp5150.h"
 #include "dsp/Preamp5150.h"
 #include "dsp/PrecisionDrive.h"
@@ -296,6 +297,127 @@ static void powerAmpDebug (double amp)
     }
 }
 
+// The v0.2 transpose algorithm (blind two-tap crossfade), kept here for comparison
+struct LegacyShifter
+{
+    std::vector<float> buf; int mask = 0, w = 0; float window = 2400, phase = 0, ratio = 1;
+    void prepare (double f, int semis)
+    {
+        window = (float) (f * 0.05); int size = 1; while (size < (int) window * 2 + 16) size <<= 1;
+        buf.assign ((size_t) size, 0.0f); mask = size - 1; ratio = std::pow (2.0f, semis / 12.0f);
+    }
+    float read (float d) const
+    {
+        float rp = (float) w - d; while (rp < 0) rp += (float) (mask + 1);
+        const int i0 = (int) rp; const float fr = rp - i0;
+        return buf[(size_t) (i0 & mask)] + fr * (buf[(size_t) ((i0 + 1) & mask)] - buf[(size_t) (i0 & mask)]);
+    }
+    float process (float x)
+    {
+        buf[(size_t) w] = x;
+        phase += (1.0f - ratio) / window; phase -= std::floor (phase);
+        float p2 = phase + 0.5f; if (p2 >= 1.0f) p2 -= 1.0f;
+        const float g1 = std::sin ((float) kPi * phase), g2 = std::sin ((float) kPi * p2);
+        const float y = g1 * g1 * read (phase * window + 2) + g2 * g2 * read (p2 * window + 2);
+        w = (w + 1) & mask; return y;
+    }
+};
+
+static void transposeTests()
+{
+    constexpr double tfs = 48000.0;
+    const int n = (int) (tfs * 2.0);
+
+    auto run = [&] (int algo, int semis, const std::vector<float>& in)
+    {
+        std::vector<float> out (in);
+        if (algo == 0)
+        {
+            LegacyShifter s; s.prepare (tfs, semis);
+            for (auto& v : out) v = s.process (v);
+        }
+        else
+        {
+            PitchShifter s; s.prepare (tfs); s.setParams (semis, algo == 1 ? PitchShifter::Live : PitchShifter::HQ);
+            for (int i = 0; i < n; i += 256) s.process (out.data() + i, std::min (256, n - i));
+        }
+        return out;
+    };
+
+    auto measureFreq = [&] (const std::vector<float>& y)
+    {
+        // rising zero crossings with linear interpolation over the last second
+        double first = -1, last = -1; int count = 0;
+        for (int i = n / 2 + 1; i < n; ++i)
+            if (y[(size_t) i - 1] < 0 && y[(size_t) i] >= 0)
+            {
+                const double t = (i - 1) + y[(size_t) i - 1] / (y[(size_t) i - 1] - y[(size_t) i]);
+                if (first < 0) first = t; else ++count;
+                last = t;
+            }
+        return count > 0 ? count * tfs / (last - first) : 0.0;
+    };
+
+    auto warble = [&] (const std::vector<float>& y, double winSec)
+    {
+        const int win = (int) (tfs * winSec);
+        double mn = 1e9, mx = -1e9;
+        for (int s = n / 2; s + win <= n; s += win)
+        {
+            double sq = 0; for (int i = s; i < s + win; ++i) sq += (double) y[(size_t) i] * y[(size_t) i];
+            const double db = 10.0 * std::log10 (sq / win + 1e-20);
+            mn = std::min (mn, db); mx = std::max (mx, db);
+        }
+        return mx - mn;
+    };
+
+    const char* names[] = { "legacy", "LIVE  ", "HQ    " };
+    std::vector<float> sine ((size_t) n), chord ((size_t) n);
+    for (int i = 0; i < n; ++i)
+    {
+        const double t = i / tfs;
+        sine[(size_t) i] = (float) (0.5 * std::sin (2 * kPi * 110.0 * t));
+        chord[(size_t) i] = (float) (0.25 * (std::sin (2 * kPi * 110.0 * t) + std::sin (2 * kPi * 164.81 * t)
+                                             + std::sin (2 * kPi * 220.0 * t) + 0.5 * std::sin (2 * kPi * 277.18 * t)));
+    }
+
+    std::printf ("\n== transpose: pitch of a 110 Hz sine (expected Hz in brackets) ==\n");
+    for (int semis : { -2, -5, -12, 5, 12 })
+    {
+        std::printf ("%+3d st [%7.2f]:", semis, 110.0 * std::pow (2.0, semis / 12.0));
+        for (int a = 0; a < 3; ++a) std::printf ("  %s %7.2f", names[a], measureFreq (run (a, semis, sine)));
+        std::printf ("\n");
+    }
+
+    std::printf ("\n== transpose: measured latency (onset of a 220 Hz tone at 0.5 s, -2 st) ==\n");
+    {
+        std::vector<float> burst ((size_t) n, 0.0f);
+        for (int i = n / 4; i < n; ++i) burst[(size_t) i] = (float) (0.5 * std::sin (2 * kPi * 220.0 * i / tfs));
+        for (int a = 1; a < 3; ++a)
+        {
+            const auto y = run (a, -2, burst);
+            int onset = -1;
+            for (int i = n / 4; i < n && onset < 0; ++i)
+                if (std::abs (y[(size_t) i]) > 0.25f) onset = i;
+            PitchShifter s; s.prepare (tfs); s.setParams (-2, a == 1 ? PitchShifter::Live : PitchShifter::HQ);
+            std::printf ("%s: first output at +%.1f ms (reported latency %d samples = %.1f ms, avg delay %.1f ms)\n",
+                         names[a], (onset - n / 4) * 1000.0 / tfs, s.getReportedLatency(),
+                         s.getReportedLatency() * 1000.0 / tfs, s.getAverageDelay() * 1000.0 / tfs);
+        }
+    }
+
+    std::printf ("\n== transpose: warble = RMS fluctuation in dB (lower is smoother) ==\n");
+    std::printf ("unshifted reference: sine %.2f dB, chord %.2f dB\n", warble (sine, 0.010), warble (chord, 0.040));
+    for (int semis : { -2, -5, -12 })
+    {
+        std::printf ("%+3d st sine :", semis);
+        for (int a = 0; a < 3; ++a) std::printf ("  %s %5.2f dB", names[a], warble (run (a, semis, sine), 0.010));
+        std::printf ("\n%+3d st chord:", semis);
+        for (int a = 0; a < 3; ++a) std::printf ("  %s %5.2f dB", names[a], warble (run (a, semis, chord), 0.040));
+        std::printf ("\n");
+    }
+}
+
 static void chainLevels()
 {
     std::printf ("\n== full chain: speaker V rms (gain 6, tone 5/5/6, pres/res 5), guitar-ish 0.2 V chord ==\n");
@@ -329,6 +451,7 @@ static void chainLevels()
 int main (int argc, char** argv)
 {
     if (argc > 1 && std::string (argv[1]) == "chain") { chainLevels(); return 0; }
+    if (argc > 1 && std::string (argv[1]) == "transpose") { transposeTests(); return 0; }
     if (argc > 1 && std::string (argv[1]) == "power") { powerAmpTests(); return 0; }
     if (argc > 2 && std::string (argv[1]) == "pdebug") { powerAmpDebug (std::atof (argv[2])); return 0; }
     gateTests();

@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.22)
-project(DjentyDonkey VERSION 0.2.1)
+project(DjentyDonkey VERSION 0.3.0)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -24,7 +24,7 @@ if(WIN32)
 endif()
 
 juce_add_plugin(DjentyDonkey
-    VERSION 0.2.1
+    VERSION 0.3.0
     COMPANY_NAME "Djenty Donkey"
     PLUGIN_MANUFACTURER_CODE Djdk
     PLUGIN_CODE Djdn

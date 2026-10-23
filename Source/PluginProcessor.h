@@ -7,7 +7,8 @@
 #include "dsp/PitchShifter.h"
 #include "dsp/StereoDelay.h"
 
-class VibeAmpProcessor : public juce::AudioProcessor
+class VibeAmpProcessor : public juce::AudioProcessor,
+                         private juce::AsyncUpdater
 {
 public:
     VibeAmpProcessor();
@@ -54,11 +55,13 @@ public:
 
 private:
     void processChunk (juce::AudioBuffer<float>& buffer, int start, int len, int numIn, int numOut);
+    void handleAsyncUpdate() override { setLatencySamples (targetLatency.load()); }
 
     // cached parameter pointers
     std::atomic<float>* pInGain {}; std::atomic<float>* pGateOn {}; std::atomic<float>* pGateThresh {};
     std::atomic<float>* pGateRelease {}; std::atomic<float>* pTranspose {};
     std::atomic<float>* pGateLow {}; std::atomic<float>* pGateMid {}; std::atomic<float>* pGateHigh {};
+    std::atomic<float>* pTransposeMode {};
     std::atomic<float>* pCompOn {}; std::atomic<float>* pCompThresh {}; std::atomic<float>* pCompRatio {};
     std::atomic<float>* pCompAttack {}; std::atomic<float>* pCompRelease {}; std::atomic<float>* pCompMakeup {};
     std::atomic<float>* pBoostOn {}; std::atomic<float>* pBoostDrive {}; std::atomic<float>* pBoostTone {};
@@ -105,6 +108,11 @@ private:
         while (value > prev && ! target.compare_exchange_weak (prev, value)) {}
     }
 
+    // noise-gate key delay (aligns the key with the transposed signal in HQ mode)
+    std::vector<float> keyDelayBuf;
+    int keyDelayPos = 0, keyDelay = 0;
+
+    std::atomic<int> targetLatency { 0 };
     std::atomic<float> inputPeak { 0.0f }, outputPeak { 0.0f };
     std::atomic<float> gateBandGain[3] { { 1.0f }, { 1.0f }, { 1.0f } };
     std::atomic<bool> irLoaded { false };

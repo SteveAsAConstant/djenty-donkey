@@ -1,10 +1,10 @@
-﻿Djenty Donkey 0.2.1 —— 高增益吉他箱头插件（Windows 64 位）
+﻿Djenty Donkey 0.3.0 —— 高增益吉他箱头插件（Windows 64 位）
 ==========================================================
 
 一、安装（二选一）
 ------------------
 A. 安装版（推荐）
-   1. 双击 DjentyDonkey-Setup-0.2.1.exe
+   1. 双击 DjentyDonkey-Setup-0.3.0.exe
    2. 如果弹出“Windows 已保护你的电脑”：点“更多信息”→“仍要运行”
       （这个程序没有购买数字签名证书，所以 Windows 会提示，属于正常现象）
    3. 一路下一步。默认会：
@@ -30,12 +30,18 @@ INPUT        输入电平 + 电平表
              调法：用力扫弦，让电平表的峰值落在绿色区域（-18 ~ -6 dB）
              超过绿色区域：调低 Input；够不到：调高 Input
              顶部红灯亮 = 输入过载（点一下电平表可以复位）
-GATE         噪声门
+3-BAND GATE  3 段噪声门：Thresh 关门阈值，Release 释放时间
+             Low / Mid / High = 各频段降噪深度（高频关得早、低频保留延音）
+             Bands 指示每段当前的开合状态
 TRANSPOSE    移调 ±12 半音（降调弹奏用）
+             LIVE：低延迟（约 6~15ms），现场弹奏用
+             HQ：和弦最干净，约 43ms 延迟（DAW 会自动补偿），录音用
 COMPRESSOR   压缩
 PRECISION DRIVE  前级 Drive（基于 Precision Drive 电路）
              经典用法：Drive 0、Volume 8~10、Attack 2~3 → 收紧低频
-DONKEY HEAD  箱头：CLEAN / BLUE / RED 三通道（5150 / 6505 元件级模拟）
+DONKEY HEAD  箱头：CLEAN / BLUE / RED 三通道（5150 / 6505 元件级模拟，含功放）
+             Master 推功放：1~2 功放干净，3 左右开始饱和，5 以上完全饱和
+             Presence / Resonance 是功放负反馈电路，调高频 / 低频的'松紧'
 CABINET IR   点 LOAD IR 选 .wav 箱体 IR，或者把文件直接拖进去
              < > 切换同文件夹的上一个/下一个 IR，BUILT-IN 回到内置箱体
 10-BAND EQ   十段均衡

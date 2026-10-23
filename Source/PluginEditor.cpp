@@ -118,6 +118,9 @@ VibeAmpEditor::VibeAmpEditor (VibeAmpProcessor& p) : AudioProcessorEditor (&p), 
 
     pitchSec = std::make_unique<Section> ("TRANSPOSE", colours::purple);
     pitchSec->add<Knob> (s, ids::transpose, "Semitones", colours::purple);
+    pitchSec->add<ChoiceButtons> (s, ids::transposeMode, "Mode", juce::StringArray { "LIVE", "HQ" }, colours::purple)
+        ->setTooltip ("LIVE: ~6-15 ms latency, for playing.  HQ: ~43 ms latency (compensated in DAWs), "
+                      "smoothest chords, for recording.");
 
     compSec = std::make_unique<Section> ("COMPRESSOR", colours::yellow, &s, ids::compOn);
     compSec->add<Knob> (s, ids::compThresh, "Thresh", colours::yellow);
@@ -245,7 +248,7 @@ void VibeAmpEditor::resized()
     auto row3 = b.removeFromTop (juce::roundToInt (h * 0.27f)); b.removeFromTop (gap);
     auto row4 = b;
 
-    layoutRow (row1, { { inSec.get(), 2.0f }, { gateSec.get(), 6.0f }, { pitchSec.get(), 1.4f },
+    layoutRow (row1, { { inSec.get(), 2.0f }, { gateSec.get(), 6.0f }, { pitchSec.get(), 2.2f },
                        { compSec.get(), 5.0f } });
     layoutRow (row2, { { boostSec.get(), 4.0f }, { ampSec.get(), 8.5f } });
     layoutRow (row3, { { cabSec.get(), 3.0f }, { eqSec.get(), 7.0f } });

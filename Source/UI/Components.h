@@ -426,6 +426,64 @@ private:
 };
 
 // ---------------------------------------------------------------------------
+// Vertical stack of radio buttons bound to a choice parameter.
+class ChoiceButtons : public juce::Component, public juce::SettableTooltipClient
+{
+public:
+    ChoiceButtons (APVTS& state, const juce::String& paramID, const juce::String& title,
+                   const juce::StringArray& labels, juce::Colour accent)
+    {
+        static int nextGroup = 1000;
+        const int group = ++nextGroup;
+
+        label.setText (title, juce::dontSendNotification);
+        label.setJustificationType (juce::Justification::centred);
+        label.setFont (font (12.0f, true));
+        addAndMakeVisible (label);
+
+        for (int i = 0; i < labels.size(); ++i)
+        {
+            auto* b = buttons.add (new juce::TextButton (labels[i]));
+            b->setClickingTogglesState (true);
+            b->setRadioGroupId (group);
+            b->setColour (juce::TextButton::buttonOnColourId, accent);
+            b->onClick = [this, i]
+            {
+                if (buttons[i]->getToggleState() && attachment != nullptr)
+                    attachment->setValueAsCompleteGesture ((float) i);
+            };
+            addAndMakeVisible (b);
+        }
+
+        if (auto* param = state.getParameter (paramID))
+        {
+            attachment = std::make_unique<juce::ParameterAttachment> (*param, [this] (float v)
+            {
+                const int idx = juce::jlimit (0, buttons.size() - 1, juce::roundToInt (v));
+                buttons[idx]->setToggleState (true, juce::dontSendNotification);
+            });
+            attachment->sendInitialUpdate();
+        }
+    }
+
+    void resized() override
+    {
+        auto b = getLocalBounds();
+        label.setBounds (b.removeFromTop (16));
+        b = b.reduced (4, 6);
+        const int h = juce::jmin (30, b.getHeight() / juce::jmax (1, buttons.size()));
+        b = b.withSizeKeepingCentre (b.getWidth(), h * buttons.size());
+        for (auto* btn : buttons)
+            btn->setBounds (b.removeFromTop (h).reduced (0, 2));
+    }
+
+private:
+    juce::Label label;
+    juce::OwnedArray<juce::TextButton> buttons;
+    std::unique_ptr<juce::ParameterAttachment> attachment;
+};
+
+// ---------------------------------------------------------------------------
 class ChannelSelector : public juce::Component
 {
 public:

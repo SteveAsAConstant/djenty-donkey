@@ -32,11 +32,13 @@ Input ─ Gate ─ Transpose ─ Compressor ─┬─ [4x oversampled] ───
 | **Channels** | **RED** = 5150 lead (V1A→V1B→V2A→V2B→V5B→V5A). **BLUE** = rhythm with crunch. **CLEAN** = 6505 rhythm, *optimized*: bypasses V2A–V5A for headroom (not in the original amp). |
 | **Tone stack** | Marshall-style TMB solved by nodal analysis, matches LTspice within 0.01 dB. |
 | **Precision Drive** | Op-amp + 1N4148 clipper solved per sample; 8-position *Attack* cap switch (33n–470n) for tightness. Based on the public PedalPCB "Dwarven Hammer" build doc. |
-| **Power amp** | Simplified for now (presence/resonance + push-pull saturation). Component-level PI + 6L6 is on the roadmap. |
+| **Power amp** | V3A recovery + long-tail-pair phase inverter + 2×2 6L6GC push-pull + output transformer + 4×12 speaker impedance, solved simultaneously with a nodal DK solver. Presence and Resonance are the real NFB-loop parts (VR9/C8, VR8/C12). Supply sag, flyback diodes, grid current. Matches LTspice within ~0.5 dB small-signal and ~1 % at clipping. |
 | **Cab** | Load any `.wav` IR (drag & drop, prev/next in folder) or use the built-in cab. |
+| **3-band gate** | Keyed by the clean input, applied after the amp on LR4 bands (300 Hz / 3 kHz): highs close first/fastest/deepest (kills hiss), lows last/slowest/shallowest (keeps the sustain). |
+| **Transpose** | *LIVE*: waveform-aligned WSOLA, ~6 ms attack latency. *HQ*: phase-vocoder time-stretch + resampling with identity phase locking and transient phase reset, ~43 ms (reported to the host). Both accurate to a few cents. |
 
-Validation against LTspice: [docs/spice_reference_lead.md](docs/spice_reference_lead.md).
-Circuit notes: [docs/5150_schematic_notes.md](docs/5150_schematic_notes.md), [docs/precision_drive.md](docs/precision_drive.md).
+Validation against LTspice: [docs/spice_reference_lead.md](docs/spice_reference_lead.md), [docs/power_amp.md](docs/power_amp.md).
+Circuit notes: [docs/5150_schematic_notes.md](docs/5150_schematic_notes.md), [docs/precision_drive.md](docs/precision_drive.md), [docs/gate_and_transpose.md](docs/gate_and_transpose.md).
 
 ## Setting the input level
 
@@ -77,11 +79,12 @@ installer/              Inno Setup script + packaging
 
 ## Roadmap
 
-- [ ] Component-level phase inverter + 4×6L6 power amp with NFB, sag and output transformer
+- [x] Component-level phase inverter + 4×6L6 power amp with NFB, sag and output transformer
+- [x] 3-band noise gate
+- [x] LIVE / HQ pitch shifter
 - [ ] Cathode follower (V3B) compression
-- [ ] CPU optimisation (lookup tables, fewer Newton iterations)
+- [ ] CPU: "eco" mode (lower oversampling for the power amp)
 - [ ] Preset browser
-- [ ] Better pitch shifter for chords
 
 ## License
 
