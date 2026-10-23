@@ -78,3 +78,10 @@ target_include_directories(tone_regress PRIVATE Source tests)
 # Comparison against a NAM capture of a real amp (pass the .nam file; captures are not redistributed)
 add_executable(nam_compare tests/nam_compare.cpp)
 target_include_directories(nam_compare PRIVATE Source)
+
+# The plugin's real amp path (JUCE oversampling) vs an alias-free reference and a NAM capture
+juce_add_console_app(amp_path_test PRODUCT_NAME "amp_path_test")
+target_sources(amp_path_test PRIVATE tests/amp_path_test.cpp)
+target_include_directories(amp_path_test PRIVATE Source tests)
+target_compile_definitions(amp_path_test PRIVATE JUCE_WEB_BROWSER=0 JUCE_USE_CURL=0)
+target_link_libraries(amp_path_test PRIVATE juce::juce_dsp juce::juce_recommended_config_flags)
