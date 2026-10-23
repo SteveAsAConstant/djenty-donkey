@@ -30,6 +30,10 @@ INPUT        输入电平 + 电平表
              调法：用力扫弦，让电平表的峰值落在绿色区域（-18 ~ -6 dB）
              超过绿色区域：调低 Input；够不到：调高 Input
              顶部红灯亮 = 输入过载（点一下电平表可以复位）
+预设栏       右上角：下拉选择预设，< > 切换，SAVE 保存，DELETE 删除自己的预设
+             FOLDER 打开预设文件夹（文档\Djenty Donkey\Presets，.xml 文件可以直接发给朋友）
+INPUT GATE   输入门（默认关）：放在箱头前，让闷音 chug 之间完全安静
+             Release = 完全关闭需要的时间，10~20ms 最'断'
 3-BAND GATE  3 段噪声门：Thresh 关门阈值，Release 释放时间
              Low / Mid / High = 各频段降噪深度（高频关得早、低频保留延音）
              Bands 指示每段当前的开合状态
@@ -41,6 +45,8 @@ PRECISION DRIVE  前级 Drive（基于 Precision Drive 电路）
              经典用法：Drive 0、Volume 8~10、Attack 2~3 → 收紧低频
 DONKEY HEAD  箱头：CLEAN / BLUE / RED 三通道（5150 / 6505 元件级模拟，含功放）
              Master 推功放：1~2 功放干净，3 左右开始饱和，5 以上完全饱和
+             Volume 在功放之后只调音量不改音色（相当于衰减器）：
+             Master 推到喜欢的饱和度，再用 Volume 把音量降下来
              Presence / Resonance 是功放负反馈电路，调高频 / 低频的'松紧'
 CABINET IR   点 LOAD IR 选 .wav 箱体 IR，或者把文件直接拖进去
              < > 切换同文件夹的上一个/下一个 IR，BUILT-IN 回到内置箱体
