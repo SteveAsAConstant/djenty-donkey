@@ -113,7 +113,7 @@ inline juce::AudioProcessorValueTreeState::ParameterLayout createParameterLayout
     layout.add (makeFloat (ids::treble, "Treble", 0.0f, 10.0f, 6.0f));
     layout.add (makeFloat (ids::presence, "Presence", 0.0f, 10.0f, 5.0f));
     layout.add (makeFloat (ids::resonance, "Resonance", 0.0f, 10.0f, 5.0f));
-    layout.add (makeFloat (ids::master, "Master", 0.0f, 10.0f, 5.0f));
+    layout.add (makeFloat (ids::master, "Master", 0.0f, 10.0f, 3.0f));
 
     layout.add (makeBool (ids::cabOn, "Cab On", true));
 

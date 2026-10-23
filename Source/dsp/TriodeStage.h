@@ -28,7 +28,7 @@ struct KorenTriode
         const double E = vpk / kp * sp;
         if (E <= 0.0) { ip = 0.0; dVpk = 0.0; dVgk = 0.0; return; }
 
-        const double Ep = std::pow (E, ex - 1.0);
+        const double Ep = std::exp ((ex - 1.0) * std::log (E)); // == pow (E, ex - 1), faster
         ip = 2.0 * Ep * E / kg1;
         const double dIdE = 2.0 * ex * Ep / kg1;
         dVgk = dIdE * (vpk * sig / s);
@@ -88,10 +88,11 @@ public:
         const double alpha = (Gs * (vin - h) + IeqA) / GAtot;
         const double beta = Grs / GAtot;
 
-        double g = vG, k = vK, p = vP;
-
-        for (int it = 0; it < 12; ++it)
+        // Newton solve of the 3 node equations (grid, cathode, plate); true when the KCL residual < 1 nA
+        auto newton = [&] (double& g, double& k, double& p, int maxIt)
         {
+          for (int it = 0; it < maxIt; ++it)
+          {
             double ip, ipp, ipg, ig, igd;
             tube.eval (p - k, g - k, ip, ipp, ipg);
             gridCurrent (g - k, ig, igd);
@@ -103,6 +104,9 @@ public:
             const double F2 = ip + ig - (Gk + GcK) * k + IeqK - Gk2 * (k - h2) + iGK;
             const double F3 = (cfg.vb - p) * Gp - ip - Gfb * (pac - g) + iGP;
 
+            if (std::abs (F1) + std::abs (F2) + std::abs (F3) < 2e-9) // ~0.2 mV on a 100k node
+                return true;
+
             double J[3][4] = {
                 { Grs * (beta - 1.0) - Gb - igd - Gfb - Gcgp - Gcgk, igd + Gcgk,                                  Gfb + Gcgp,               -F1 },
                 { ipg + igd + Gcgk,                                   -ipg - ipp - igd - Gk - GcK - Gk2 - Gcgk,   ipp,                      -F2 },
@@ -111,18 +115,27 @@ public:
 
             double d[3];
             if (! solve3 (J, d))
-                break;
+                return false;
 
             d[0] = std::clamp (d[0], -5.0, 5.0);
             d[1] = std::clamp (d[1], -5.0, 5.0);
             d[2] = std::clamp (d[2], -50.0, 50.0);
             g += d[0]; k += d[1]; p += d[2];
+          }
+          return false;
+        };
 
-            if (std::abs (d[0]) + std::abs (d[1]) + std::abs (d[2]) < 1e-6)
-                break;
+        // fast path: start from a linear extrapolation of the last two solutions;
+        // fallback: restart from the previous solution with more iterations
+        double g = 2.0 * vG - prevG, k = 2.0 * vK - prevK, p = 2.0 * vP - prevP;
+        if (! newton (g, k, p, 6))
+        {
+            g = vG; k = vK; p = vP;
+            newton (g, k, p, 30);
         }
+        prevG = vG; prevK = vK; prevP = vP;
 
-        if (! std::isfinite (g + k + p))
+        if (! std::isfinite (g + k + p) || p < -50.0 || p > cfg.vb + 50.0)
         {
             initDC();
             return 0.0;
@@ -237,6 +250,7 @@ private:
             if (std::abs (dk) + std::abs (dp) < 1e-9) break;
         }
         vK = k; vP = p; vPdc = p; vG = 0.0; vA = 0.0;
+        prevG = vG; prevK = vK; prevP = vP;
         h = 0.0;
         IeqA = 0.0;
         IeqK = GcK * vK;
@@ -253,6 +267,7 @@ private:
     double Gk2 = 0, halfTk2 = 0, Gfb = 0, GAtot = 1, Gcgp = 0, Gcgk = 0;
 
     double vG = 0, vK = 0, vP = 0, vA = 0, vPdc = 0;
+    double prevG = 0, prevK = 0, prevP = 0;
     double h = 0, IeqA = 0, IeqK = 0, h2 = 0, IeqGP = 0, IeqGK = 0;
 };
 

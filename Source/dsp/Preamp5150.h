@@ -9,6 +9,10 @@ namespace vamp
 // Audio-taper (log) pot: 50% rotation -> ~10% resistance
 inline double taperA (double x) { return (std::pow (10.0, 2.0 * x) - 1.0) / 99.0; }
 
+// Master (post-gain) pot: 60 dB log taper so the whole rotation is usable. The real 5150 post
+// pot reaches full power-amp saturation at ~1-2 on the dial; this spreads that over 0..10.
+inline double masterTaper (double x) { return x <= 0.0 ? 0.0 : std::pow (10.0, 3.0 * (x - 1.0)) * std::min (1.0, x * 20.0); }
+
 // Component-level model of the EVH 5150 / 6505 preamp + tone stack.
 // Designators refer to docs/5150_schematic_notes.md.
 //
@@ -87,7 +91,7 @@ public:
         setPreGainPot (taperA (preGain));
         setToneStackRaw (std::clamp (treble, 0.0, 1.0), std::clamp (mid, 0.0, 1.0),
                          taperA (std::clamp (bass, 0.0, 1.0)));
-        postGain = taperA (std::clamp (post, 0.0, 1.0));
+        postGain = masterTaper (std::clamp (post, 0.0, 1.0));
     }
 
     // raw pot fractions (treble wiper from bottom, mid / bass rheostat fraction)

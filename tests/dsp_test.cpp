@@ -3,8 +3,11 @@
 #include <chrono>
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
+#include <string>
 #include <vector>
 #include "dsp/MultibandGate.h"
+#include "dsp/PowerAmp5150.h"
 #include "dsp/Preamp5150.h"
 #include "dsp/PrecisionDrive.h"
 
@@ -185,9 +188,151 @@ static void gateTests()
                      20.0 * std::log10 (g.getBandGain (b) + 1e-9));
 }
 
-int main()
+// amplitude (peak) of the speaker voltage for a sine at the master-pot node
+static long long gIter = 0, gSamples = 0, gFail = 0;
+
+static double powerAmpPeak (double presence, double resonance, double freq, double amp, double seconds = 0.25)
 {
+    PowerAmp5150 pa;
+    pa.setControls (presence, resonance);
+    pa.prepare (fs);
+    pa.statSamples = pa.statIterations = pa.statFailures = 0;
+    struct Acc { PowerAmp5150& p; ~Acc() { gIter += p.statIterations; gSamples += p.statSamples; gFail += p.statFailures; } } acc { pa };
+    Stat o;
+    const int n = (int) (fs * seconds), from = n - (int) (fs * 0.05);
+    for (int i = 0; i < n; ++i)
+    {
+        const double y = pa.process (amp * std::sin (2.0 * kPi * freq * i / fs));
+        if (i >= from) o.add (y);
+    }
+    return o.pp() / 2.0;
+}
+
+static void powerAmpTests()
+{
+    std::printf ("\n== power amp: idle operating point ==\n");
+    {
+        PowerAmp5150 pa;
+        pa.setControls (0.5, 0.5);
+        pa.prepare (fs);
+        for (int i = 0; i < (int) (fs * 0.2); ++i) pa.process (0.0);
+        std::printf ("B+ %.1f V, bias %.2f V, output plate %.1f V, PI cathode %.2f V, PI plates %.1f / %.1f V\n",
+                     pa.getSupplyVoltage(), pa.getBiasVoltage(), pa.getPlate1(), pa.getPIcathode(),
+                     pa.getPIplateA(), pa.getPIplateB());
+    }
+
+    std::printf ("\n== power amp: small-signal response, 20 mV at master node, speaker Vpk (dB re 1 V) ==\n");
+    const double freqs[] = { 50, 100, 200, 500, 1000, 2000, 5000, 10000 };
+    std::printf ("%-14s", "pres/res");
+    for (double f : freqs) std::printf (" %7.0f", f);
+    std::printf ("\n");
+    const double settings[][2] = { { 0.0, 0.0 }, { 1.0, 0.0 }, { 0.0, 1.0 }, { 0.5, 0.5 } };
+    for (auto& s : settings)
+    {
+        std::printf ("p%.1f r%.1f     ", s[0], s[1]);
+        for (double f : freqs)
+            std::printf (" %7.2f", 20.0 * std::log10 (powerAmpPeak (s[0], s[1], f, 0.02)));
+        std::printf ("\n");
+    }
+
+    std::printf ("\n== power amp: drive sweep at 1 kHz (presence/resonance 5) ==\n");
+    for (double a : { 0.05, 0.1, 0.2, 0.5, 1.0, 2.0, 5.0, 20.0 })
+    {
+        gIter = gSamples = gFail = 0;
+        const double vpk = powerAmpPeak (0.5, 0.5, 1000.0, a, 0.3);
+        std::printf ("in %5.2f Vpk -> speaker %6.2f Vpk  (~%5.1f W into 8R)   newton avg %.2f it, %lld failures\n",
+                     a, vpk, vpk * vpk / 2.0 / 8.0, (double) gIter / gSamples, gFail);
+    }
+
+    std::printf ("\n== power amp CPU ==\n");
+    {
+        PowerAmp5150 pa;
+        pa.setControls (0.5, 0.5);
+        pa.prepare (fs);
+        double acc = 0;
+        const auto t0 = std::chrono::high_resolution_clock::now();
+        for (int i = 0; i < (int) fs; ++i)
+            acc += pa.process (1.0 * std::sin (2 * kPi * 110.0 * i / fs));
+        const double ms = std::chrono::duration<double, std::milli> (std::chrono::high_resolution_clock::now() - t0).count();
+        std::printf ("%.1f ms per second of audio (%.1f%% of one core) [chk %.3g]\n", ms, ms / 10.0, acc);
+    }
+    {
+        // noise input (like an idle interface) is the worst case for the Newton predictor
+        PowerAmp5150 pa;
+        pa.setControls (0.5, 0.5);
+        pa.prepare (fs);
+        unsigned rng = 7;
+        double acc = 0;
+        const auto t0 = std::chrono::high_resolution_clock::now();
+        for (int i = 0; i < (int) fs; ++i)
+        {
+            rng = rng * 1664525u + 1013904223u;
+            acc += pa.process (0.01 * ((rng >> 8) / 8388608.0 - 1.0));
+        }
+        const double ms = std::chrono::duration<double, std::milli> (std::chrono::high_resolution_clock::now() - t0).count();
+        std::printf ("noise input: %.1f ms per second of audio (%.1f%% of one core) [chk %.3g]\n", ms, ms / 10.0, acc);
+    }
+}
+
+static void powerAmpDebug (double amp)
+{
+    PowerAmp5150 pa;
+    pa.setControls (0.5, 0.5);
+    pa.prepare (fs);
+    int shown = 0;
+    for (int i = 0; i < (int) (fs * 0.3) && shown < 6; ++i)
+    {
+        const double y = pa.process (amp * std::sin (2.0 * kPi * 1000.0 * i / fs));
+        if (! pa.lastConverged || std::abs (y) > 80.0)
+        {
+            std::printf ("t=%.5f out=%.1f B+=%.1f V3A=%.1f | ports:", i / fs, y, pa.getSupplyVoltage(), pa.getV3a());
+            for (int k = 0; k < 8; ++k) std::printf (" %.2f", pa.getPort (k));
+            std::printf (" | p0:");
+            for (int k = 0; k < 8; ++k) std::printf (" %.1f", pa.lastP0[k]);
+            std::printf ("\n");
+            ++shown;
+            i += 20;
+        }
+    }
+}
+
+static void chainLevels()
+{
+    std::printf ("\n== full chain: speaker V rms (gain 6, tone 5/5/6, pres/res 5), guitar-ish 0.2 V chord ==\n");
+    const double post[3] = { 25.0, 1.0, 1.0 }; // keep in sync with kChannelPost in AmpSim.h
+    for (int mode : { 0, 1, 2 })
+    {
+        std::printf ("mode %d:", mode);
+        for (double master : { 0.1, 0.2, 0.3, 0.5, 0.8 })
+        {
+            Preamp5150 pre;
+            PowerAmp5150 pa;
+            pre.prepare (fs);
+            pre.setMode (mode);
+            pre.setControls (0.6, 0.5, 0.5, 0.6, master);
+            pa.setControls (0.5, 0.5);
+            pa.prepare (fs);
+            double sq = 0; int n = 0;
+            for (int i = 0; i < (int) (fs * 0.6); ++i)
+            {
+                const double t = i / fs, env = std::exp (-3.0 * std::fmod (t, 0.5));
+                const double x = 0.2 * env * (std::sin (2 * kPi * 82.4 * t) + std::sin (2 * kPi * 123.5 * t) + std::sin (2 * kPi * 164.8 * t)) / 3.0;
+                const double y = pa.process (pre.process (x) * post[mode]);
+                if (i > (int) (fs * 0.1)) { sq += y * y; ++n; }
+            }
+            std::printf ("  m%.1f %6.2f V", master, std::sqrt (sq / n));
+        }
+        std::printf ("\n");
+    }
+}
+
+int main (int argc, char** argv)
+{
+    if (argc > 1 && std::string (argv[1]) == "chain") { chainLevels(); return 0; }
+    if (argc > 1 && std::string (argv[1]) == "power") { powerAmpTests(); return 0; }
+    if (argc > 2 && std::string (argv[1]) == "pdebug") { powerAmpDebug (std::atof (argv[2])); return 0; }
     gateTests();
+    powerAmpTests();
     channelLevels();
     leadPreampVsSpice();
     toneStackResponse();
