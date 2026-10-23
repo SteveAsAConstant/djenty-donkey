@@ -4,7 +4,7 @@ $ErrorActionPreference = "Stop"
 Add-Type -AssemblyName System.IO.Compression
 Add-Type -AssemblyName System.IO.Compression.FileSystem
 
-$version  = "0.3.0"
+$version  = "0.4.0"
 $root     = Split-Path -Parent $PSScriptRoot
 $build    = Join-Path $env:USERPROFILE "vab-build\DjentyDonkey_artefacts\Release"
 $dist     = Join-Path $root "dist"
@@ -56,6 +56,8 @@ New-Item -ItemType Directory -Force $srcStage | Out-Null
 foreach ($item in "CMakeLists.txt", "build.bat", "README.md", "Source", "tests", "docs", "spice", "installer") {
     Copy-Item (Join-Path $root $item) $srcStage -Recurse
 }
+# LTspice runs leave waveform / database files next to the netlists (can be GBs); ship the netlists only
+Get-ChildItem (Join-Path $srcStage "spice") -Include *.raw, *.db -Recurse | Remove-Item
 New-Zip $srcStage "$stageDir\source\DjentyDonkey-source-$version.zip" $true
 Remove-Item (Split-Path $srcStage) -Recurse -Force
 
