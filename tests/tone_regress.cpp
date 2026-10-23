@@ -1,19 +1,30 @@
-// Tone regression: renders the same inputs through the frozen v0.3.0 DSP (tests/baseline/, namespace
-// vamp_baseline) and the current DSP (Source/dsp/, namespace vamp), then reports how far apart they are
-// and how much faster the current code is.
+// Tone regression: renders the same inputs through
+//   base   the frozen v0.3.0 DSP (tests/baseline/, namespace vamp_baseline)
+//   new    the current DSP (Source/dsp/, namespace vamp)
+//   ref    the current DSP with setReferencePrecision(): 1000x tighter Newton residuals, no early
+//          step acceptance. This is the "true" solution of the circuit equations the model defines.
+// and reports, all as RMS error relative to the signal, band-limited to 20 kHz:
+//   new-base   how far the current code moved from v0.3.0
+//   base err   v0.3.0 vs ref: the original solver's own numerical error
+//   new err    current vs ref
+//   new peak   largest single-sample error of the current code relative to the signal peak
+//   bands      largest 1/3-octave band level difference new vs ref, 50 Hz..16 kHz: the tone itself
 //
-//   null (audio)  RMS of (current - baseline) relative to the baseline RMS, band-limited to 20 kHz
-//   null (full)   same over the whole 4x-oversampled band
-//   peak err      largest sample difference relative to the baseline peak
+// With the drive and RED in front of the power amp the waveform errors are dominated by the preamp's
+// own Newton tolerance (~0.2 mV per node in v0.3.0 and now), amplified by the following stages: square-wave
+// edges land a fraction of a sample apart. That shows in the nulls but not in the band levels.
 //
-// PASS = audio-band null below -60 dB (no audible difference); "exact" = below -100 dB (rounding level).
-// Exit code 1 if any case fails, so this can gate optimizations.
+// Verdicts: "exact" new-base < -100 dB (rounding level); "pass" new err < -60 dB (inaudible);
+// "FIXED" new err < -60 dB while v0.3.0 was worse than -60 dB (e.g. unconverged samples = clicks);
+// "as v0.3" new err no worse than v0.3.0's own error.
+// "FAIL" otherwise, or any band off by 0.5 dB or more. Exit code 1 on any FAIL, so this gates optimizations.
 //
 // Build target: tone_regress (no JUCE). Usage: tone_regress [filter-substring]
 #include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <functional>
+#include <memory>
 #include <string>
 #include <vector>
 #include "dsp/PowerAmp5150.h"
@@ -140,10 +151,9 @@ struct LP20k // 4th-order Butterworth at 20 kHz (two biquads), double precision
 
 double db (double ratio) { return 20.0 * std::log10 (std::max (ratio, 1e-12)); }
 
-int failures = 0, cases = 0;
-double timeBase = 0, timeNew = 0;
+struct Diff { double audio, full, peak; };
 
-void compare (const char* name, const Signal& ref, const Signal& out, double msRef, double msOut)
+Diff difference (const Signal& ref, const Signal& out)
 {
     LP20k lpR, lpD;
     double sR = 0, sD = 0, sRa = 0, sDa = 0, pkR = 0, pkD = 0;
@@ -155,19 +165,42 @@ void compare (const char* name, const Signal& ref, const Signal& out, double msR
         sRa += ra * ra; sDa += da * da;
         pkR = std::max (pkR, std::abs (ref[i])); pkD = std::max (pkD, std::abs (d));
     }
-    const double nullAudio = db (std::sqrt (sDa / std::max (sRa, 1e-30)));
-    const double nullFull = db (std::sqrt (sD / std::max (sR, 1e-30)));
-    const double peak = db (pkD / std::max (pkR, 1e-30));
-    const bool pass = nullAudio < -60.0 && std::isfinite (nullAudio);
-    ++cases;
-    if (! pass) ++failures;
-    timeBase += msRef; timeNew += msOut;
-    std::printf ("%-44s %8.1f %8.1f %8.1f  %5.2fx  %s\n", name, nullAudio, nullFull, peak, msRef / msOut,
-                 ! pass ? "FAIL" : nullAudio < -100.0 ? "exact" : "pass");
+    return { db (std::sqrt (sDa / std::max (sRa, 1e-30))), db (std::sqrt (sD / std::max (sR, 1e-30))),
+             db (pkD / std::max (pkR, 1e-30)) };
 }
 
-template <typename Fn>
-Signal render (const Signal& in, Fn&& fn, double& ms)
+// Largest 1/3-octave band level difference (dB) between two signals, 50 Hz .. 16 kHz: the long-term
+// spectrum, i.e. the tone, independent of sample-exact waveform alignment
+double bandDifference (const Signal& ref, const Signal& out)
+{
+    double worst = 0.0;
+    for (double fc = 50.0; fc < 16500.0; fc *= std::pow (2.0, 1.0 / 3.0))
+    {
+        // RBJ band-pass (0 dB peak), Q of a 1/3-octave band
+        const double w0 = 2 * kPi * fc / fs, al = std::sin (w0) / (2 * 4.318), c = std::cos (w0), a0 = 1 + al;
+        const double b0 = al / a0, b2 = -al / a0, a1 = -2 * c / a0, a2 = (1 - al) / a0;
+        auto energy = [&] (const Signal& x)
+        {
+            double z1 = 0, z2 = 0, e = 0;
+            for (double v : x)
+            {
+                const double y = b0 * v + z1;
+                z1 = -a1 * y + z2;
+                z2 = b2 * v - a2 * y;
+                e += y * y;
+            }
+            return e;
+        };
+        const double er = energy (ref), eo = energy (out);
+        if (er > 1e-20 * ref.size()) // skip empty bands
+            worst = std::max (worst, std::abs (10.0 * std::log10 (std::max (eo, 1e-300) / er)));
+    }
+    return worst;
+}
+
+using Proc = std::function<double (double)>;
+
+Signal render (const Signal& in, Proc fn, double& ms)
 {
     Signal out (in.size());
     const auto t0 = std::chrono::high_resolution_clock::now();
@@ -179,8 +212,52 @@ Signal render (const Signal& in, Fn&& fn, double& ms)
 std::string filter;
 bool selected (const std::string& name) { return filter.empty() || name.find (filter) != std::string::npos; }
 
+int failures = 0, cases = 0, fixedCases = 0;
+double timeBase = 0, timeNew = 0;
+
+// makeBase / makeNew / makeRef return a freshly prepared processor on every call
+void runCase (const std::string& name, const Signal& in, const std::function<Proc()>& makeBase,
+              const std::function<Proc()>& makeNew, const std::function<Proc()>& makeRef)
+{
+    if (! selected (name)) return;
+    double ta, tb, tr;
+    const auto ra = render (in, makeBase(), ta);
+    const auto rb = render (in, makeNew(), tb);
+    const auto rr = render (in, makeRef(), tr);
+    const double moved = difference (ra, rb).audio;
+    const double baseErr = difference (rr, ra).audio;
+    const auto newErr = difference (rr, rb);
+    const double bands = bandDifference (rr, rb);
+
+    const bool waveOk = newErr.audio < -60.0 || newErr.audio <= baseErr + 3.0;
+    const bool ok = std::isfinite (newErr.audio) && waveOk && bands < 0.5;
+    const bool fixed = ok && newErr.audio < -60.0 && baseErr >= -60.0;
+    ++cases;
+    if (! ok) ++failures;
+    if (fixed) ++fixedCases;
+    timeBase += ta; timeNew += tb;
+    const char* verdict = ! ok ? "FAIL" : fixed ? "FIXED" : moved < -100.0 ? "exact" : newErr.audio < -60.0 ? "pass" : "as v0.3";
+    std::printf ("%-44s %8.1f %8.1f %8.1f %8.1f %7.3f  %5.2fx  %s\n", name.c_str(), moved, baseErr, newErr.audio,
+                 newErr.peak, bands, ta / tb, verdict);
+}
+
 // ---------------------------------------------------------------- cases
 struct Input { const char* name; Signal x; };
+
+template <typename T> auto setReference (T& t, int) -> decltype (t.setReferencePrecision (true), void()) { t.setReferencePrecision (true); }
+template <typename T> void setReference (T&, long) {} // no Newton tolerances to tighten
+
+template <typename T, typename Setup>
+std::function<Proc()> maker (Setup setup, bool reference = false)
+{
+    return [setup, reference]
+    {
+        auto obj = std::make_shared<T>();
+        if (reference) setReference (*obj, 0);
+        setup (*obj);
+        return Proc ([obj] (double v) { return obj->process (v); });
+    };
+}
 
 void preampCases (const std::vector<Input>& inputs)
 {
@@ -191,13 +268,8 @@ void preampCases (const std::vector<Input>& inputs)
             {
                 char name[96];
                 std::snprintf (name, sizeof name, "preamp %-5s gain %.1f  %s", modes[mode], gain, in.name);
-                if (! selected (name)) continue;
-                vamp_baseline::Preamp5150 a; a.prepare (fs); a.setMode (mode); a.setControls (gain, 0.5, 0.5, 0.6, 0.5);
-                vamp::Preamp5150 b;          b.prepare (fs); b.setMode (mode); b.setControls (gain, 0.5, 0.5, 0.6, 0.5);
-                double ta, tb;
-                const auto ra = render (in.x, [&] (double v) { return a.process (v); }, ta);
-                const auto rb = render (in.x, [&] (double v) { return b.process (v); }, tb);
-                compare (name, ra, rb, ta, tb);
+                auto setup = [mode, gain] (auto& p) { p.prepare (fs); p.setMode (mode); p.setControls (gain, 0.5, 0.5, 0.6, 0.5); };
+                runCase (name, in.x, maker<vamp_baseline::Preamp5150> (setup), maker<vamp::Preamp5150> (setup), maker<vamp::Preamp5150> (setup, true));
             }
 }
 
@@ -214,14 +286,10 @@ void powerAmpCases (const std::vector<Input>& inputs)
                 // identical drive signal for both: the baseline RED preamp at this master setting
                 vamp_baseline::Preamp5150 pre; pre.prepare (fs); pre.setMode (2); pre.setControls (0.7, 0.5, 0.5, 0.6, master);
                 Signal drive (in.x.size());
-                for (size_t i = 0; i < drive.size(); ++i) drive[i] = pre.process (in.x[i]) * 25.0;
+                for (size_t i = 0; i < drive.size(); ++i) drive[i] = pre.process (in.x[i]);
 
-                vamp_baseline::PowerAmp5150 a; a.setControls (pc.pres, pc.res); a.prepare (fs);
-                vamp::PowerAmp5150 b;          b.setControls (pc.pres, pc.res); b.prepare (fs);
-                double ta, tb;
-                const auto ra = render (drive, [&] (double v) { return a.process (v); }, ta);
-                const auto rb = render (drive, [&] (double v) { return b.process (v); }, tb);
-                compare (name, ra, rb, ta, tb);
+                auto setup = [pc] (auto& p) { p.setControls (pc.pres, pc.res); p.prepare (fs); };
+                runCase (name, drive, maker<vamp_baseline::PowerAmp5150> (setup), maker<vamp::PowerAmp5150> (setup), maker<vamp::PowerAmp5150> (setup, true));
             }
 }
 
@@ -233,14 +301,22 @@ void driveCases (const std::vector<Input>& inputs)
             {
                 char name[96];
                 std::snprintf (name, sizeof name, "drive  %.1f attack %d  %s", drv, atk, in.name);
-                if (! selected (name)) continue;
-                vamp_baseline::PrecisionDrive a; a.prepare (fs); a.setControls (drv, 0.5, atk, 0.7);
-                vamp::PrecisionDrive b;          b.prepare (fs); b.setControls (drv, 0.5, atk, 0.7);
-                double ta, tb;
-                const auto ra = render (in.x, [&] (double v) { return a.process (v); }, ta);
-                const auto rb = render (in.x, [&] (double v) { return b.process (v); }, tb);
-                compare (name, ra, rb, ta, tb);
+                auto setup = [drv, atk] (auto& p) { p.prepare (fs); p.setControls (drv, 0.5, atk, 0.7); };
+                runCase (name, in.x, maker<vamp_baseline::PrecisionDrive> (setup), maker<vamp::PrecisionDrive> (setup), maker<vamp::PrecisionDrive> (setup, true));
             }
+}
+
+template <typename Drive, typename Pre, typename Power>
+std::function<Proc()> chainMaker (int mode, bool reference = false)
+{
+    return [mode, reference]
+    {
+        auto d = std::make_shared<Drive>(); d->prepare (fs); d->setControls (0.5, 0.5, 2, 0.7);
+        auto p = std::make_shared<Pre>();   if (reference) setReference (*p, 0); p->prepare (fs); p->setMode (mode); p->setControls (0.8, 0.5, 0.5, 0.6, 0.6);
+        auto w = std::make_shared<Power>(); if (reference) setReference (*w, 0); w->setControls (0.6, 0.5); w->prepare (fs);
+        const double post = mode == 0 ? 25.0 : 1.0; // AmpSim kChannelPost (CLEAN has only 2 stages)
+        return Proc ([d, p, w, post] (double v) { return w->process (p->process (d->process (v)) * post); });
+    };
 }
 
 void chainCases (const std::vector<Input>& inputs)
@@ -251,18 +327,10 @@ void chainCases (const std::vector<Input>& inputs)
         {
             char name[96];
             std::snprintf (name, sizeof name, "chain  drive+%-5s+power  %s", modes[mode], in.name);
-            if (! selected (name)) continue;
-            vamp_baseline::PrecisionDrive da; da.prepare (fs); da.setControls (0.5, 0.5, 2, 0.7);
-            vamp_baseline::Preamp5150 pa; pa.prepare (fs); pa.setMode (mode); pa.setControls (0.8, 0.5, 0.5, 0.6, 0.6);
-            vamp_baseline::PowerAmp5150 wa; wa.setControls (0.6, 0.5); wa.prepare (fs);
-            vamp::PrecisionDrive db_; db_.prepare (fs); db_.setControls (0.5, 0.5, 2, 0.7);
-            vamp::Preamp5150 pb; pb.prepare (fs); pb.setMode (mode); pb.setControls (0.8, 0.5, 0.5, 0.6, 0.6);
-            vamp::PowerAmp5150 wb; wb.setControls (0.6, 0.5); wb.prepare (fs);
-            const double post = mode == 2 ? 25.0 : 1.0; // AmpSim kChannelPost
-            double ta, tb;
-            const auto ra = render (in.x, [&] (double v) { return wa.process (pa.process (da.process (v)) * post); }, ta);
-            const auto rb = render (in.x, [&] (double v) { return wb.process (pb.process (db_.process (v)) * post); }, tb);
-            compare (name, ra, rb, ta, tb);
+            runCase (name, in.x,
+                     chainMaker<vamp_baseline::PrecisionDrive, vamp_baseline::Preamp5150, vamp_baseline::PowerAmp5150> (mode),
+                     chainMaker<vamp::PrecisionDrive, vamp::Preamp5150, vamp::PowerAmp5150> (mode),
+                     chainMaker<vamp::PrecisionDrive, vamp::Preamp5150, vamp::PowerAmp5150> (mode, true));
         }
 }
 } // namespace
@@ -279,14 +347,15 @@ int main (int argc, char** argv)
     };
     const std::vector<Input> short_ = { { "chugs", chugs (0.15) }, { "dynamics", dynamics() } };
 
-    std::printf ("%-44s %8s %8s %8s  %6s\n", "case", "null dB", "full dB", "peak dB", "speed");
-    std::printf ("%-44s %8s %8s %8s  %6s\n", "", "(<20k)", "", "", "");
+    std::printf ("%-44s %8s %8s %8s %8s %7s  %6s\n", "case", "new-base", "base err", "new err", "new peak", "bands", "speed");
+    std::printf ("%-44s %8s %8s %8s %8s %7s  %6s\n", "", "dB", "dB", "dB", "dB", "max dB", "");
     preampCases (guitar);
     powerAmpCases (short_);
     driveCases (short_);
     chainCases (guitar);
 
-    std::printf ("\n%d cases, %d failed. total time baseline %.0f ms, current %.0f ms -> %.2fx\n",
-                 cases, failures, timeBase, timeNew, timeBase / std::max (timeNew, 1e-9));
+    std::printf ("\n%d cases, %d failed, %d fixed (v0.3.0 itself was off by more than -60 dB).\n"
+                 "total time baseline %.0f ms, current %.0f ms -> %.2fx\n",
+                 cases, failures, fixedCases, timeBase, timeNew, timeBase / std::max (timeNew, 1e-9));
     return failures > 0 ? 1 : 0;
 }

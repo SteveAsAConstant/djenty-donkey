@@ -384,7 +384,7 @@ static void cpuModules()
         timeModule ("Precision Drive (4x)", os, 256, nOs, loop (fn));
     }
 
-    const char* names[] = { "Preamp RED   gain 0.7 (4x)", "Preamp BLUE  gain 0.7 (4x)", "Preamp CLEAN gain 0.7 (4x)" };
+    const char* names[] = { "Preamp CLEAN gain 0.7 (4x)", "Preamp BLUE  gain 0.7 (4x)", "Preamp RED   gain 0.7 (4x)" }; // Preamp5150::Mode order
     for (int mode : { 0, 1, 2 })
     {
         Preamp5150 pre; pre.prepare (os); pre.setMode (mode); pre.setControls (0.7, 0.5, 0.5, 0.6, 0.5);
@@ -392,25 +392,58 @@ static void cpuModules()
         timeModule (names[mode], os, 256, nOs, loop (fn));
     }
     {
-        Preamp5150 pre; pre.prepare (os); pre.setMode (0); pre.setControls (1.0, 0.5, 0.5, 0.6, 0.5);
+        Preamp5150 pre; pre.prepare (os); pre.setMode (2); pre.setControls (1.0, 0.5, 0.5, 0.6, 0.5);
         auto fn = [&] (int i) { return pre.process (diOs[(size_t) i]); };
         timeModule ("Preamp RED   gain 1.0 (4x)", os, 256, nOs, loop (fn));
     }
     {
         // feed the power amp the real preamp output so its operating point is realistic
-        Preamp5150 pre; pre.prepare (os); pre.setMode (0); pre.setControls (0.7, 0.5, 0.5, 0.6, 0.5);
+        Preamp5150 pre; pre.prepare (os); pre.setMode (2); pre.setControls (0.7, 0.5, 0.5, 0.6, 0.5);
         std::vector<double> pv ((size_t) nOs);
-        for (int i = 0; i < nOs; ++i) pv[(size_t) i] = pre.process (diOs[(size_t) i]) * 25.0;
+        for (int i = 0; i < nOs; ++i) pv[(size_t) i] = pre.process (diOs[(size_t) i]);
         PowerAmp5150 pa; pa.setControls (0.5, 0.5); pa.prepare (os);
         auto fn = [&] (int i) { return pa.process (pv[(size_t) i]); };
         timeModule ("Power amp (4x)", os, 256, nOs, loop (fn));
     }
     {
         PrecisionDrive pd; pd.prepare (os); pd.setControls (0.5, 0.5, 3, 0.7);
+        Preamp5150 pre; pre.prepare (os); pre.setMode (2); pre.setControls (0.7, 0.5, 0.5, 0.6, 0.5);
+        PowerAmp5150 pa; pa.setControls (0.5, 0.5); pa.prepare (os);
+        auto fn = [&] (int i) { return pa.process (pre.process (pd.process (diOs[(size_t) i]))); };
+        timeModule ("FULL amp: drive+RED+power (4x)", os, 256, nOs, loop (fn));
+    }
+    {
         Preamp5150 pre; pre.prepare (os); pre.setMode (0); pre.setControls (0.7, 0.5, 0.5, 0.6, 0.5);
         PowerAmp5150 pa; pa.setControls (0.5, 0.5); pa.prepare (os);
-        auto fn = [&] (int i) { return pa.process (pre.process (pd.process (diOs[(size_t) i])) * 25.0); };
-        timeModule ("FULL amp: drive+RED+power (4x)", os, 256, nOs, loop (fn));
+        auto fn = [&] (int i) { return pa.process (pre.process (diOs[(size_t) i]) * 25.0); }; // AmpSim kChannelPost
+        timeModule ("FULL amp: CLEAN+power (4x)", os, 256, nOs, loop (fn));
+    }
+
+    std::printf ("\n-- Newton evaluations per sample (fallback %% = fast path failed, restarted with 30 its) --\n");
+    for (int mode : { 0, 1, 2 })
+    {
+        Preamp5150 pre; pre.prepare (os); pre.setMode (mode); pre.setControls (0.7, 0.5, 0.5, 0.6, 0.5);
+        TriodeStage* st[] = { &pre.v1a, &pre.v1b, &pre.v2a, &pre.v2b, &pre.v5b, &pre.v5a };
+        for (auto* s : st) s->statSamples = s->statEvals = s->statFallbacks = 0;
+        double a = 0;
+        for (int i = 0; i < nOs; ++i) a += pre.process (diOs[(size_t) i]);
+        sink = sink + a;
+        std::printf ("%-6s", names[mode] + 7);
+        const char* sn[] = { "V1A", "V1B", "V2A", "V2B", "V5B", "V5A" };
+        for (int k = 0; k < 6; ++k)
+            if (st[k]->statSamples > 0)
+                std::printf ("  %s %.2f (%.1f%%)", sn[k], (double) st[k]->statEvals / st[k]->statSamples,
+                             100.0 * st[k]->statFallbacks / st[k]->statSamples);
+        std::printf ("\n");
+    }
+    {
+        Preamp5150 pre; pre.prepare (os); pre.setMode (2); pre.setControls (0.7, 0.5, 0.5, 0.6, 0.5);
+        PowerAmp5150 pa; pa.setControls (0.5, 0.5); pa.prepare (os);
+        pa.statSamples = pa.statIterations = pa.statFailures = 0;
+        double a = 0;
+        for (int i = 0; i < nOs; ++i) a += pa.process (pre.process (diOs[(size_t) i]));
+        sink = sink + a;
+        std::printf ("Power amp DK: %.2f evals/sample, %lld failures\n", (double) pa.statIterations / pa.statSamples, pa.statFailures);
     }
 
     std::vector<float> buf ((size_t) n), key ((size_t) n);

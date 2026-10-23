@@ -145,6 +145,13 @@ public:
         return toneStack.process (x, 1) * postGain;
     }
 
+    // tone-regression reference renders (see TriodeStage::setReferencePrecision)
+    void setReferencePrecision (bool on)
+    {
+        for (auto* s : { &v1a, &v1b, &v2a, &v2b, &v5b, &v5a })
+            s->setReferencePrecision (on);
+    }
+
     double getLastPreampOut() const { return lastPreampOut; }
     int getMode() const { return mode; }
 

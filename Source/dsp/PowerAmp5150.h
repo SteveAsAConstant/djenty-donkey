@@ -9,12 +9,19 @@ namespace vamp
 // Norman Koren's pentode model (6L6GC parameters from the wdv.com SPICE tube table)
 struct KorenPentode
 {
-    double mu = 8.7, ex = 1.35, kg1 = 1460.0, kg2 = 4500.0, kp = 48.0, kvb = 12.0;
+    static constexpr double mu = 8.7, ex = 1.35, kg1 = 1460.0, kg2 = 4500.0, kp = 48.0, kvb = 12.0;
 
     // plate current of ONE tube and its derivatives w.r.t. Vpk and Vg1k
     inline void plate (double vpk, double vg1k, double vg2k, double& ip, double& dVpk, double& dVg1) const
     {
-        const double x = kp * (1.0 / mu + vg1k / vg2k);
+        plateInv (vpk, vg1k, vg2k, 1.0 / vg2k, ip, dVpk, dVg1);
+    }
+
+    // same, with 1 / vg2k precomputed (the screen voltage is constant during a Newton solve)
+    inline void plateInv (double vpk, double vg1k, double vg2k, double invVg2k, double& ip, double& dVpk, double& dVg1) const
+    {
+        constexpr double kpOverMu = kp / mu, invKvb = 1.0 / kvb, twoOverKg1 = 2.0 / kg1;
+        const double x = kpOverMu + kp * vg1k * invVg2k;
         double sp, sig;
         if (x > 30.0)       { sp = x; sig = 1.0; }
         else if (x < -30.0) { sp = std::exp (x); sig = sp; }
@@ -24,18 +31,18 @@ struct KorenPentode
             sp = std::log1p (e);
             sig = e / (1.0 + e);
         }
-        const double E1 = vg2k / kp * sp;
+        const double E1 = vg2k * (1.0 / kp) * sp;
         if (E1 <= 0.0) { ip = 0.0; dVpk = 0.0; dVg1 = 0.0; return; }
         // atan() is kept smooth through Vpk = 0 (as in Koren's original); below 0 the flyback
         // diodes dominate, and the smooth knee keeps Newton's method well behaved.
 
         const double Ep = std::exp ((ex - 1.0) * std::log (E1)); // == pow (E1, ex - 1), faster
-        const double base = 2.0 * Ep * E1 / kg1;
-        const double r = vpk / kvb;
+        const double base = twoOverKg1 * Ep * E1;
+        const double r = vpk * invKvb;
         const double at = std::atan (r);
         ip = base * at;
-        dVg1 = 2.0 * ex * Ep / kg1 * sig * at;
-        dVpk = base / (kvb * (1.0 + r * r));
+        dVg1 = twoOverKg1 * ex * Ep * sig * at;
+        dVpk = base * invKvb / (1.0 + r * r);
     }
 
     // screen current of ONE tube
@@ -49,7 +56,7 @@ struct KorenPentode
 inline void gridCurrentR (double vgk, double rgk, double& ig, double& dIg)
 {
     constexpr double von = 0.25, vd = 0.03;
-    const double x = (vgk - von) / vd;
+    const double x = (vgk - von) * (1.0 / vd);
     if (x > 30.0)  { ig = (vgk - von) / rgk; dIg = 1.0 / rgk; return; }
     if (x < -30.0) { ig = 0.0; dIg = 0.0; return; }
     const double e = std::exp (x);
@@ -217,7 +224,10 @@ public:
                 maxF = std::max (maxF, std::abs (F) * (r % 2 == 0 ? 1.0 : 10.0)); // grids 10x stricter
                 J[r][8] = -F;
             }
-            if (maxF < 1e-4) return true; // plates < 0.1 mV, grids < 0.01 mV: i is consistent with p
+            // converged: plates < 0.1 mV, grids < 0.01 mV. The final Newton step is still applied (an 8x8
+            // solve, no tube evaluation): the error drops from ~residual to ~residual^2. v0.3.0 returned
+            // before it, which biased the small-signal response by up to 0.3 dB at low frequencies.
+            const bool converged = maxF < resTol;
 
             for (int r = 0; r < 8; ++r)
             {
@@ -231,12 +241,33 @@ public:
             }
 
             double dp[8];
-            if (! solve (J, dp)) return false;
+            if (! solve (J, dp)) return converged;
 
+            // Step limit, the same for plates and grids. Grid current and the flyback diodes are softplus
+            // knees (linear beyond the knee), so an overshoot corrects itself on the next step. A tighter
+            // grid limit (4 V in v0.3.0) left steep preamp edges, which swing the 6L6 grids by >100 V
+            // in one sample through C28/C29, unconverged after 46 iterations -> clicks at high master.
+            double maxStep = 0.0;
             for (int k = 0; k < 8; ++k)
             {
-                const double lim = (k % 2 == 0) ? 40.0 : 4.0;
-                p[k] += std::clamp (dp[k], -lim, lim);
+                constexpr double lim = 40.0;
+                dp[k] = std::clamp (dp[k], -lim, lim);
+                p[k] += dp[k];
+                maxStep = std::max (maxStep, std::abs (dp[k]) * (k % 2 == 0 ? 1.0 : kGridStepWeight));
+            }
+
+            // quadratic convergence: after a step this small the remaining error is ~step^2, far below
+            // the residual tolerance, so accept without re-evaluating the tubes. The port currents are
+            // moved along their (already computed) linearisation to stay consistent with p.
+            if (converged || (acceptSmallStep && maxStep < kPlateStepTol))
+            {
+                for (int dv = 0; dv < 4; ++dv)
+                {
+                    const int c0 = 2 * dv, c1 = c0 + 1;
+                    i[c0] += d[c0][0] * dp[c0] + d[c0][1] * dp[c1];
+                    i[c1] += d[c1][1] * dp[c1];
+                }
+                return true;
             }
           }
           return false;
@@ -283,6 +314,14 @@ public:
     // Newton statistics (for tests)
     long long statSamples = 0, statIterations = 0, statFailures = 0;
     bool lastConverged = true;
+
+    // Reference renders for the tone regression: 1000x tighter residual and no early step acceptance
+    void setReferencePrecision (bool on)
+    {
+        resTol = on ? 1e-7 : 1e-4;
+        acceptSmallStep = ! on;
+        v3a.setReferencePrecision (on);
+    }
     double lastP0[8] {};
     double getPort (int k) const { return p[k]; }
     double getV3a() const { return v3a.getVp(); }
@@ -297,6 +336,7 @@ public:
 private:
     void evalDevices (double (&i)[8], double (&d)[8][2])
     {
+        const double invScreen = 1.0 / vScreen;
         for (int t = 0; t < 2; ++t) // V4B, V4A
         {
             const int pk = 2 * t, gk = pk + 1;
@@ -310,11 +350,11 @@ private:
         {
             const int pk = 4 + 2 * t, gk = pk + 1;
             double ip, dvpk, dvg1, ig, dig;
-            tube.plate (p[pk], p[gk], vScreen, ip, dvpk, dvg1);
+            tube.plateInv (p[pk], p[gk], vScreen, invScreen, ip, dvpk, dvg1);
             gridCurrentR (p[gk], 1000.0, ig, dig);
             // CR200 / CR201 flyback diodes: conduct from ground into the plate when it swings below 0 V
             constexpr double von = 0.6, vd = 0.03, rd = 1.0;
-            const double xd = (-p[pk] - von) / vd;
+            const double xd = (-p[pk] - von) * (1.0 / vd);
             double idio = 0.0, didio = 0.0;
             if (xd > 30.0)       { idio = (-p[pk] - von) / rd; didio = 1.0 / rd; }
             else if (xd > -30.0)
@@ -375,6 +415,12 @@ private:
         std::fill (std::begin (p), std::end (p), 0.0);
         std::fill (std::begin (pPrev), std::end (pPrev), 0.0);
     }
+
+    // Newton step (V) below which a solve is accepted without a confirming evaluation: plates 10 mV,
+    // grids 0.5 mV (the grid-current knee is only 30 mV wide, so grids are weighted 20x)
+    static constexpr double kPlateStepTol = 1e-2, kGridStepWeight = 20.0;
+    double resTol = 1e-4;          // port-equation residual (V, grids weighted 10x)
+    bool acceptSmallStep = true;
 
     DKCircuit dk;
     TriodeStage v3a;

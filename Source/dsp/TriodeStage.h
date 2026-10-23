@@ -7,13 +7,15 @@ namespace vamp
 // Norman Koren's triode model (same equations as spice/12AX7.inc)
 struct KorenTriode
 {
-    double mu = 100.0, ex = 1.4, kg1 = 1060.0, kp = 600.0, kvb = 300.0;
+    static constexpr double mu = 100.0, ex = 1.4, kg1 = 1060.0, kp = 600.0, kvb = 300.0;
 
-    // Plate current and its partial derivatives w.r.t. Vpk and Vgk
+    // Plate current and its partial derivatives w.r.t. Vpk and Vgk.
+    // Divisions by constants are folded into reciprocals (2 divides per call instead of 7).
     inline void eval (double vpk, double vgk, double& ip, double& dVpk, double& dVgk) const
     {
-        const double s = std::sqrt (kvb + vpk * vpk);
-        const double x = kp * (1.0 / mu + vgk / s);
+        constexpr double kpOverMu = kp / mu, invKp = 1.0 / kp, twoOverKg1 = 2.0 / kg1;
+        const double invS = 1.0 / std::sqrt (kvb + vpk * vpk);
+        const double x = kpOverMu + kp * vgk * invS;
 
         double sp, sig;
         if (x > 30.0)       { sp = x; sig = 1.0; }
@@ -25,14 +27,15 @@ struct KorenTriode
             sig = e / (1.0 + e);
         }
 
-        const double E = vpk / kp * sp;
+        const double E = vpk * invKp * sp;
         if (E <= 0.0) { ip = 0.0; dVpk = 0.0; dVgk = 0.0; return; }
 
         const double Ep = std::exp ((ex - 1.0) * std::log (E)); // == pow (E, ex - 1), faster
-        ip = 2.0 * Ep * E / kg1;
-        const double dIdE = 2.0 * ex * Ep / kg1;
-        dVgk = dIdE * (vpk * sig / s);
-        dVpk = dIdE * (sp / kp - vpk * vpk * vgk * sig / (s * s * s));
+        ip = twoOverKg1 * Ep * E;
+        const double dIdE = twoOverKg1 * ex * Ep;
+        const double vs = vpk * sig * invS;
+        dVgk = dIdE * vs;
+        dVpk = dIdE * (sp * invKp - vpk * vgk * vs * invS * invS);
     }
 };
 
@@ -40,12 +43,12 @@ struct KorenTriode
 inline void gridCurrent (double vgk, double& ig, double& dIg)
 {
     constexpr double von = 0.25, vd = 0.03, rgk = 2000.0;
-    const double x = (vgk - von) / vd;
-    if (x > 30.0)       { ig = (vgk - von) / rgk; dIg = 1.0 / rgk; return; }
+    const double x = (vgk - von) * (1.0 / vd);
     if (x < -30.0)      { ig = 0.0; dIg = 0.0; return; }
+    if (x > 30.0)       { ig = (vgk - von) * (1.0 / rgk); dIg = 1.0 / rgk; return; }
     const double e = std::exp (x);
     ig = vd / rgk * std::log1p (e);
-    dIg = e / (1.0 + e) / rgk;
+    dIg = e / (1.0 + e) * (1.0 / rgk);
 }
 
 // One common-cathode 12AX7 stage with its input coupling network:
@@ -93,6 +96,7 @@ public:
         {
           for (int it = 0; it < maxIt; ++it)
           {
+            ++statEvals;
             double ip, ipp, ipg, ig, igd;
             tube.eval (p - k, g - k, ip, ipp, ipg);
             gridCurrent (g - k, ig, igd);
@@ -104,8 +108,10 @@ public:
             const double F2 = ip + ig - (Gk + GcK) * k + IeqK - Gk2 * (k - h2) + iGK;
             const double F3 = (cfg.vb - p) * Gp - ip - Gfb * (pac - g) + iGP;
 
-            if (std::abs (F1) + std::abs (F2) + std::abs (F3) < 2e-9) // ~0.2 mV on a 100k node
-                return true;
+            // converged once the KCL residual is below 2 nA (~0.2 mV on a 100k node). The final Newton
+            // step is still applied: it costs one 3x3 solve but no tube evaluation, and leaves an error
+            // of ~residual^2 instead of ~residual (v0.3.0 returned before it, biasing small signals)
+            const bool converged = std::abs (F1) + std::abs (F2) + std::abs (F3) < resTol;
 
             double J[3][4] = {
                 { Grs * (beta - 1.0) - Gb - igd - Gfb - Gcgp - Gcgk, igd + Gcgk,                                  Gfb + Gcgp,               -F1 },
@@ -115,12 +121,17 @@ public:
 
             double d[3];
             if (! solve3 (J, d))
-                return false;
+                return converged;
 
             d[0] = std::clamp (d[0], -5.0, 5.0);
             d[1] = std::clamp (d[1], -5.0, 5.0);
             d[2] = std::clamp (d[2], -50.0, 50.0);
             g += d[0]; k += d[1]; p += d[2];
+
+            // Newton converges quadratically: after a step this small the remaining error is ~step^2
+            // (far below the residual tolerance), so the confirming evaluation can be skipped
+            if (converged || (acceptSmallStep && std::abs (d[0]) + std::abs (d[1]) < kStepTolGK && std::abs (d[2]) < kStepTolP))
+                return true;
           }
           return false;
         };
@@ -128,10 +139,12 @@ public:
         // fast path: start from a linear extrapolation of the last two solutions;
         // fallback: restart from the previous solution with more iterations
         double g = 2.0 * vG - prevG, k = 2.0 * vK - prevK, p = 2.0 * vP - prevP;
+        ++statSamples;
         if (! newton (g, k, p, 6))
         {
+            ++statFallbacks;
             g = vG; k = vK; p = vP;
-            newton (g, k, p, 30);
+            if (! newton (g, k, p, 30)) ++statFailures;
         }
         prevG = vG; prevK = vK; prevP = vP;
 
@@ -169,6 +182,12 @@ public:
 
         return p - vPdc;
     }
+
+    // Newton statistics (for tests)
+    long long statSamples = 0, statEvals = 0, statFallbacks = 0, statFailures = 0;
+
+    // Reference renders for the tone regression: 1000x tighter residual and no early step acceptance
+    void setReferencePrecision (bool on) { resTol = on ? 2e-12 : 2e-9; acceptSmallStep = ! on; }
 
     double getVk() const { return vK; }
     double getVp() const { return vP; }
@@ -258,6 +277,12 @@ private:
         IeqGP = Gcgp * (0.0 - vP);
         IeqGK = Gcgk * (0.0 - vK);
     }
+
+    // Newton step size (V) below which the solution is accepted. The remaining error is ~ step^2 * curvature:
+    // tight on grid / cathode (the grid-current knee is 30 mV wide), loose on the plate (smooth, ~100 V scale).
+    static constexpr double kStepTolGK = 1e-3, kStepTolP = 0.1;
+    double resTol = 2e-9;        // KCL residual (A), sum over the 3 nodes
+    bool acceptSmallStep = true;
 
     KorenTriode tube;
     TriodeConfig cfg;
