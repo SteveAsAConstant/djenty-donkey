@@ -1,0 +1,23 @@
+Djenty Donkey - third-party components
+======================================
+
+This program is built with:
+
+- JUCE 8.0.4 (https://juce.com) - used under the GNU AGPLv3.
+- Steinberg ASIO SDK 2.3.4 - used under its GNU GPLv3 license option.
+  ASIO is a trademark and software of Steinberg Media Technologies GmbH.
+- Steinberg VST3 SDK (bundled with JUCE). VST is a registered trademark
+  of Steinberg Media Technologies GmbH.
+
+Because of these licenses, the complete source code of this program is
+included in the "source" folder of the distribution package.
+
+Circuit references (used for modelling only, no code taken):
+- Peavey EVH 5150 schematic (public service schematic)
+- PedalPCB "Dwarven Hammer" build document (Precision Drive circuit)
+- Norman Koren, "Improved VT models for SPICE simulations" (12AX7 model)
+
+"5150", "6505", "Peavey", "Horizon Devices" and "Precision Drive" are
+trademarks of their respective owners. They are used only to describe the
+circuits that inspired this model; this program is not affiliated with or
+endorsed by them.

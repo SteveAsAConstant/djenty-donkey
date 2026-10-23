@@ -1,0 +1,25 @@
+* 5150 tone stack (Marshall-style TMB), ideal source, 1M load. Pot fractions: t, m, l
+.param t=table(run,1,0.5,2,1.0,3,0.0,4,0.7)
+.param m=table(run,1,0.5,2,0.0,3,1.0,4,0.3)
+.param l=table(run,1,0.5,2,1.0,3,0.0,4,0.1)
+V1 in 0 AC 1
+C14 in ttop 470p
+RTup ttop out {250k*(1-t)+1}
+RTlo out tbot {250k*t+1}
+R28 in x 47k
+C18 x tbot 22n
+C21 x mtop 22n
+RB tbot mtop {1Meg*l+1}
+RM mtop 0 {50k*m+1}
+RL out 0 1Meg
+.ac list 50 100 200 500 1000 2000 5000 10000
+.step param run list 1 2 3 4
+.meas ac h50 FIND mag(V(out)) AT 50
+.meas ac h100 FIND mag(V(out)) AT 100
+.meas ac h200 FIND mag(V(out)) AT 200
+.meas ac h500 FIND mag(V(out)) AT 500
+.meas ac h1k FIND mag(V(out)) AT 1000
+.meas ac h2k FIND mag(V(out)) AT 2000
+.meas ac h5k FIND mag(V(out)) AT 5000
+.meas ac h10k FIND mag(V(out)) AT 10000
+.end

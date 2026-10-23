@@ -1,0 +1,49 @@
+﻿Djenty Donkey 0.2.1 —— 高增益吉他箱头插件（Windows 64 位）
+==========================================================
+
+一、安装（二选一）
+------------------
+A. 安装版（推荐）
+   1. 双击 DjentyDonkey-Setup-0.2.1.exe
+   2. 如果弹出“Windows 已保护你的电脑”：点“更多信息”→“仍要运行”
+      （这个程序没有购买数字签名证书，所以 Windows 会提示，属于正常现象）
+   3. 一路下一步。默认会：
+      - 在桌面创建 Djenty Donkey 快捷方式
+      - 把 VST3 插件装到 C:\Program Files\Common Files\VST3\（DAW 会自动扫描到）
+
+B. 免安装版
+   打开 Portable 文件夹，直接双击 “Djenty Donkey.exe” 就能用。
+   想在 DAW 里用插件：把 “Djenty Donkey.vst3” 整个文件夹复制到
+   C:\Program Files\Common Files\VST3\
+
+二、第一次使用（独立程序）
+--------------------------
+1. 左上角 Options → Audio/MIDI Settings
+2. Audio device type 选 ASIO（声卡有 ASIO 驱动时，延迟最低）
+   没有 ASIO 的话选 Windows Audio
+3. Device 选你的声卡，勾选吉他所在的输入通道
+4. 缓冲（Buffer）建议 64 或 128
+
+三、面板说明
+------------
+INPUT        输入电平 + 电平表
+             调法：用力扫弦，让电平表的峰值落在绿色区域（-18 ~ -6 dB）
+             超过绿色区域：调低 Input；够不到：调高 Input
+             顶部红灯亮 = 输入过载（点一下电平表可以复位）
+GATE         噪声门
+TRANSPOSE    移调 ±12 半音（降调弹奏用）
+COMPRESSOR   压缩
+PRECISION DRIVE  前级 Drive（基于 Precision Drive 电路）
+             经典用法：Drive 0、Volume 8~10、Attack 2~3 → 收紧低频
+DONKEY HEAD  箱头：CLEAN / BLUE / RED 三通道（5150 / 6505 元件级模拟）
+CABINET IR   点 LOAD IR 选 .wav 箱体 IR，或者把文件直接拖进去
+             < > 切换同文件夹的上一个/下一个 IR，BUILT-IN 回到内置箱体
+10-BAND EQ   十段均衡
+PHASER / DELAY / REVERB  后级效果
+OUTPUT       总音量
+
+四、注意
+--------
+- 第一次打开时音量可能比较大，先把 OUTPUT 调低
+- 加载的 IR 文件如果被移动或删除，下次打开会回到内置箱体
+- 卸载：开始菜单 → Djenty Donkey → Uninstall

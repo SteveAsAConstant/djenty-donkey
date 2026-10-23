@@ -1,0 +1,104 @@
+* EVH 5150 LEAD preamp: input -> V1A -> lead gain -> V1B -> V2A -> V2B -> V5B -> V5A -> (to tone stack)
+* Reference for the C++ component-level model. Values from docs/5150_schematic_notes.md
+.include 12AX7.inc
+.param gain=0.5
+.param amp=0.01
+
+VB1 vb1 0 320
+VB2 vb2 0 320
+VIN src 0 SINE(0 {amp} 1k)
+
+* ---- input ----
+R27 src nin 22k
+C20 nin 0 39p
+C15 nin ng1 0.1u
+R25 ng1 0 1Meg
+R22 ng1 g1a 68k
+
+* ---- V1A ----
+X1A p1a g1a k1a 12AX7
+R2  vb1 p1a 220k
+R12 k1a 0 1.82k
+C3  k1a 0 1u
+C6  p1a n1 22n
+
+* ---- lead pre-gain network ----
+R29 n1 n2 470k
+C17 n1 n2 2.2n
+R41 n2 0 1Meg
+RVR2a n2 w {1Meg*(1-gain)+10}
+RVR2b w 0 {1Meg*gain+10}
+C19 n2 w 1n
+R40 n2 w 1Meg
+
+* ---- V1B ----
+R82 w g1b 470k
+X1B p1b g1b k1b 12AX7
+R3  vb1 p1b 100k
+R17 k1b 0 1.82k
+C4  k1b 0 1u
+C26 k1b 0 22u
+C2  p1b n3 22n
+R6  n3 g2a 470k
+R9  g2a 0 1Meg
+
+* ---- V2A (cold clipper, 39k unbypassed) ----
+X2A p2a g2a k2a 12AX7
+R1  vb1 p2a 100k
+R15 k2a 0 39k
+C1  p2a n4 22n
+C48 n4 0 1n
+R11 n4 0 330k
+R7  n4 g2b 220k
+
+* ---- V2B ----
+X2B p2b g2b k2b 12AX7
+R4  vb2 p2b 220k
+R13 k2b 0 1.82k
+C5  k2b 0 1u
+R32 p2b n5 1Meg
+C57 n5 g5b 22n
+R101 g5b 0 100k
+
+* ---- V5B ----
+X5B p5b g5b k5b 12AX7
+R96 vb2 p5b 220k
+R102 k5b 0 2.2k
+R87 p5b n6 1Meg
+C56 n6 g5a 22n
+R91 g5a 0 1Meg
+
+* ---- V5A (shunt feedback stage) ----
+X5A p5a g5a k5a 12AX7
+R86 vb2 p5a 100k
+R93 k5a 0 2.2k
+C58 p5a out 22n
+R88 g5a out 1Meg
+R89 out ts 470k
+RTS ts 0 100k
+
+.tran 0 60m 0 2u
+.step param amp list 0.001 0.01 0.1 0.5
+
+* DC operating points (averaged over the last cycles)
+.meas tran Vk1a AVG V(k1a) FROM 40m TO 60m
+.meas tran Vp1a AVG V(p1a) FROM 40m TO 60m
+.meas tran Vk1b AVG V(k1b) FROM 40m TO 60m
+.meas tran Vp1b AVG V(p1b) FROM 40m TO 60m
+.meas tran Vk2a AVG V(k2a) FROM 40m TO 60m
+.meas tran Vp2a AVG V(p2a) FROM 40m TO 60m
+.meas tran Vk2b AVG V(k2b) FROM 40m TO 60m
+.meas tran Vp2b AVG V(p2b) FROM 40m TO 60m
+.meas tran Vk5b AVG V(k5b) FROM 40m TO 60m
+.meas tran Vp5b AVG V(p5b) FROM 40m TO 60m
+.meas tran Vk5a AVG V(k5a) FROM 40m TO 60m
+.meas tran Vp5a AVG V(p5a) FROM 40m TO 60m
+* signal levels
+.meas tran in_pp  PP V(src) FROM 40m TO 60m
+.meas tran p1a_pp PP V(p1a) FROM 40m TO 60m
+.meas tran p1b_pp PP V(p1b) FROM 40m TO 60m
+.meas tran p2a_pp PP V(p2a) FROM 40m TO 60m
+.meas tran p2b_pp PP V(p2b) FROM 40m TO 60m
+.meas tran p5b_pp PP V(p5b) FROM 40m TO 60m
+.meas tran out_pp PP V(out) FROM 40m TO 60m
+.end

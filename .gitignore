@@ -1,0 +1,12 @@
+# build output
+build/
+dist/
+out/
+.vs/
+*.user
+
+# logs / LTspice outputs (regenerate with LTspice.exe -b)
+*.log
+*.raw
+spice/*.db
+spice/*.op.raw
