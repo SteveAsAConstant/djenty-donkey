@@ -208,7 +208,8 @@ public:
 
             // Newton converges quadratically: after a step this small the remaining error is ~step^2
             // (far below the residual tolerance), so the confirming evaluation can be skipped
-            if (converged || (acceptSmallStep && std::abs (d[0]) + std::abs (d[1]) < kStepTolGK && std::abs (d[2]) < kStepTolP))
+            const double tolGK = g - k < kGridOff ? kStepTolGKOff : kStepTolGK;
+            if (converged || (acceptSmallStep && std::abs (d[0]) + std::abs (d[1]) < tolGK && std::abs (d[2]) < kStepTolP))
                 return true;
           }
           return false;
@@ -359,7 +360,8 @@ private:
 
     // Newton step size (V) below which the solution is accepted. The remaining error is ~ step^2 * curvature:
     // tight on grid / cathode (the grid-current knee is 30 mV wide), loose on the plate (smooth, ~100 V scale).
-    static constexpr double kStepTolGK = 1e-3, kStepTolP = 0.1;
+    // Below kGridOff the grid current is exactly 0 and only the smooth Koren curve remains (volts scale).
+    static constexpr double kStepTolGK = 1e-3, kStepTolGKOff = 1e-2, kStepTolP = 0.1, kGridOff = -0.6;
     double resTol = 2e-9;        // KCL residual (A), sum over the 3 nodes
     bool acceptSmallStep = true;
 
