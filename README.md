@@ -55,7 +55,8 @@ build.bat
 
 Outputs go to `%USERPROFILE%\vab-build\DjentyDonkey_artefacts\Release\` (short path outside `%TEMP%` on purpose: Windows 260-char limit and MSBuild incremental builds).
 
-- DSP regression tests (no JUCE): `%USERPROFILE%\vab-build\Release\dsp_test.exe`
+- DSP regression tests (no JUCE): `%USERPROFILE%\vab-build\Release\dsp_test.exe` (`dsp_test.exe cpu` for per-module CPU)
+- Tone regression against the frozen v0.3.0 DSP and a high-precision reference: `%USERPROFILE%\vab-build\Release\tone_regress.exe`
 - Package (installer + portable + source zip, needs [Inno Setup 6](https://jrsoftware.org/isinfo.php)):
   `powershell -ExecutionPolicy Bypass -File installer\make_package.ps1`
 - LTspice reference netlists: `spice/` (`LTspice.exe -b <file>.cir`)
@@ -73,6 +74,7 @@ Source/
   PluginEditor.*, UI/   interface
   StandaloneApp.cpp     standalone shell (input never muted)
 tests/dsp_test.cpp      comparisons against LTspice + CPU benchmark
+tests/tone_regress.cpp  null / band-level comparison vs tests/baseline/ (frozen v0.3.0 DSP)
 spice/                  LTspice reference circuits
 installer/              Inno Setup script + packaging
 ```
