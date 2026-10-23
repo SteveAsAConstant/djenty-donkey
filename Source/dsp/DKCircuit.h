@@ -1,5 +1,6 @@
 #pragma once
 #include <algorithm>
+#include <cassert>
 #include <cmath>
 #include <vector>
 
@@ -14,7 +15,13 @@ namespace vamp
 // Nonlinear part: "ports" (voltage between two nodes, current flowing a -> b). Per sample the
 // caller solves only the m-dimensional port equation
 //        p = p0 + K * i(p)
-// with Newton's method, then calls finish(i) to update all node voltages and reactive states.
+// with Newton's method, then calls finish(i) to advance the reactive states.
+//
+// Per sample everything is expressed in the reactive states s (one companion current per C / L),
+// the inputs u and the port currents i, with matrices precomputed at rebuild:
+//        p0 = P [s; u]        s' = M [s; u; i]        v_out = O [s; u; i]
+// so only the states and the marked output nodes are ever computed (same math as solving the full
+// MNA system, about half the multiply-adds).
 class DKCircuit
 {
 public:
@@ -37,8 +44,8 @@ public:
         if (resistors[(size_t) idx].g != g) { resistors[(size_t) idx].g = g; dirty = true; }
     }
 
-    void addC (int a, int b, double c) { caps.push_back ({ a, b, c, 0, 0 }); dirty = true; }
-    void addL (int a, int b, double l) { inds.push_back ({ a, b, l, 0, 0 }); dirty = true; }
+    void addC (int a, int b, double c) { caps.push_back ({ a, b, c, 0 }); dirty = true; }
+    void addL (int a, int b, double l) { inds.push_back ({ a, b, l, 0 }); dirty = true; }
 
     // node --[rs]-- u[k]; returns the input index k
     int addSource (int node, double rs)
@@ -75,8 +82,11 @@ public:
         for (auto& t : transformers) numAux += (int) t.size() + 1;
         N = numNodes + numAux;
         m = (int) ports.size();
+        numS = (int) (caps.size() + inds.size());
+        numU = (int) sources.size();
+        assert (numS <= kMaxStates);
         x.assign ((size_t) N, 0.0);
-        bvec.assign ((size_t) N, 0.0);
+        z.assign ((size_t) (numS + numU + m), 0.0);
         p0.assign ((size_t) m, 0.0);
         dirty = true;
         reset();
@@ -84,35 +94,22 @@ public:
 
     void reset()
     {
-        for (auto& c : caps) c.ieq = 0;
-        for (auto& l : inds) l.ieq = 0;
+        std::fill (z.begin(), z.end(), 0.0);
         std::fill (x.begin(), x.end(), 0.0);
     }
 
-    // Build b from the source values u and the reactive histories, return p0 = E * b
+    // p0 = P [s; u] for the source values u and the current reactive states
     const std::vector<double>& computeP0 (const double* u)
     {
         if (dirty) rebuild();
 
-        std::fill (bvec.begin(), bvec.end(), 0.0);
-        for (size_t k = 0; k < sources.size(); ++k)
-            bvec[(size_t) sources[k].node] += sources[k].g * u[k];
-        for (auto& c : caps)
-        {
-            if (c.a >= 0) bvec[(size_t) c.a] += c.ieq;
-            if (c.b >= 0) bvec[(size_t) c.b] -= c.ieq;
-        }
-        for (auto& l : inds)
-        {
-            if (l.a >= 0) bvec[(size_t) l.a] -= l.ieq;
-            if (l.b >= 0) bvec[(size_t) l.b] += l.ieq;
-        }
-
+        std::copy (u, u + numU, z.begin() + numS);
+        const int nz = numS + numU;
         for (int r = 0; r < m; ++r)
         {
-            const double* e = &E[(size_t) r * N];
+            const double* row = &P[(size_t) r * nz];
             double s = 0.0;
-            for (int j = 0; j < N; ++j) s += e[j] * bvec[(size_t) j];
+            for (int j = 0; j < nz; ++j) s += row[j] * z[(size_t) j];
             p0[(size_t) r] = s;
         }
         return p0;
@@ -121,35 +118,33 @@ public:
     // K (m x m, row-major): sensitivity of the port voltages to the port currents
     const std::vector<double>& getK() const { return K; }
 
-    // Given the converged port currents, compute all unknowns and advance the states
+    // Given the converged port currents, compute the output nodes and advance the states
+    // (uses the u passed to the preceding computeP0)
     void finish (const double* iPorts)
     {
-        for (int r : neededRows)
+        std::copy (iPorts, iPorts + m, z.begin() + numS + numU);
+        const int nz = numS + numU + m;
+
+        for (size_t o = 0; o < outputs.size(); ++o)
         {
-            const double* a = &Ainv[(size_t) r * N];
+            const double* row = &O[o * (size_t) nz];
             double s = 0.0;
-            for (int j = 0; j < N; ++j) s += a[j] * bvec[(size_t) j];
-            const double* f = &AinvNi[(size_t) r * m];
-            for (int j = 0; j < m; ++j) s += f[j] * iPorts[j];
-            x[(size_t) r] = s;
+            for (int j = 0; j < nz; ++j) s += row[j] * z[(size_t) j];
+            x[(size_t) outputs[o]] = s;
         }
 
-        for (auto& c : caps)
+        double sNew[kMaxStates];
+        for (int r = 0; r < numS; ++r)
         {
-            const double v = nodeV (c.a) - nodeV (c.b);
-            const double i = c.gc * v - c.ieq;
-            c.ieq = c.gc * v + i;
+            const double* row = &M[(size_t) r * nz];
+            double s = 0.0;
+            for (int j = 0; j < nz; ++j) s += row[j] * z[(size_t) j];
+            sNew[r] = s;
         }
-        for (auto& l : inds)
-        {
-            const double v = nodeV (l.a) - nodeV (l.b);
-            const double i = l.gl * v + l.ieq;
-            l.ieq = i + l.gl * v;
-        }
+        std::copy (sNew, sNew + numS, z.begin());
     }
 
-    // Only nodes touching a capacitor / inductor (state updates) or marked as outputs are
-    // computed in finish(); nodeV() of any other node is not kept up to date.
+    // Only nodes marked as outputs are computed in finish(); nodeV() of any other node is 0.
     double nodeV (int n) const { return n < 0 ? 0.0 : x[(size_t) n]; }
     void markOutput (int node) { outputs.push_back (node); dirty = true; }
 
@@ -157,8 +152,8 @@ public:
 
 private:
     struct Res { int a, b; double g; };
-    struct Cap { int a, b; double c, gc, ieq; };
-    struct Ind { int a, b; double l, gl, ieq; };
+    struct Cap { int a, b; double c, gc; };
+    struct Ind { int a, b; double l, gl; };
     struct Src { int node; double g; };
     struct Port { int a, b; };
 
@@ -193,19 +188,10 @@ private:
             aux = eIdx + 1;
         }
 
-        Ainv = invert (A, N);
-
-        std::vector<bool> need ((size_t) N, false);
-        auto mark = [&need] (int n) { if (n >= 0) need[(size_t) n] = true; };
-        for (auto& c : caps) { mark (c.a); mark (c.b); }
-        for (auto& l : inds) { mark (l.a); mark (l.b); }
-        for (int o : outputs) mark (o);
-        neededRows.clear();
-        for (int r = 0; r < N; ++r)
-            if (need[(size_t) r]) neededRows.push_back (r);
+        const auto Ainv = invert (A, N);
 
         // Ni: port current a -> b leaves node a (-1) and enters node b (+1); Nv = -Ni^T
-        AinvNi.assign ((size_t) N * m, 0.0);
+        std::vector<double> AinvNi ((size_t) N * m, 0.0);
         for (int r = 0; r < N; ++r)
             for (int k = 0; k < m; ++k)
             {
@@ -216,18 +202,10 @@ private:
                 AinvNi[(size_t) r * m + k] = s;
             }
 
-        E.assign ((size_t) m * N, 0.0);
         K.assign ((size_t) m * m, 0.0);
         for (int k = 0; k < m; ++k)
         {
             const auto& pt = ports[(size_t) k];
-            for (int j = 0; j < N; ++j)
-            {
-                double s = 0.0;
-                if (pt.a >= 0) s += Ainv[(size_t) pt.a * N + j];
-                if (pt.b >= 0) s -= Ainv[(size_t) pt.b * N + j];
-                E[(size_t) k * N + j] = s;
-            }
             for (int j = 0; j < m; ++j)
             {
                 double s = 0.0;
@@ -236,6 +214,67 @@ private:
                 K[(size_t) k * m + j] = s;
             }
         }
+
+        // The MNA right-hand side is b = Bs s + Bu u: a capacitor companion current ieq enters node a
+        // and leaves b, an inductor's the other way round, a source drives its node through g.
+        // Node voltages are then  v = Ainv Bs s + Ainv Bu u + AinvNi i,  written here as one row
+        // per node over z = [s; u; i].
+        const int nz = numS + numU + m;
+        std::vector<double> V ((size_t) N * nz, 0.0);
+        for (int r = 0; r < N; ++r)
+        {
+            double* row = &V[(size_t) r * nz];
+            const double* a = &Ainv[(size_t) r * N];
+            int k = 0;
+            for (auto& c : caps)
+            {
+                if (c.a >= 0) row[k] += a[c.a];
+                if (c.b >= 0) row[k] -= a[c.b];
+                ++k;
+            }
+            for (auto& l : inds)
+            {
+                if (l.a >= 0) row[k] -= a[l.a];
+                if (l.b >= 0) row[k] += a[l.b];
+                ++k;
+            }
+            for (auto& s : sources)
+                row[k++] = a[s.node] * s.g;
+            for (int j = 0; j < m; ++j)
+                row[k++] = AinvNi[(size_t) r * m + j];
+        }
+        auto nodeRow = [&] (int n, int j) { return n < 0 ? 0.0 : V[(size_t) n * nz + j]; };
+
+        // p0 = (v(a) - v(b)) of each port with i = 0, over [s; u]
+        const int nsu = numS + numU;
+        P.assign ((size_t) m * nsu, 0.0);
+        for (int k = 0; k < m; ++k)
+            for (int j = 0; j < nsu; ++j)
+                P[(size_t) k * nsu + j] = nodeRow (ports[(size_t) k].a, j) - nodeRow (ports[(size_t) k].b, j);
+
+        // trapezoidal companions:  cap  ieq' = 2 gc v - ieq,   inductor  ieq' = 2 gl v + ieq
+        M.assign ((size_t) numS * nz, 0.0);
+        int k = 0;
+        for (auto& c : caps)
+        {
+            for (int j = 0; j < nz; ++j)
+                M[(size_t) k * nz + j] = 2.0 * c.gc * (nodeRow (c.a, j) - nodeRow (c.b, j));
+            M[(size_t) k * nz + k] -= 1.0;
+            ++k;
+        }
+        for (auto& l : inds)
+        {
+            for (int j = 0; j < nz; ++j)
+                M[(size_t) k * nz + j] = 2.0 * l.gl * (nodeRow (l.a, j) - nodeRow (l.b, j));
+            M[(size_t) k * nz + k] += 1.0;
+            ++k;
+        }
+
+        O.assign (outputs.size() * (size_t) nz, 0.0);
+        for (size_t o = 0; o < outputs.size(); ++o)
+            for (int j = 0; j < nz; ++j)
+                O[o * (size_t) nz + j] = nodeRow (outputs[o], j);
+
         dirty = false;
     }
 
@@ -272,8 +311,10 @@ private:
         return I;
     }
 
+    static constexpr int kMaxStates = 64; // capacitors + inductors (finish() keeps s' on the stack)
+
     double T = 1.0 / 192000.0;
-    int numNodes = 0, numAux = 0, N = 0, m = 0;
+    int numNodes = 0, numAux = 0, N = 0, m = 0, numS = 0, numU = 0;
     bool dirty = true;
 
     std::vector<Res> resistors;
@@ -282,10 +323,11 @@ private:
     std::vector<Src> sources;
     std::vector<std::vector<Winding>> transformers;
     std::vector<Port> ports;
-    std::vector<int> outputs, neededRows;
+    std::vector<int> outputs;
 
-    std::vector<double> Ainv, AinvNi, E, K;
-    std::vector<double> x, bvec, p0;
+    std::vector<double> K, P, M, O;
+    std::vector<double> z;     // [s; u; i]: reactive states, then the inputs and port currents of this sample
+    std::vector<double> x, p0; // x: output node voltages (others stay 0)
 };
 
 } // namespace vamp

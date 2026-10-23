@@ -146,6 +146,8 @@ public:
         dk.markOutput (nS);  // speaker
         dk.markOutput (nK);  // diagnostics
         dk.markOutput (nO1);
+        dk.markOutput (nPA);
+        dk.markOutput (nPB);
 
         // nonlinear ports
         dk.addPort (nPB, nK); dk.addPort (nGB, nK);   // V4B
@@ -416,9 +418,10 @@ private:
         std::fill (std::begin (pPrev), std::end (pPrev), 0.0);
     }
 
-    // Newton step (V) below which a solve is accepted without a confirming evaluation: plates 10 mV,
-    // grids 0.5 mV (the grid-current knee is only 30 mV wide, so grids are weighted 20x)
-    static constexpr double kPlateStepTol = 1e-2, kGridStepWeight = 20.0;
+    // Newton step (V) below which a solve is accepted without a confirming evaluation: plates 30 mV,
+    // grids 6 mV (weighted 5x: the grid-current knee is only 30 mV wide). Tuned with tone_regress:
+    // -125 dB or better against the reference solution.
+    static constexpr double kPlateStepTol = 3e-2, kGridStepWeight = 5.0;
     double resTol = 1e-4;          // port-equation residual (V, grids weighted 10x)
     bool acceptSmallStep = true;
 
