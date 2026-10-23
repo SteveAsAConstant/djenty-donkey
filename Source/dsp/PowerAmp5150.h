@@ -11,17 +11,48 @@ struct KorenPentode
 {
     static constexpr double mu = 8.7, ex = 1.35, kg1 = 1460.0, kg2 = 4500.0, kp = 48.0, kvb = 12.0;
 
+    static const SoftplusPow& softplusPow() { static const SoftplusPow t (ex); return t; }
+
+    bool exact = false; // reference renders: original formula instead of the table
+
+    // Terms that depend only on the screen voltage (constant during a Newton solve)
+    struct Screen { double vg2k, inv, scale; };
+    static Screen screenTerms (double vg2k)
+    {
+        // scale = 2/kg1 (vg2k/kp)^ex; vg2k <= 0 -> no plate current (as Koren's E1 <= 0)
+        return { vg2k, 1.0 / vg2k, vg2k > 0.0 ? 2.0 / kg1 * std::pow (vg2k / kp, ex) : 0.0 };
+    }
+
     // plate current of ONE tube and its derivatives w.r.t. Vpk and Vg1k
     inline void plate (double vpk, double vg1k, double vg2k, double& ip, double& dVpk, double& dVg1) const
     {
-        plateInv (vpk, vg1k, vg2k, 1.0 / vg2k, ip, dVpk, dVg1);
+        plate (vpk, vg1k, screenTerms (vg2k), ip, dVpk, dVg1);
     }
 
-    // same, with 1 / vg2k precomputed (the screen voltage is constant during a Newton solve)
-    inline void plateInv (double vpk, double vg1k, double vg2k, double invVg2k, double& ip, double& dVpk, double& dVg1) const
+    //   ip = 2/kg1 (vg2k/kp)^ex softplus(x)^ex atan(vpk/kvb),   x = kp (1/mu + vg1k/vg2k)
+    // atan() is kept smooth through Vpk = 0 (as in Koren's original); below 0 the flyback
+    // diodes dominate, and the smooth knee keeps Newton's method well behaved.
+    inline void plate (double vpk, double vg1k, const Screen& s, double& ip, double& dVpk, double& dVg1) const
+    {
+        if (exact) { plateExact (vpk, vg1k, s.vg2k, ip, dVpk, dVg1); return; }
+        constexpr double kpOverMu = kp / mu, invKvb = 1.0 / kvb;
+        const double x = kpOverMu + kp * vg1k * s.inv;
+        double G, dG;
+        softplusPow().eval (x, G, dG);
+
+        const double base = s.scale * G;
+        const double r = vpk * invKvb;
+        const double at = std::atan (r);
+        ip = base * at;
+        dVg1 = s.scale * dG * kp * s.inv * at;
+        dVpk = base * invKvb / (1.0 + r * r);
+    }
+
+    // The same with the original formula: reference for the tests
+    inline void plateExact (double vpk, double vg1k, double vg2k, double& ip, double& dVpk, double& dVg1) const
     {
         constexpr double kpOverMu = kp / mu, invKvb = 1.0 / kvb, twoOverKg1 = 2.0 / kg1;
-        const double x = kpOverMu + kp * vg1k * invVg2k;
+        const double x = kpOverMu + kp * vg1k / vg2k;
         double sp, sig;
         if (x > 30.0)       { sp = x; sig = 1.0; }
         else if (x < -30.0) { sp = std::exp (x); sig = sp; }
@@ -33,8 +64,6 @@ struct KorenPentode
         }
         const double E1 = vg2k * (1.0 / kp) * sp;
         if (E1 <= 0.0) { ip = 0.0; dVpk = 0.0; dVg1 = 0.0; return; }
-        // atan() is kept smooth through Vpk = 0 (as in Koren's original); below 0 the flyback
-        // diodes dominate, and the smooth knee keeps Newton's method well behaved.
 
         const double Ep = std::exp ((ex - 1.0) * std::log (E1)); // == pow (E1, ex - 1), faster
         const double base = twoOverKg1 * Ep * E1;
@@ -197,6 +226,7 @@ public:
         u[srcB] = vB;
 
         const auto& p0 = dk.computeP0 (u);
+        screenNow = KorenPentode::screenTerms (vScreen); // constant during the Newton solve
         const auto& K = dk.getK();
 
         // predictor: linear extrapolation of the last two solutions, switched off while it does
@@ -317,11 +347,13 @@ public:
     long long statSamples = 0, statIterations = 0, statFailures = 0;
     bool lastConverged = true;
 
-    // Reference renders for the tone regression: 1000x tighter residual and no early step acceptance
+    // Reference renders for the tone regression: 1000x tighter residual, no early step acceptance and
+    // the original (untabulated) tube formulas
     void setReferencePrecision (bool on)
     {
         resTol = on ? 1e-7 : 1e-4;
         acceptSmallStep = ! on;
+        triode.exact = tube.exact = on;
         v3a.setReferencePrecision (on);
     }
     double lastP0[8] {};
@@ -338,7 +370,7 @@ public:
 private:
     void evalDevices (double (&i)[8], double (&d)[8][2])
     {
-        const double invScreen = 1.0 / vScreen;
+        const auto& screen = screenNow;
         for (int t = 0; t < 2; ++t) // V4B, V4A
         {
             const int pk = 2 * t, gk = pk + 1;
@@ -352,7 +384,7 @@ private:
         {
             const int pk = 4 + 2 * t, gk = pk + 1;
             double ip, dvpk, dvg1, ig, dig;
-            tube.plateInv (p[pk], p[gk], vScreen, invScreen, ip, dvpk, dvg1);
+            tube.plate (p[pk], p[gk], screen, ip, dvpk, dvg1);
             gridCurrentR (p[gk], 1000.0, ig, dig);
             // CR200 / CR201 flyback diodes: conduct from ground into the plate when it swings below 0 V
             constexpr double von = 0.6, vd = 0.03, rd = 1.0;
@@ -438,6 +470,7 @@ private:
 
     double fs = 192000.0, T = 1.0 / 192000.0;
     double vB = 490.0, vScreen = 485.0, vBias = -45.0;
+    KorenPentode::Screen screenNow { 485.0, 1.0 / 485.0, 0.0 };
     double p[8] {}, pPrev[8] {};
     bool usePredictor = true;
     double predictorScore = 1.0;

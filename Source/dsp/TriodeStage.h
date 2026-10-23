@@ -4,14 +4,91 @@
 
 namespace vamp
 {
+// softplus(x)^ex = log(1 + e^x)^ex and its derivative, the transcendental core of Koren's tube
+// models. Tabulated for |x| < 30 as a cubic Hermite spline (h = 1/32, ~30 KB, relative error < 1e-8,
+// far below the Newton tolerances); beyond, softplus is e^x or x, exactly as Koren's formula is
+// evaluated. Replaces 3 serial exp/log calls (~40 ns) by one lookup.
+class SoftplusPow
+{
+public:
+    explicit SoftplusPow (double exponent) : ex (exponent)
+    {
+        for (int k = 0; k <= kN; ++k)
+        {
+            const double x = kLo + k * kH;
+            const double e = std::exp (x), sp = std::log1p (e), sig = e / (1.0 + e);
+            const double spe1 = std::pow (sp, ex - 1.0);
+            table[2 * k] = spe1 * sp;                 // sp^ex
+            table[2 * k + 1] = kH * ex * spe1 * sig;  // h * d/dx sp^ex
+        }
+    }
+
+    inline void eval (double x, double& G, double& dG) const
+    {
+        if (x >= kLo && x < kHi)
+        {
+            const double u = (x - kLo) * (1.0 / kH);
+            const int i = (int) u;
+            const double t = u - i, t2 = t * t, t3 = t2 * t;
+            const double* c = &table[2 * i]; // g0, h*d0, g1, h*d1
+            G = (2.0 * t3 - 3.0 * t2 + 1.0) * c[0] + (t3 - 2.0 * t2 + t) * c[1]
+              + (3.0 * t2 - 2.0 * t3) * c[2] + (t3 - t2) * c[3];
+            dG = ((6.0 * t2 - 6.0 * t) * (c[0] - c[2]) + (3.0 * t2 - 4.0 * t + 1.0) * c[1]
+                  + (3.0 * t2 - 2.0 * t) * c[3]) * (1.0 / kH);
+        }
+        else if (x >= kHi) // softplus = x
+        {
+            const double p = std::exp ((ex - 1.0) * std::log (x));
+            G = p * x;
+            dG = ex * p;
+        }
+        else // softplus = e^x (NaN lands here too and propagates)
+        {
+            G = std::exp (ex * x);
+            dG = ex * G;
+        }
+    }
+
+private:
+    static constexpr double kLo = -30.0, kHi = 30.0, kH = 1.0 / 32.0;
+    static constexpr int kN = 1920; // (kHi - kLo) / kH
+    double ex;
+    double table[2 * (kN + 1)];
+};
+
 // Norman Koren's triode model (same equations as spice/12AX7.inc)
 struct KorenTriode
 {
     static constexpr double mu = 100.0, ex = 1.4, kg1 = 1060.0, kp = 600.0, kvb = 300.0;
 
-    // Plate current and its partial derivatives w.r.t. Vpk and Vgk.
-    // Divisions by constants are folded into reciprocals (2 divides per call instead of 7).
+    static const SoftplusPow& softplusPow() { static const SoftplusPow t (ex); return t; }
+
+    bool exact = false; // reference renders: original formula instead of the table
+
+    // Plate current and its partial derivatives w.r.t. Vpk and Vgk:
+    //   ip = 2/kg1 (vpk/kp)^ex softplus(x)^ex,   x = kp (1/mu + vgk / sqrt(kvb + vpk^2))
+    // (vpk/kp)^(ex-1) and the softplus table are independent, so the CPU overlaps them.
     inline void eval (double vpk, double vgk, double& ip, double& dVpk, double& dVgk) const
+    {
+        if (exact) { evalExact (vpk, vgk, ip, dVpk, dVgk); return; }
+        if (vpk <= 0.0) { ip = 0.0; dVpk = 0.0; dVgk = 0.0; return; }
+        constexpr double kpOverMu = kp / mu, invKp = 1.0 / kp, twoOverKg1 = 2.0 / kg1;
+        const double r = vpk * invKp;
+        const double rp = std::exp ((ex - 1.0) * std::log (r)); // (vpk/kp)^(ex-1)
+        const double invS = 1.0 / std::sqrt (kvb + vpk * vpk);
+        const double x = kpOverMu + kp * vgk * invS;
+
+        double G, dG;
+        softplusPow().eval (x, G, dG);
+
+        const double a = twoOverKg1 * r * rp; // 2/kg1 (vpk/kp)^ex
+        ip = a * G;
+        dVgk = a * dG * kp * invS;
+        dVpk = twoOverKg1 * ex * rp * invKp * G - a * dG * kp * vgk * vpk * invS * invS * invS;
+    }
+
+    // The same with the original formula (3 serial exp/log calls): reference for the tests
+    inline void evalExact (double vpk, double vgk, double& ip, double& dVpk, double& dVgk) const
     {
         constexpr double kpOverMu = kp / mu, invKp = 1.0 / kp, twoOverKg1 = 2.0 / kg1;
         const double invS = 1.0 / std::sqrt (kvb + vpk * vpk);
@@ -79,6 +156,7 @@ class TriodeStage
 public:
     void configure (const TriodeConfig& c, double sampleRate)
     {
+        KorenTriode::softplusPow(); // builds the table on first use: here, not on the audio thread
         cfg = c;
         T = 1.0 / sampleRate;
         derive();
@@ -186,8 +264,9 @@ public:
     // Newton statistics (for tests)
     long long statSamples = 0, statEvals = 0, statFallbacks = 0, statFailures = 0;
 
-    // Reference renders for the tone regression: 1000x tighter residual and no early step acceptance
-    void setReferencePrecision (bool on) { resTol = on ? 2e-12 : 2e-9; acceptSmallStep = ! on; }
+    // Reference renders for the tone regression: 1000x tighter residual, no early step acceptance and the
+    // original (untabulated) tube formula
+    void setReferencePrecision (bool on) { resTol = on ? 2e-12 : 2e-9; acceptSmallStep = ! on; tube.exact = on; }
 
     double getVk() const { return vK; }
     double getVp() const { return vP; }

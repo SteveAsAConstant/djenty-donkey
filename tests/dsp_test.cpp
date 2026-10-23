@@ -323,6 +323,46 @@ struct LegacyShifter
     }
 };
 
+// The softplus^ex tables in the Koren models against the original formulas, over the whole range
+// the tubes visit (cutoff to grid conduction). Errors are relative to the local current scale.
+static void tubeTableAccuracy()
+{
+    std::printf ("\n== Koren tube models: tabulated vs exact formula (max relative error) ==\n");
+    {
+        KorenTriode t;
+        double eI = 0, eP = 0, eG = 0;
+        for (double vp = 0.5; vp < 500.0; vp *= 1.013)
+            for (double vg = -40.0; vg < 3.0; vg += 0.0173)
+            {
+                double i0, p0, g0, i1, p1, g1;
+                t.evalExact (vp, vg, i0, p0, g0);
+                t.eval (vp, vg, i1, p1, g1);
+                const double sI = std::max (std::abs (i0), 1e-9), sD = std::max ({ std::abs (p0), std::abs (g0), 1e-9 });
+                eI = std::max (eI, std::abs (i1 - i0) / sI);
+                eP = std::max (eP, std::abs (p1 - p0) / sD);
+                eG = std::max (eG, std::abs (g1 - g0) / sD);
+            }
+        std::printf ("12AX7: ip %.1e  dip/dvpk %.1e  dip/dvgk %.1e  (floor 1 nA / 1 nS)\n", eI, eP, eG);
+    }
+    {
+        KorenPentode t;
+        double eI = 0, eP = 0, eG = 0;
+        for (double vs : { 380.0, 450.0, 495.0 })
+            for (double vp = -5.0; vp < 900.0; vp += 1.37)
+                for (double vg = -200.0; vg < 20.0; vg += 0.113)
+                {
+                    double i0, p0, g0, i1, p1, g1;
+                    t.plateExact (vp, vg, vs, i0, p0, g0);
+                    t.plate (vp, vg, vs, i1, p1, g1);
+                    const double sI = std::max (std::abs (i0), 1e-9), sD = std::max ({ std::abs (p0), std::abs (g0), 1e-9 });
+                    eI = std::max (eI, std::abs (i1 - i0) / sI);
+                    eP = std::max (eP, std::abs (p1 - p0) / sD);
+                    eG = std::max (eG, std::abs (g1 - g0) / sD);
+                }
+        std::printf ("6L6GC: ip %.1e  dip/dvpk %.1e  dip/dvg1 %.1e  (floor 1 nA / 1 nS)\n", eI, eP, eG);
+    }
+}
+
 // Per-module CPU on a guitar-like DI (palm-muted chugs + idle hiss between notes), at the rates the
 // plugin runs them (non-linear amp at 4x = 192 kHz, the rest at 48 kHz). Reports the average load and
 // the worst 64-sample block: on dedicated hardware the per-block deadline is what matters.
@@ -618,6 +658,7 @@ static void chainLevels()
 int main (int argc, char** argv)
 {
     if (argc > 1 && std::string (argv[1]) == "cpu") { cpuModules(); return 0; }
+    if (argc > 1 && std::string (argv[1]) == "tables") { tubeTableAccuracy(); return 0; }
     if (argc > 1 && std::string (argv[1]) == "chain") { chainLevels(); return 0; }
     if (argc > 1 && std::string (argv[1]) == "transpose") { transposeTests(); return 0; }
     if (argc > 1 && std::string (argv[1]) == "ingate") { inputGateTest(); return 0; }
@@ -630,6 +671,7 @@ int main (int argc, char** argv)
     leadPreampVsSpice();
     toneStackResponse();
     driveSanity();
+    tubeTableAccuracy();
     cpuBenchmark();
     return 0;
 }

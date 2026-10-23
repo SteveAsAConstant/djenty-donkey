@@ -2,7 +2,8 @@
 //   base   the frozen v0.3.0 DSP (tests/baseline/, namespace vamp_baseline)
 //   new    the current DSP (Source/dsp/, namespace vamp)
 //   ref    the current DSP with setReferencePrecision(): 1000x tighter Newton residuals, no early
-//          step acceptance. This is the "true" solution of the circuit equations the model defines.
+//          step acceptance, the original (untabulated) Koren formulas. This is the "true" solution
+//          of the circuit equations the model defines.
 // and reports, all as RMS error relative to the signal, band-limited to 20 kHz:
 //   new-base   how far the current code moved from v0.3.0
 //   base err   v0.3.0 vs ref: the original solver's own numerical error
