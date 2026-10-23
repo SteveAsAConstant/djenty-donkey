@@ -44,7 +44,9 @@ COMPRESSOR   压缩
 PRECISION DRIVE  前级 Drive（基于 Precision Drive 电路）
              经典用法：Drive 0、Volume 8~10、Attack 2~3 → 收紧低频
 DONKEY HEAD  箱头：CLEAN / BLUE / RED 三通道（5150 / 6505 元件级模拟，含功放）
-             Master 推功放：1~2 功放干净，3 左右开始饱和，5 以上完全饱和
+             Gain / Master 的刻度按真实 6505 校准过（v0.4），和真机旋钮读数一致
+             Master 推功放：3 以下功放基本干净，3~5 逐渐压缩，7 以上完全饱和
+             （v0.3 的工程和预设打开时会自动换算，声音不变）
              Volume 在功放之后只调音量不改音色（相当于衰减器）：
              Master 推到喜欢的饱和度，再用 Volume 把音量降下来
              Presence / Resonance 是功放负反馈电路，调高频 / 低频的'松紧'

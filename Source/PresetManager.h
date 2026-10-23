@@ -1,6 +1,27 @@
 #pragma once
 #include <juce_audio_processors/juce_audio_processors.h>
 #include "Parameters.h"
+#include "dsp/Preamp5150.h"
+
+// Gain / Master knob curves were recalibrated against a real amp in v0.4 (see Preamp5150.h).
+// States and preset files without this marker are from v0.3: their Gain and Master values are
+// converted so that they keep their sound.
+inline constexpr int kKnobCurvesVersion = 2;
+inline constexpr const char* kKnobCurvesAttr = "knobCurves";
+
+inline void upgradeKnobCurves (juce::XmlElement& xml)
+{
+    if (xml.getIntAttribute (kKnobCurvesAttr, 1) >= kKnobCurvesVersion)
+        return;
+    for (auto* p : xml.getChildWithTagNameIterator ("PARAM"))
+    {
+        const auto id = p->getStringAttribute ("id");
+        const double v = p->getDoubleAttribute ("value") * 0.1;
+        if (id == ids::ampGain) p->setAttribute ("value", 10.0 * vamp::gainKnobFromV03 (v));
+        else if (id == ids::master) p->setAttribute ("value", 10.0 * vamp::masterKnobFromV03 (v));
+    }
+    xml.setAttribute (kKnobCurvesAttr, kKnobCurvesVersion);
+}
 
 // Factory presets (built into the plugin) + user presets (XML files in
 // Documents/Djenty Donkey/Presets, easy to share). Call everything from the message thread.
@@ -67,6 +88,7 @@ public:
         {
             std::unique_ptr<juce::XmlElement> xml (juce::XmlDocument::parse (userFiles[index - getNumFactory()]));
             if (xml == nullptr) return;
+            upgradeKnobCurves (*xml);
             resetAllToDefault();
             for (auto* p : xml->getChildWithTagNameIterator ("PARAM"))
                 setParam (p->getStringAttribute ("id"), (float) p->getDoubleAttribute ("value"));
@@ -89,6 +111,7 @@ public:
         xml->setTagName ("DjentyDonkeyPreset");
         xml->setAttribute ("name", name);
         xml->setAttribute ("version", JucePlugin_VersionString);
+        xml->setAttribute (kKnobCurvesAttr, kKnobCurvesVersion);
         xml->setAttribute ("irPath", getIRPath());
 
         const bool ok = xml->writeTo (getUserFolder().getChildFile (name + ".xml"));
@@ -133,32 +156,32 @@ private:
         static const std::vector<Factory> presets = {
             { "Default", {} },
             { "Djent Rhythm", {
-                { ids::channel, 2 }, { ids::ampGain, 5.0f }, { ids::bass, 4.5f }, { ids::mid, 6.0f }, { ids::treble, 6.5f },
-                { ids::presence, 5.5f }, { ids::resonance, 4.0f }, { ids::master, 3.5f },
+                { ids::channel, 2 }, { ids::ampGain, 6.1f }, { ids::bass, 4.5f }, { ids::mid, 6.0f }, { ids::treble, 6.5f },
+                { ids::presence, 5.5f }, { ids::resonance, 4.0f }, { ids::master, 5.1f },
                 { ids::boostOn, 1 }, { ids::boostDrive, 0.0f }, { ids::boostLevel, 9.0f }, { ids::boostTone, 6.0f }, { ids::boostAttack, 2 },
                 { ids::inGateOn, 1 }, { ids::inGateThresh, -50.0f }, { ids::inGateRelease, 15.0f },
                 { ids::gateThresh, -55.0f }, { ids::gateRelease, 60.0f }, { ids::gateLow, 40.0f }, { ids::gateMid, 70.0f }, { ids::gateHigh, 100.0f } } },
             { "Djent Drop -2 (LIVE)", {
-                { ids::channel, 2 }, { ids::ampGain, 5.0f }, { ids::bass, 4.0f }, { ids::mid, 6.0f }, { ids::treble, 6.5f },
-                { ids::presence, 5.5f }, { ids::resonance, 3.5f }, { ids::master, 3.5f },
+                { ids::channel, 2 }, { ids::ampGain, 6.1f }, { ids::bass, 4.0f }, { ids::mid, 6.0f }, { ids::treble, 6.5f },
+                { ids::presence, 5.5f }, { ids::resonance, 3.5f }, { ids::master, 5.1f },
                 { ids::boostOn, 1 }, { ids::boostDrive, 0.0f }, { ids::boostLevel, 9.0f }, { ids::boostTone, 6.0f }, { ids::boostAttack, 1 },
                 { ids::transpose, -2 }, { ids::transposeMode, 0 },
                 { ids::inGateOn, 1 }, { ids::inGateThresh, -50.0f }, { ids::inGateRelease, 15.0f },
                 { ids::gateThresh, -55.0f }, { ids::gateRelease, 60.0f } } },
             { "5150 Lead", {
-                { ids::channel, 2 }, { ids::ampGain, 7.0f }, { ids::bass, 5.0f }, { ids::mid, 6.5f }, { ids::treble, 6.0f },
-                { ids::presence, 6.0f }, { ids::resonance, 5.0f }, { ids::master, 4.0f },
+                { ids::channel, 2 }, { ids::ampGain, 7.7f }, { ids::bass, 5.0f }, { ids::mid, 6.5f }, { ids::treble, 6.0f },
+                { ids::presence, 6.0f }, { ids::resonance, 5.0f }, { ids::master, 5.7f },
                 { ids::boostOn, 1 }, { ids::boostDrive, 2.0f }, { ids::boostLevel, 7.0f }, { ids::boostAttack, 4 },
                 { ids::gateThresh, -62.0f }, { ids::gateRelease, 120.0f },
                 { ids::delayOn, 1 }, { ids::dlTime, 420.0f }, { ids::dlFeedback, 0.3f }, { ids::dlMix, 0.2f }, { ids::dlPingPong, 1 },
                 { ids::reverbOn, 1 }, { ids::rvSize, 0.55f }, { ids::rvMix, 0.18f } } },
             { "Blue Crunch", {
-                { ids::channel, 1 }, { ids::ampGain, 6.0f }, { ids::bass, 5.5f }, { ids::mid, 5.5f }, { ids::treble, 6.0f },
-                { ids::presence, 5.0f }, { ids::resonance, 5.0f }, { ids::master, 3.0f },
+                { ids::channel, 1 }, { ids::ampGain, 6.9f }, { ids::bass, 5.5f }, { ids::mid, 5.5f }, { ids::treble, 6.0f },
+                { ids::presence, 5.0f }, { ids::resonance, 5.0f }, { ids::master, 4.6f },
                 { ids::gateThresh, -62.0f }, { ids::gateLow, 20.0f }, { ids::gateMid, 40.0f }, { ids::gateHigh, 80.0f } } },
             { "Big Clean", {
-                { ids::channel, 0 }, { ids::ampGain, 4.0f }, { ids::bass, 5.0f }, { ids::mid, 5.0f }, { ids::treble, 6.5f },
-                { ids::presence, 4.0f }, { ids::resonance, 3.0f }, { ids::master, 4.0f },
+                { ids::channel, 0 }, { ids::ampGain, 5.3f }, { ids::bass, 5.0f }, { ids::mid, 5.0f }, { ids::treble, 6.5f },
+                { ids::presence, 4.0f }, { ids::resonance, 3.0f }, { ids::master, 5.7f },
                 { ids::gateOn, 0 },
                 { ids::compOn, 1 }, { ids::compThresh, -24.0f }, { ids::compRatio, 3.0f }, { ids::compMakeup, 4.0f },
                 { ids::delayOn, 1 }, { ids::dlTime, 380.0f }, { ids::dlFeedback, 0.25f }, { ids::dlMix, 0.15f },

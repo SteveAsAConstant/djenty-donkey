@@ -245,6 +245,14 @@ void runCase (const std::string& name, const Signal& in, const std::function<Pro
 // ---------------------------------------------------------------- cases
 struct Input { const char* name; Signal x; };
 
+// Cases are written in v0.3 knob positions. v0.4 recalibrated the Gain / Master curves, so the current
+// code gets the knob positions that give the same pot settings (the plugin converts old sessions the same way).
+void preampControls (vamp_baseline::Preamp5150& p, double g, double b, double m, double t, double post) { p.setControls (g, b, m, t, post); }
+void preampControls (vamp::Preamp5150& p, double g, double b, double m, double t, double post)
+{
+    p.setControls (vamp::gainKnobFromV03 (g), b, m, t, vamp::masterKnobFromV03 (post));
+}
+
 template <typename T> auto setReference (T& t, int) -> decltype (t.setReferencePrecision (true), void()) { t.setReferencePrecision (true); }
 template <typename T> void setReference (T&, long) {} // no Newton tolerances to tighten
 
@@ -269,7 +277,7 @@ void preampCases (const std::vector<Input>& inputs)
             {
                 char name[96];
                 std::snprintf (name, sizeof name, "preamp %-5s gain %.1f  %s", modes[mode], gain, in.name);
-                auto setup = [mode, gain] (auto& p) { p.prepare (fs); p.setMode (mode); p.setControls (gain, 0.5, 0.5, 0.6, 0.5); };
+                auto setup = [mode, gain] (auto& p) { p.prepare (fs); p.setMode (mode); preampControls (p, gain, 0.5, 0.5, 0.6, 0.5); };
                 runCase (name, in.x, maker<vamp_baseline::Preamp5150> (setup), maker<vamp::Preamp5150> (setup), maker<vamp::Preamp5150> (setup, true));
             }
 }
@@ -313,7 +321,7 @@ std::function<Proc()> chainMaker (int mode, bool reference = false)
     return [mode, reference]
     {
         auto d = std::make_shared<Drive>(); d->prepare (fs); d->setControls (0.5, 0.5, 2, 0.7);
-        auto p = std::make_shared<Pre>();   if (reference) setReference (*p, 0); p->prepare (fs); p->setMode (mode); p->setControls (0.8, 0.5, 0.5, 0.6, 0.6);
+        auto p = std::make_shared<Pre>();   if (reference) setReference (*p, 0); p->prepare (fs); p->setMode (mode); preampControls (*p, 0.8, 0.5, 0.5, 0.6, 0.6);
         auto w = std::make_shared<Power>(); if (reference) setReference (*w, 0); w->setControls (0.6, 0.5); w->prepare (fs);
         const double post = mode == 0 ? 25.0 : 1.0; // AmpSim kChannelPost (CLEAN has only 2 stages)
         return Proc ([d, p, w, post] (double v) { return w->process (p->process (d->process (v)) * post); });

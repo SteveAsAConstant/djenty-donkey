@@ -118,13 +118,13 @@ inline juce::AudioProcessorValueTreeState::ParameterLayout createParameterLayout
 
     layout.add (std::make_unique<juce::AudioParameterChoice> (juce::ParameterID { ids::channel, 1 }, "Channel",
                                                               juce::StringArray { "Clean", "Blue", "Red" }, 2));
-    layout.add (makeFloat (ids::ampGain, "Gain", 0.0f, 10.0f, 6.0f));
+    layout.add (makeFloat (ids::ampGain, "Gain", 0.0f, 10.0f, 6.9f));
     layout.add (makeFloat (ids::bass, "Bass", 0.0f, 10.0f, 5.0f));
     layout.add (makeFloat (ids::mid, "Mid", 0.0f, 10.0f, 5.0f));
     layout.add (makeFloat (ids::treble, "Treble", 0.0f, 10.0f, 6.0f));
     layout.add (makeFloat (ids::presence, "Presence", 0.0f, 10.0f, 5.0f));
     layout.add (makeFloat (ids::resonance, "Resonance", 0.0f, 10.0f, 5.0f));
-    layout.add (makeFloat (ids::master, "Master", 0.0f, 10.0f, 3.0f));
+    layout.add (makeFloat (ids::master, "Master", 0.0f, 10.0f, 4.6f));
     layout.add (makeFloat (ids::ampVolume, "Amp Volume", -40.0f, 12.0f, 0.0f, " dB"));
 
     layout.add (makeBool (ids::cabOn, "Cab On", true));

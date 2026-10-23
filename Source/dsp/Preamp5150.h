@@ -9,9 +9,23 @@ namespace vamp
 // Audio-taper (log) pot: 50% rotation -> ~10% resistance
 inline double taperA (double x) { return (std::pow (10.0, 2.0 * x) - 1.0) / 99.0; }
 
-// Master (post-gain) pot: 60 dB log taper so the whole rotation is usable. The real 5150 post
-// pot reaches full power-amp saturation at ~1-2 on the dial; this spreads that over 0..10.
-inline double masterTaper (double x) { return x <= 0.0 ? 0.0 : std::pow (10.0, 3.0 * (x - 1.0)) * std::min (1.0, x * 20.0); }
+// Pre-gain and post-gain (Master) pots, calibrated against NAM captures of a Peavey 6505 1992
+// Original (lead channel, pre-gain 2..5, post-gain 3; tests/nam_compare.cpp --fit, docs/nam_calibration.md):
+// - pre-gain: a steeper log taper than taperA, 50% rotation -> ~4.5% (the fit put the model ~7 dB hot
+//   at every dial position with taperA)
+// - post-gain: the same taper, scaled so the power amp sees ~21 dB less than taperA predicted at 3,
+//   where the capture shows only light power-amp saturation
+// The knobs now read like the real amp's dials.
+constexpr double kPotTaperK = 2.65, kPostTrim = 0.229;
+inline double taperPot (double x) { return (std::pow (10.0, kPotTaperK * x) - 1.0) / (std::pow (10.0, kPotTaperK) - 1.0); }
+inline double taperPotInverse (double f) { return std::log10 (1.0 + f * (std::pow (10.0, kPotTaperK) - 1.0)) / kPotTaperK; }
+inline double masterTaper (double x) { return x <= 0.0 ? 0.0 : kPostTrim * taperPot (x); }
+inline double masterKnobForDrive (double drive) { return taperPotInverse (std::clamp (drive / kPostTrim, 0.0, 1.0)); }
+
+// v0.3 knob curves (pre-gain taperA, Master 60 dB log), to convert old presets / sessions
+inline double masterTaperV03 (double x) { return x <= 0.0 ? 0.0 : std::pow (10.0, 3.0 * (x - 1.0)) * std::min (1.0, x * 20.0); }
+inline double gainKnobFromV03 (double x) { return taperPotInverse (taperA (x)); }
+inline double masterKnobFromV03 (double x) { return masterKnobForDrive (masterTaperV03 (x)); }
 
 // Component-level model of the EVH 5150 / 6505 preamp + tone stack.
 // Designators refer to docs/5150_schematic_notes.md.
@@ -88,7 +102,7 @@ public:
     // all 0..1 knob positions
     void setControls (double preGain, double bass, double mid, double treble, double post)
     {
-        setPreGainPot (taperA (preGain));
+        setPreGainPot (taperPot (std::clamp (preGain, 0.0, 1.0)));
         setToneStackRaw (std::clamp (treble, 0.0, 1.0), std::clamp (mid, 0.0, 1.0),
                          taperA (std::clamp (bass, 0.0, 1.0)));
         postGain = masterTaper (std::clamp (post, 0.0, 1.0));

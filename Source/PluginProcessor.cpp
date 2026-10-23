@@ -358,6 +358,7 @@ void VibeAmpProcessor::getStateInformation (juce::MemoryBlock& destData)
     auto state = apvts.copyState();
     state.setProperty ("irPath", getIRPath(), nullptr);
     state.setProperty ("presetName", presets.getCurrentName(), nullptr);
+    state.setProperty (kKnobCurvesAttr, kKnobCurvesVersion, nullptr);
     if (auto xml = state.createXml())
         copyXmlToBinary (*xml, destData);
 }
@@ -368,6 +369,7 @@ void VibeAmpProcessor::setStateInformation (const void* data, int sizeInBytes)
     if (xml == nullptr || ! xml->hasTagName (apvts.state.getType()))
         return;
 
+    upgradeKnobCurves (*xml); // v0.3 sessions keep their sound
     auto tree = juce::ValueTree::fromXml (*xml);
     apvts.replaceState (tree);
 

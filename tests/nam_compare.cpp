@@ -1,6 +1,6 @@
 // Compare the component-level amp against a NAM capture of a real amp.
 //
-//   nam_compare <model.nam> [input-dBu=11.5] [wav-out-dir or -] [our pre-gain knob 0..1] [our master knob 0..1]
+//   nam_compare <model.nam> [--dbu 11.5] [--pre knob] [--drive-db d] [--wav dir] [--fit]
 //
 // The NAM model (standard WaveNet, as written by the NAM trainer) runs at its own rate (48 kHz) on
 // the same test signals the DSP model gets at 192 kHz. Input calibration: the capture's interface
@@ -8,13 +8,14 @@
 // amp input; our model takes volts directly. The output level of a capture (load box line out) is
 // unknown, so outputs are compared after one global level match.
 //
-// Settings are for the capture used during development:
-//   "6505 1992 Ld Pr-5 B-6 M-4 T-6 Po-3 R-9 P-8" (OutmodedElectronics, TONE3000; not redistributed)
-// Edit kSettings for another capture.
+// Knob settings are parsed from the model name, e.g. "6505 1992 Ld Pr-5 B-6 M-4 T-6 Po-3 R-9 P-8"
+// (OutmodedElectronics' 6505 pack on TONE3000, used during development; captures are not redistributed).
+// --fit grid-searches our pre-gain knob and the power-amp drive that match the capture best.
 #include <chrono>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
+#include <cstring>
 #include <fstream>
 #include <functional>
 #include <memory>
@@ -45,6 +46,14 @@ public:
         const std::string js = ss.str();
 
         sampleRate = number (js, "\"sample_rate\"", 48000.0);
+        {
+            const size_t k = js.find ("\"name\"");
+            if (k != std::string::npos)
+            {
+                const size_t q0 = js.find ('"', js.find (':', k) + 1), q1 = js.find ('"', q0 + 1);
+                name = js.substr (q0 + 1, q1 - q0 - 1);
+            }
+        }
         // layer array configs, in order
         size_t pos = js.find ("\"layers\"");
         if (pos == std::string::npos) return false;
@@ -116,6 +125,7 @@ public:
     }
 
     double getSampleRate() const { return sampleRate; }
+    const std::string& getName() const { return name; }
 
     float process (float x)
     {
@@ -202,6 +212,7 @@ private:
 
     std::vector<Array> arrays;
     double headScale = 1.0, sampleRate = 48000.0;
+    std::string name;
 };
 
 // ---------------------------------------------------------------- test signals (volts at the jack)
@@ -311,64 +322,211 @@ void writeWav (const std::string& path, const std::vector<double>& x, double rat
     for (double v : x) { const float s = (float) (v * gain); f.write ((const char*) &s, 4); }
 }
 
+
 // ---------------------------------------------------------------- settings of the capture
-struct Settings { int mode; double pre, bass, mid, treble, postGainDial, resonance, presence; };
-constexpr Settings kSettings { 2 /* Lead = RED */, 0.5, 0.6, 0.4, 0.6, 0.3, 0.9, 0.8 };
+// Settings are parsed from the NAM model name ("... Ld Pr-5 B-6 M-4 T-6 Po-3 R-9 P-8"); dials 0..10.
+struct Settings { int mode = 2; double pre = 0.5, bass = 0.5, mid = 0.5, treble = 0.5, post = 0.3, resonance = 0.5, presence = 0.5; };
 
-// The real post-gain pot (assumed 10% audio taper) at the capture's dial position, converted to our
-// knob (whose 60 dB curve is not a real pot taper): masterTaper(x) = 10^(3 (x - 1)) = taperA(dial)
-double ourMasterKnob (double dial) { return 1.0 + std::log10 (vamp::taperA (dial)) / 3.0; }
-} // namespace
-
-int main (int argc, char** argv)
+Settings parseSettings (const std::string& name)
 {
-    if (argc < 2) { std::printf ("usage: nam_compare <model.nam> [input-dBu=11.5] [wav-out-dir]\n"); return 1; }
-    NamWaveNet nam;
-    if (! nam.load (argv[1])) { std::printf ("could not load %s\n", argv[1]); return 1; }
-    const double dbu = argc > 2 ? std::atof (argv[2]) : 11.5;
-    const std::string wavDir = argc > 3 && std::string (argv[3]) != "-" ? argv[3] : "";
-    const double preKnob = argc > 4 ? std::atof (argv[4]) : kSettings.pre; // diagnostics: override our pre-gain
-    const double voltsPerFS = 0.7746 * std::pow (10.0, dbu / 20.0) * std::sqrt (2.0); // full-scale sine peak
-    const double rateNam = nam.getSampleRate(), rateOurs = 4.0 * rateNam;
-    const double master = argc > 5 ? std::atof (argv[5]) : ourMasterKnob (kSettings.postGainDial); // diagnostics: override
-    std::printf ("NAM %.0f Hz, input %.1f dBu -> 1.0 FS = %.2f V; post-gain dial %.1f -> our master knob %.3f\n",
-                 rateNam, dbu, voltsPerFS, kSettings.postGainDial * 10, master);
-
-    auto ours = [&] (const std::vector<double>& v)
+    Settings s;
+    s.mode = name.find (" Rhy ") != std::string::npos ? 1 : 2; // Rhythm (crunch) = BLUE, Lead = RED
+    auto dial = [&] (const char* key, double def)
     {
-        vamp::Preamp5150 pre; pre.prepare (rateOurs); pre.setMode (kSettings.mode);
-        pre.setControls (preKnob, kSettings.bass, kSettings.mid, kSettings.treble, master);
-        vamp::PowerAmp5150 pa; pa.setControls (kSettings.presence, kSettings.resonance); pa.prepare (rateOurs);
-        const double post = kSettings.mode == 0 ? 25.0 : 1.0; // AmpSim kChannelPost
+        const size_t k = name.find (key);
+        return k == std::string::npos ? def : std::atof (name.c_str() + k + std::strlen (key)) / 10.0;
+    };
+    s.pre = dial (" Pr-", s.pre); s.bass = dial (" B-", s.bass); s.mid = dial (" M-", s.mid); s.treble = dial (" T-", s.treble);
+    s.post = dial (" Po-", s.post); s.resonance = dial (" R-", s.resonance); s.presence = dial (" P-", s.presence);
+    return s;
+}
+
+struct Rig
+{
+    NamWaveNet nam;
+    Settings s;
+    double voltsPerFS = 4.12, rateNam = 48000.0, rateOurs = 192000.0;
+
+    std::vector<double> ours (const std::vector<double>& v, double preKnob, double drive) const
+    {
+        vamp::Preamp5150 pre; pre.prepare (rateOurs); pre.setMode (s.mode);
+        pre.setControls (preKnob, s.bass, s.mid, s.treble, vamp::masterKnobForDrive (drive));
+        vamp::PowerAmp5150 pa; pa.setControls (s.presence, s.resonance); pa.prepare (rateOurs);
+        const double post = s.mode == 0 ? 25.0 : 1.0; // AmpSim kChannelPost
         std::vector<double> y (v.size());
         for (size_t i = 0; i < v.size(); ++i) y[i] = pa.process (pre.process (v[i]) * post);
         return y;
-    };
-    auto namRun = [&] (const std::vector<double>& v)
+    }
+    std::vector<double> namRun (const std::vector<double>& v) const
     {
         NamWaveNet m = nam; // fresh state
         std::vector<double> y (v.size());
         for (int i = 0; i < 4096; ++i) m.process (0.0f); // fill the receptive field with silence
         for (size_t i = 0; i < v.size(); ++i) y[i] = m.process ((float) (v[i] / voltsPerFS));
         return y;
-    };
+    }
+};
 
-    const std::vector<Test> tests = {
-        { "chugs", 3.0, [] (double t) {
+std::vector<Test> guitarTests (double seconds)
+{
+    return {
+        { "chugs", seconds, [] (double t) {
               const double ph = std::fmod (t, 1.0); double v = 0;
               if (ph < 0.75) { const double tc = std::fmod (ph, 0.125); for (double f : { 36.7, 55.0, 73.4 }) v += pluck (tc, f, 25.0, 0.15); }
               return v + hiss (t); } },
-        { "chord decay", 3.0, [] (double t) {
+        { "chord decay", seconds, [] (double t) {
               double v = 0; for (double f : { 82.4, 123.5, 164.8, 207.7, 246.9, 329.6 }) v += pluck (t, f, 1.5, 0.1); return v + hiss (t); } },
-        { "single notes", 3.0, [] (double t) {
+        { "single notes", seconds, [seconds] (double t) {
               const double notes[] = { 110.0, 146.8, 196.0, 261.6, 329.6, 440.0 };
-              const int n = std::min (5, (int) (t / 0.5)); return pluck (t - n * 0.5, notes[n], 4.0, 0.2) + hiss (t); } },
-        { "sweep 30 mV", 3.0, [] (double t) {
-              const double f0 = 40.0, f1 = 10000.0, T = 3.0, k = std::log (f1 / f0);
-              return 0.03 * std::sin (2 * kPi * f0 * T / k * (std::exp (t / T * k) - 1.0)); } },
+              const double step = seconds / 6.0;
+              const int n = std::min (5, (int) (t / step)); return pluck (t - n * step, notes[n], 4.0, 0.2) + hiss (t); } },
+        { "sweep 30 mV", seconds, [seconds] (double t) {
+              const double f0 = 40.0, f1 = 10000.0, k = std::log (f1 / f0);
+              return 0.03 * std::sin (2 * kPi * f0 * seconds / k * (std::exp (t / seconds * k) - 1.0)); } },
     };
+}
 
-    // one global level match (on "chugs"), applied to every comparison below
+// NAM renders are fixed for a capture: compute once
+struct Reference
+{
+    std::vector<std::vector<double>> bandsNam;  // per guitar test
+    std::vector<double> rmsNam;
+    std::vector<double> sineLevels { 0.01, 0.1, 0.5 };
+    std::vector<std::vector<double>> harmNam;   // per sine level: H1..H7 amplitudes
+};
+
+Reference makeReference (const Rig& rig, const std::vector<Test>& tests)
+{
+    Reference r;
+    for (const auto& t : tests)
+    {
+        const auto y = rig.namRun (sample (t, rig.rateNam));
+        r.bandsNam.push_back (bands (y, rig.rateNam));
+        r.rmsNam.push_back (rms (y, rig.rateNam));
+    }
+    for (double a : r.sineLevels)
+    {
+        const Test t { "sine", 0.6, [a] (double tt) { return a * std::sin (2 * kPi * 110.0 * tt); } };
+        const auto y = rig.namRun (sample (t, rig.rateNam));
+        std::vector<double> h;
+        for (int k = 1; k <= 7; ++k) h.push_back (harmonic (y, rig.rateNam, 110.0, k, 0.2));
+        r.harmNam.push_back (h);
+    }
+    return r;
+}
+
+// Cost: spectra (mean |dB| over 1/3-octave bands after one global level match), harmonic structure
+// (mean |dB| of H2..H7 re H1, floored at -60 dB) and compression (spread of H1 level differences)
+struct Cost { double total, spectrum, harmonics, compression, highs; }; // highs: mean ours - NAM above 4 kHz (dB)
+
+Cost evaluate (const Rig& rig, const Reference& ref, const std::vector<Test>& tests, double preKnob, double drive)
+{
+    std::vector<std::vector<double>> bo;
+    std::vector<double> logRatios;
+    for (size_t ti = 0; ti < tests.size(); ++ti)
+    {
+        bo.push_back (bands (rig.ours (sample (tests[ti], rig.rateOurs), preKnob, drive), rig.rateOurs));
+        for (size_t b = 0; b < bo.back().size(); ++b)
+            logRatios.push_back (10 * std::log10 (std::max (ref.bandsNam[ti][b], 1e-30) / std::max (bo.back()[b], 1e-30)));
+    }
+    double g = 0; for (double l : logRatios) g += l; g /= (double) logRatios.size(); // global level match (dB)
+    double spec = 0; for (double l : logRatios) spec += std::abs (l - g); spec /= (double) logRatios.size();
+    double highs = 0; int nh = 0;
+    for (size_t i = 0; i < logRatios.size(); ++i)
+        if (63.0 * std::pow (2.0, (double) (i % ref.bandsNam[0].size()) / 3.0) >= 3900.0) { highs -= logRatios[i] - g; ++nh; }
+    highs /= std::max (nh, 1);
+
+    double harm = 0, n = 0;
+    std::vector<double> h1diff;
+    for (size_t li = 0; li < ref.sineLevels.size(); ++li)
+    {
+        const double a = ref.sineLevels[li];
+        const Test t { "sine", 0.6, [a] (double tt) { return a * std::sin (2 * kPi * 110.0 * tt); } };
+        const auto y = rig.ours (sample (t, rig.rateOurs), preKnob, drive);
+        const double h1 = harmonic (y, rig.rateOurs, 110.0, 1, 0.2);
+        h1diff.push_back (db (h1) - db (ref.harmNam[li][0]));
+        for (int k = 2; k <= 7; ++k)
+        {
+            const double ours = std::max (db (harmonic (y, rig.rateOurs, 110.0, k, 0.2) / h1), -60.0);
+            const double nam = std::max (db (ref.harmNam[li][(size_t) k - 1] / ref.harmNam[li][0]), -60.0);
+            harm += std::abs (ours - nam); ++n;
+        }
+    }
+    harm /= n;
+    double m = 0; for (double d : h1diff) m += d; m /= (double) h1diff.size();
+    double comp = 0; for (double d : h1diff) comp += std::abs (d - m); comp /= (double) h1diff.size();
+    return { spec + 0.5 * harm + comp, spec, harm, comp, highs };
+}
+} // namespace
+
+int main (int argc, char** argv)
+{
+    if (argc < 2)
+    {
+        std::printf ("usage: nam_compare <model.nam> [--dbu 11.5] [--pre knob] [--drive-db d] [--wav dir] [--fit]\n"
+                     "  --drive-db  power-amp drive relative to a real 10%% audio-taper post-gain pot at the capture's dial\n"
+                     "  --fit       grid-search our pre-gain knob and the drive offset that match the capture best\n");
+        return 1;
+    }
+    Rig rig;
+    if (! rig.nam.load (argv[1])) { std::printf ("could not load %s\n", argv[1]); return 1; }
+    double dbu = 11.5, driveDb = 0.0, preOverride = -1.0;
+    bool driveOverride = false;
+    std::string wavDir;
+    bool fit = false;
+    for (int i = 2; i < argc; ++i)
+    {
+        const std::string a = argv[i];
+        if (a == "--dbu" && i + 1 < argc) dbu = std::atof (argv[++i]);
+        else if (a == "--pre" && i + 1 < argc) preOverride = std::atof (argv[++i]);
+        else if (a == "--drive-db" && i + 1 < argc) { driveDb = std::atof (argv[++i]); driveOverride = true; }
+        else if (a == "--wav" && i + 1 < argc) wavDir = argv[++i];
+        else if (a == "--fit") fit = true;
+    }
+    rig.s = parseSettings (rig.nam.getName());
+    rig.voltsPerFS = 0.7746 * std::pow (10.0, dbu / 20.0) * std::sqrt (2.0); // full-scale sine peak
+    rig.rateNam = rig.nam.getSampleRate();
+    rig.rateOurs = 4.0 * rig.rateNam;
+    // drive offsets (--drive-db, the fit) are relative to a plain 10% audio-taper post-gain pot
+    const double driveRealPot = vamp::taperA (rig.s.post);
+    const double driveCalibrated = vamp::masterTaper (rig.s.post); // the plugin's Master curve
+    std::printf ("%s\n%s, pre %.1f bass %.1f mid %.1f treble %.1f post %.1f res %.1f pres %.1f | input %.1f dBu -> 1.0 FS = %.2f V\n",
+                 rig.nam.getName().c_str(), rig.s.mode == 2 ? "RED" : "BLUE", rig.s.pre * 10, rig.s.bass * 10, rig.s.mid * 10,
+                 rig.s.treble * 10, rig.s.post * 10, rig.s.resonance * 10, rig.s.presence * 10, dbu, rig.voltsPerFS);
+
+    if (fit)
+    {
+        const auto tests = guitarTests (1.5);
+        const auto ref = makeReference (rig, tests);
+        Cost best { 1e9, 0, 0, 0, 0 };
+        double bestPre = rig.s.pre, bestDb = 0;
+        for (double p = std::max (0.05, rig.s.pre - 0.2); p <= std::min (1.0, rig.s.pre + 0.21); p += 0.05)
+            for (double d = -30.0; d <= 0.01; d += 2.5)
+            {
+                const auto c = evaluate (rig, ref, tests, p, driveRealPot * std::pow (10.0, d / 20.0));
+                if (c.total < best.total) { best = c; bestPre = p; bestDb = d; }
+            }
+        // refine
+        for (double p = bestPre - 0.04; p <= bestPre + 0.041; p += 0.02)
+            for (double d = bestDb - 2.0; d <= bestDb + 2.01; d += 1.0)
+            {
+                if (p <= 0.0 || d > 6.0) continue;
+                const auto c = evaluate (rig, ref, tests, p, driveRealPot * std::pow (10.0, d / 20.0));
+                if (c.total < best.total) { best = c; bestPre = p; bestDb = d; }
+            }
+        const auto atNominal = evaluate (rig, ref, tests, rig.s.pre, driveCalibrated); // the plugin at the capture's dials
+        std::printf ("FIT pre_dial %.1f post_dial %.1f -> our_pre %.2f drive_db %+.1f | cost %.2f (spec %.2f harm %.2f comp %.2f) highs %+.1f | nominal cost %.2f (spec %.2f harm %.2f comp %.2f)\n",
+                     rig.s.pre * 10, rig.s.post * 10, bestPre, bestDb, best.total, best.spectrum, best.harmonics, best.compression, best.highs,
+                     atNominal.total, atNominal.spectrum, atNominal.harmonics, atNominal.compression);
+        return 0;
+    }
+
+    const double preKnob = preOverride >= 0.0 ? preOverride : rig.s.pre;
+    const double drive = driveOverride ? driveRealPot * std::pow (10.0, driveDb / 20.0) : driveCalibrated;
+    driveDb = 20.0 * std::log10 (drive / driveRealPot);
+    std::printf ("our pre %.2f, power-amp drive %+.1f dB re real pot (our master knob %.3f)\n", preKnob, driveDb, vamp::masterKnobForDrive (drive));
+
+    const auto tests = guitarTests (3.0);
     double gainMatch = 1.0;
     std::printf ("\n== long-term spectrum, 1/3 octave, ours - NAM after one global level match (dB) ==\n");
     std::printf ("%-14s %7s |", "signal", "level");
@@ -378,11 +536,11 @@ int main (int argc, char** argv)
     for (size_t ti = 0; ti < tests.size(); ++ti)
     {
         const auto& t = tests[ti];
-        const auto yo = ours (sample (t, rateOurs));
-        const auto yn = namRun (sample (t, rateNam));
-        if (ti == 0) gainMatch = rms (yn, rateNam) / rms (yo, rateOurs);
-        const auto bo = bands (yo, rateOurs), bn = bands (yn, rateNam);
-        std::printf ("%-14s %+6.1f |", t.name, db (rms (yo, rateOurs) * gainMatch / rms (yn, rateNam)));
+        const auto yo = rig.ours (sample (t, rig.rateOurs), preKnob, drive);
+        const auto yn = rig.namRun (sample (t, rig.rateNam));
+        if (ti == 0) gainMatch = rms (yn, rig.rateNam) / rms (yo, rig.rateOurs);
+        const auto bo = bands (yo, rig.rateOurs), bn = bands (yn, rig.rateNam);
+        std::printf ("%-14s %+6.1f |", t.name, db (rms (yo, rig.rateOurs) * gainMatch / rms (yn, rig.rateNam)));
         double meanAbs = 0; int nb = 0;
         size_t bi = 0;
         for (double fc = 63.0; fc < 13000.0; fc *= std::pow (2.0, 1.0 / 3.0), ++bi)
@@ -395,10 +553,10 @@ int main (int argc, char** argv)
 
         if (! wavDir.empty())
         {
-            const double g = 0.5 / std::max (rms (yn, rateNam) * 4.0, 1e-9);
+            const double g = 0.5 / std::max (rms (yn, rig.rateNam) * 4.0, 1e-9);
             const std::string base = wavDir + "/" + std::string (t.name) + "_";
-            writeWav (base + "nam.wav", yn, rateNam, g);
-            writeWav (base + "ours.wav", decimate4 (yo), rateNam, g * gainMatch);
+            writeWav (base + "nam.wav", yn, rig.rateNam, g);
+            writeWav (base + "ours.wav", decimate4 (yo), rig.rateNam, g * gainMatch);
         }
     }
 
@@ -407,12 +565,12 @@ int main (int argc, char** argv)
     for (double a : { 0.003, 0.01, 0.03, 0.1, 0.3, 1.0 })
     {
         const Test t { "sine", 1.0, [a] (double tt) { return a * std::sin (2 * kPi * 110.0 * tt); } };
-        const auto yo = ours (sample (t, rateOurs));
-        const auto yn = namRun (sample (t, rateNam));
+        const auto yo = rig.ours (sample (t, rig.rateOurs), preKnob, drive);
+        const auto yn = rig.namRun (sample (t, rig.rateNam));
         for (int which = 0; which < 2; ++which)
         {
             const auto& y = which == 0 ? yo : yn;
-            const double rate = which == 0 ? rateOurs : rateNam, g = which == 0 ? gainMatch : 1.0;
+            const double rate = which == 0 ? rig.rateOurs : rig.rateNam, g = which == 0 ? gainMatch : 1.0;
             const double h1 = harmonic (y, rate, 110.0, 1);
             std::printf ("%-8.3f %-5s %+7.1f |", a, which == 0 ? "ours" : "NAM", db (h1 * g));
             for (int h = 2; h <= 7; ++h) std::printf (" %+6.1f", db (harmonic (y, rate, 110.0, h) / h1));
