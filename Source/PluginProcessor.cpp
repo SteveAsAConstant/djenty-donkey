@@ -6,7 +6,8 @@ VibeAmpProcessor::VibeAmpProcessor()
     : AudioProcessor (BusesProperties()
                           .withInput ("Input", juce::AudioChannelSet::mono(), true)
                           .withOutput ("Output", juce::AudioChannelSet::stereo(), true)),
-      apvts (*this, nullptr, "PARAMS", vamp::createParameterLayout())
+      apvts (*this, nullptr, "PARAMS", vamp::createParameterLayout()),
+      presets (apvts, [this] (const juce::File& f) { loadIR (f); }, [this] { return getIRPath(); })
 {
     auto get = [this] (const juce::String& id)
     {
@@ -19,6 +20,8 @@ VibeAmpProcessor::VibeAmpProcessor()
     pGateOn = get (ids::gateOn); pGateThresh = get (ids::gateThresh); pGateRelease = get (ids::gateRelease);
     pGateLow = get (ids::gateLow); pGateMid = get (ids::gateMid); pGateHigh = get (ids::gateHigh);
     pTranspose = get (ids::transpose); pTransposeMode = get (ids::transposeMode);
+    pInGateOn = get (ids::inGateOn); pInGateThresh = get (ids::inGateThresh); pInGateRelease = get (ids::inGateRelease);
+    pAmpVolume = get (ids::ampVolume);
     pCompOn = get (ids::compOn); pCompThresh = get (ids::compThresh); pCompRatio = get (ids::compRatio);
     pCompAttack = get (ids::compAttack); pCompRelease = get (ids::compRelease); pCompMakeup = get (ids::compMakeup);
     pBoostOn = get (ids::boostOn); pBoostDrive = get (ids::boostDrive); pBoostTone = get (ids::boostTone);
@@ -65,6 +68,7 @@ void VibeAmpProcessor::prepareToPlay (double sampleRate, int samplesPerBlock)
     outputGain.prepare (stereoSpec); outputGain.setRampDurationSeconds (0.05);
 
     gate.prepare (sampleRate);
+    inputGate.prepare (sampleRate);
 
     shifter.prepare (sampleRate);
     comp.prepare (monoSpec);
@@ -104,6 +108,12 @@ void VibeAmpProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Mid
     // ---- read parameters once per block ----
     inputGain.setGainDecibels (pInGain->load());
 
+    const bool newInGateOn = pInGateOn->load() > 0.5f;
+    if (newInGateOn && ! inGateOn) inputGate.reset();
+    inGateOn = newInGateOn;
+    inGateThresh = pInGateThresh->load();
+    inGateRelease = pInGateRelease->load();
+
     const bool newGateOn = pGateOn->load() > 0.5f;
     if (newGateOn && ! gateOn) gate.reset();
     gateOn = newGateOn;
@@ -140,6 +150,7 @@ void VibeAmpProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Mid
     ampSettings.presence = pPresence->load() * 0.1f;
     ampSettings.resonance = pResonance->load() * 0.1f;
     ampSettings.master = pMaster->load() * 0.1f;
+    ampSettings.volumeDb = pAmpVolume->load();
     ampSettings.boostOn = pBoostOn->load() > 0.5f;
     ampSettings.boostDrive = pBoostDrive->load() * 0.1f;
     ampSettings.boostBright = pBoostTone->load() * 0.1f;
@@ -214,6 +225,8 @@ void VibeAmpProcessor::processChunk (juce::AudioBuffer<float>& buffer, int start
             keyDelayPos = (keyDelayPos + 1) & mask;
         }
     }
+    if (inGateOn)
+        inputGate.process (mono, len, inGateThresh, inGateRelease);
     shifter.process (mono, len);
     if (compOn)
     {
@@ -344,6 +357,7 @@ void VibeAmpProcessor::getStateInformation (juce::MemoryBlock& destData)
 {
     auto state = apvts.copyState();
     state.setProperty ("irPath", getIRPath(), nullptr);
+    state.setProperty ("presetName", presets.getCurrentName(), nullptr);
     if (auto xml = state.createXml())
         copyXmlToBinary (*xml, destData);
 }
@@ -356,6 +370,8 @@ void VibeAmpProcessor::setStateInformation (const void* data, int sizeInBytes)
 
     auto tree = juce::ValueTree::fromXml (*xml);
     apvts.replaceState (tree);
+
+    presets.setCurrentName (tree.getProperty ("presetName", juce::String()).toString()); // empty -> "(no preset)"
 
     const auto path = tree.getProperty ("irPath").toString();
     if (path.isNotEmpty() && juce::File::isAbsolutePath (path) && juce::File (path).existsAsFile())

@@ -6,6 +6,7 @@
 #include "dsp/MultibandGate.h"
 #include "dsp/PitchShifter.h"
 #include "dsp/StereoDelay.h"
+#include "PresetManager.h"
 
 class VibeAmpProcessor : public juce::AudioProcessor,
                          private juce::AsyncUpdater
@@ -52,6 +53,7 @@ public:
     float getGateBandGain (int band) const { return gateBandGain[band].load(); }
 
     juce::AudioProcessorValueTreeState apvts;
+    PresetManager presets;
 
 private:
     void processChunk (juce::AudioBuffer<float>& buffer, int start, int len, int numIn, int numOut);
@@ -62,6 +64,8 @@ private:
     std::atomic<float>* pGateRelease {}; std::atomic<float>* pTranspose {};
     std::atomic<float>* pGateLow {}; std::atomic<float>* pGateMid {}; std::atomic<float>* pGateHigh {};
     std::atomic<float>* pTransposeMode {};
+    std::atomic<float>* pInGateOn {}; std::atomic<float>* pInGateThresh {}; std::atomic<float>* pInGateRelease {};
+    std::atomic<float>* pAmpVolume {};
     std::atomic<float>* pCompOn {}; std::atomic<float>* pCompThresh {}; std::atomic<float>* pCompRatio {};
     std::atomic<float>* pCompAttack {}; std::atomic<float>* pCompRelease {}; std::atomic<float>* pCompMakeup {};
     std::atomic<float>* pBoostOn {}; std::atomic<float>* pBoostDrive {}; std::atomic<float>* pBoostTone {};
@@ -84,6 +88,9 @@ private:
 
     // signal chain
     juce::dsp::Gain<float> inputGain, compMakeup, outputGain;
+    vamp::InputGate inputGate;
+    bool inGateOn = false;
+    float inGateThresh = -50.0f, inGateRelease = 20.0f;
     vamp::MultibandGate gate;
     vamp::MultibandGate::Settings gateSettings;
     vamp::PitchShifter shifter;

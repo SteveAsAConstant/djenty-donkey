@@ -418,6 +418,36 @@ static void transposeTests()
     }
 }
 
+static void inputGateTest()
+{
+    constexpr double gfs = 48000.0;
+    std::printf ("\n== input gate: 80 ms chugs (-12 dBFS) every 200 ms + -60 dBFS noise, thresh -50, release 15 ms ==\n");
+    InputGate g;
+    g.prepare (gfs);
+    const int n = (int) (gfs * 1.0);
+    std::vector<float> x ((size_t) n);
+    unsigned rng = 3;
+    for (int i = 0; i < n; ++i)
+    {
+        const double t = i / gfs, ph = std::fmod (t, 0.2);
+        rng = rng * 1664525u + 1013904223u;
+        const double noise = 0.001 * ((rng >> 8) / 8388608.0 - 1.0);
+        const double chug = ph < 0.08 ? 0.25 * std::exp (-ph * 20.0) * std::sin (2 * kPi * 82.4 * t) : 0.0;
+        x[(size_t) i] = (float) (chug + noise);
+    }
+    std::vector<float> y (x);
+    g.process (y.data(), n, -50.0f, 15.0f);
+    double inGap = 0, outGap = 0, inChug = 0, outChug = 0;
+    for (int i = n / 5; i < n; ++i)
+    {
+        const double ph = std::fmod (i / gfs, 0.2);
+        if (ph > 0.12 && ph < 0.19) { inGap += x[(size_t) i] * x[(size_t) i]; outGap += y[(size_t) i] * y[(size_t) i]; }
+        if (ph > 0.005 && ph < 0.05) { inChug += x[(size_t) i] * x[(size_t) i]; outChug += y[(size_t) i] * y[(size_t) i]; }
+    }
+    std::printf ("between chugs: %.1f dB reduction | during chugs: %.2f dB change\n",
+                 10.0 * std::log10 (outGap / inGap + 1e-30), 10.0 * std::log10 (outChug / inChug));
+}
+
 static void chainLevels()
 {
     std::printf ("\n== full chain: speaker V rms (gain 6, tone 5/5/6, pres/res 5), guitar-ish 0.2 V chord ==\n");
@@ -452,6 +482,8 @@ int main (int argc, char** argv)
 {
     if (argc > 1 && std::string (argv[1]) == "chain") { chainLevels(); return 0; }
     if (argc > 1 && std::string (argv[1]) == "transpose") { transposeTests(); return 0; }
+    if (argc > 1 && std::string (argv[1]) == "ingate") { inputGateTest(); return 0; }
+    inputGateTest();
     if (argc > 1 && std::string (argv[1]) == "power") { powerAmpTests(); return 0; }
     if (argc > 2 && std::string (argv[1]) == "pdebug") { powerAmpDebug (std::atof (argv[2])); return 0; }
     gateTests();

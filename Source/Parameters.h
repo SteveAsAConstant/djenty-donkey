@@ -4,6 +4,9 @@
 namespace ids
 {
 inline constexpr const char* inGain      = "inGain";
+inline constexpr const char* inGateOn    = "inGateOn";
+inline constexpr const char* inGateThresh = "inGateThresh";
+inline constexpr const char* inGateRelease = "inGateRelease";
 inline constexpr const char* gateOn      = "gateOn";
 inline constexpr const char* gateThresh  = "gateThresh";
 inline constexpr const char* gateRelease = "gateRelease";
@@ -31,6 +34,7 @@ inline constexpr const char* treble      = "treble";
 inline constexpr const char* presence    = "presence";
 inline constexpr const char* resonance   = "resonance";
 inline constexpr const char* master      = "master";
+inline constexpr const char* ampVolume   = "ampVolume";
 inline constexpr const char* cabOn       = "cabOn";
 inline constexpr const char* eqOn        = "eqOn";
 inline constexpr const char* phaserOn    = "phaserOn";
@@ -84,6 +88,10 @@ inline juce::AudioProcessorValueTreeState::ParameterLayout createParameterLayout
 
     layout.add (makeFloat (ids::inGain, "Input", -24.0f, 24.0f, 0.0f, " dB"));
 
+    layout.add (makeBool  (ids::inGateOn, "Input Gate On", false));
+    layout.add (makeFloat (ids::inGateThresh, "Input Gate Threshold", -90.0f, 0.0f, -50.0f, " dB"));
+    layout.add (makeFloat (ids::inGateRelease, "Input Gate Release", 2.0f, 200.0f, 20.0f, " ms", 0, 20.0f));
+
     layout.add (makeBool  (ids::gateOn, "Gate On", true));
     layout.add (makeFloat (ids::gateThresh, "Gate Threshold", -90.0f, 0.0f, -60.0f, " dB"));
     layout.add (makeFloat (ids::gateRelease, "Gate Release", 5.0f, 500.0f, 80.0f, " ms", 0, 80.0f));
@@ -117,6 +125,7 @@ inline juce::AudioProcessorValueTreeState::ParameterLayout createParameterLayout
     layout.add (makeFloat (ids::presence, "Presence", 0.0f, 10.0f, 5.0f));
     layout.add (makeFloat (ids::resonance, "Resonance", 0.0f, 10.0f, 5.0f));
     layout.add (makeFloat (ids::master, "Master", 0.0f, 10.0f, 3.0f));
+    layout.add (makeFloat (ids::ampVolume, "Amp Volume", -40.0f, 12.0f, 0.0f, " dB"));
 
     layout.add (makeBool (ids::cabOn, "Cab On", true));
 

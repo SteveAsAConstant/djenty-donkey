@@ -23,6 +23,7 @@ public:
         int channel = 2;
         float gain = 0.6f, bass = 0.5f, mid = 0.5f, treble = 0.6f;
         float presence = 0.5f, resonance = 0.5f, master = 0.3f; // all 0..1
+        float volumeDb = 0.0f; // post-power-amp level (like an attenuator), does not change the tone
         bool boostOn = false;
         float boostDrive = 0.0f, boostBright = 0.5f, boostLevel = 0.7f;
         int boostAttack = 3; // 0..7
@@ -39,6 +40,7 @@ public:
         drive.prepare (osRate);
         preamp.prepare (osRate);
         power.prepare (osRate);
+        volume.reset (osRate, 0.03);
         dcBlock.reset();
         oversampler->reset();
     }
@@ -59,6 +61,7 @@ public:
         dcBlock.set (10.0, osRate);
 
         const double post = kChannelPost[channel];
+        volume.setTargetValue (std::pow (10.0, s.volumeDb / 20.0) * kSpeakerToDigital);
 
         float* chans[] = { data };
         juce::dsp::AudioBlock<float> block (chans, 1, (size_t) numSamples);
@@ -75,7 +78,7 @@ public:
 
             v = preamp.process (v) * post;        // volts at the post-gain (master) pot wiper
             v = power.process (v);                // volts across the speaker
-            x[i] = dcBlock.process ((float) (v * kSpeakerToDigital));
+            x[i] = dcBlock.process ((float) (v * volume.getNextValue()));
         }
 
         oversampler->processSamplesDown (block);
@@ -89,6 +92,7 @@ private:
     Preamp5150 preamp;
     PowerAmp5150 power;
     OnePoleHP dcBlock;
+    juce::SmoothedValue<double, juce::ValueSmoothingTypes::Multiplicative> volume { kSpeakerToDigital };
 };
 
 } // namespace vamp

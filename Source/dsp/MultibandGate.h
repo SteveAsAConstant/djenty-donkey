@@ -115,4 +115,54 @@ private:
     BandState bands[3];
 };
 
+// Fast single-band gate in front of the amp (the "input" half of a 4-cable gate setup).
+// Its job is feel, not hiss: it makes the gaps between palm-muted chugs dead silent so the
+// high-gain amp doesn't amplify string ringing / pickup noise between notes.
+class InputGate
+{
+public:
+    void prepare (double sampleRate)
+    {
+        fs = sampleRate;
+        keyHP.set (Biquad::Type::highPass, fs, 80.0, 0.7071);
+        envRelease = (float) std::exp (-1.0 / (0.005 * fs));  // 5 ms detector smoothing
+        attackCoef = (float) std::exp (-1.0 / (0.0003 * fs)); // 0.3 ms opening
+        holdSamples = (int) (0.005 * fs);
+        reset();
+    }
+
+    void reset() { keyHP.reset(); env = 0.0f; open = false; hold = 0; gain = 1.0f; gainDb = 0.0f; }
+
+    // releaseMs = time to close completely (linear fade in dB down to -80 dB)
+    void process (float* audio, int n, float threshDb, float releaseMs)
+    {
+        const float relStepDb = 80.0f / (std::max (1.0f, releaseMs) * 0.001f * (float) fs);
+        for (int i = 0; i < n; ++i)
+        {
+            const float k = std::abs (keyHP.process (audio[i]));
+            env = k > env ? k : env * envRelease;
+            const float envDb = 20.0f * std::log10 (env + 1e-9f);
+
+            if (envDb > threshDb)                 { open = true; hold = holdSamples; }
+            else if (envDb < threshDb - 4.0f)     { if (hold > 0) --hold; else open = false; }
+
+            if (open) gain = 1.0f + (gain - 1.0f) * attackCoef;                 // 0.3 ms opening
+            else      gainDb = std::max (-80.0f, gainDb - relStepDb);           // linear dB fade
+            if (open) gainDb = 20.0f * std::log10 (std::max (gain, 1e-4f));
+            else      gain = gainDb <= -80.0f ? 0.0f : std::pow (10.0f, gainDb / 20.0f);
+
+            audio[i] *= gain;
+        }
+    }
+
+    float getGain() const { return gain; }
+
+private:
+    double fs = 48000.0;
+    Biquad keyHP;
+    float env = 0.0f, envRelease = 0.99f, attackCoef = 0.9f, gain = 1.0f, gainDb = 0.0f;
+    int holdSamples = 240, hold = 0;
+    bool open = false;
+};
+
 } // namespace vamp

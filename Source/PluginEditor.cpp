@@ -96,6 +96,111 @@ void IRPanel::filesDropped (const juce::StringArray& files, int, int)
 }
 
 // ===========================================================================
+// PresetBar
+// ===========================================================================
+PresetBar::PresetBar (VibeAmpProcessor& p) : proc (p)
+{
+    box.setTextWhenNothingSelected ("(no preset)");
+    box.onChange = [this]
+    {
+        const int index = box.getSelectedId() - 1;
+        if (index >= 0 && proc.presets.getName (index) != proc.presets.getCurrentName())
+            proc.presets.load (index);
+    };
+    prevButton.onClick = [this] { step (-1); };
+    nextButton.onClick = [this] { step (1); };
+    saveButton.onClick = [this] { savePreset(); };
+    deleteButton.onClick = [this] { deletePreset(); };
+    folderButton.onClick = [] { PresetManager::getUserFolder().startAsProcess(); };
+    folderButton.setTooltip ("Open the preset folder (share the .xml files with friends)");
+
+    for (auto* c : std::initializer_list<juce::Component*> { &box, &prevButton, &nextButton, &saveButton, &deleteButton, &folderButton })
+        addAndMakeVisible (c);
+    refreshList();
+}
+
+void PresetBar::refreshList()
+{
+    auto& pm = proc.presets;
+    pm.refresh();
+    box.clear (juce::dontSendNotification);
+    box.addSectionHeading ("Factory");
+    for (int i = 0; i < pm.getNumFactory(); ++i)
+        box.addItem (pm.getName (i), i + 1);
+    if (pm.getNumPresets() > pm.getNumFactory())
+    {
+        box.addSectionHeading ("User");
+        for (int i = pm.getNumFactory(); i < pm.getNumPresets(); ++i)
+            box.addItem (pm.getName (i), i + 1);
+    }
+    const int current = pm.indexOf (pm.getCurrentName());
+    if (current >= 0) box.setSelectedId (current + 1, juce::dontSendNotification);
+    deleteButton.setEnabled (current >= 0 && pm.isUser (current));
+}
+
+void PresetBar::step (int direction)
+{
+    auto& pm = proc.presets;
+    const int n = pm.getNumPresets();
+    if (n == 0) return;
+    const int current = juce::jmax (0, pm.indexOf (pm.getCurrentName()));
+    pm.load ((current + direction + n) % n);
+    refreshList();
+}
+
+void PresetBar::savePreset()
+{
+    auto& pm = proc.presets;
+    const int current = pm.indexOf (pm.getCurrentName());
+    const auto suggestion = current >= 0 && pm.isUser (current) ? pm.getCurrentName() : juce::String ("My Preset");
+
+    auto* aw = new juce::AlertWindow ("Save preset", "Preset name (saving with an existing name overwrites it):",
+                                      juce::MessageBoxIconType::NoIcon, this);
+    aw->addTextEditor ("name", suggestion);
+    aw->addButton ("Save", 1, juce::KeyPress (juce::KeyPress::returnKey));
+    aw->addButton ("Cancel", 0, juce::KeyPress (juce::KeyPress::escapeKey));
+    aw->enterModalState (true, juce::ModalCallbackFunction::create ([this, aw] (int result)
+    {
+        if (result == 1)
+        {
+            proc.presets.save (aw->getTextEditorContents ("name"));
+            refreshList();
+        }
+    }), true);
+}
+
+void PresetBar::deletePreset()
+{
+    auto& pm = proc.presets;
+    const int current = pm.indexOf (pm.getCurrentName());
+    if (current < 0 || ! pm.isUser (current)) return;
+
+    juce::AlertWindow::showOkCancelBox (juce::MessageBoxIconType::QuestionIcon, "Delete preset",
+                                        "Delete \"" + pm.getCurrentName() + "\"?", "Delete", "Cancel", this,
+                                        juce::ModalCallbackFunction::create ([this, current] (int result)
+    {
+        if (result == 1)
+        {
+            proc.presets.remove (current);
+            proc.presets.setCurrentName ({});
+            refreshList();
+        }
+    }));
+}
+
+void PresetBar::resized()
+{
+    auto b = getLocalBounds();
+    folderButton.setBounds (b.removeFromRight (70).reduced (2, 0));
+    deleteButton.setBounds (b.removeFromRight (70).reduced (2, 0));
+    saveButton.setBounds (b.removeFromRight (64).reduced (2, 0));
+    b.removeFromRight (6);
+    nextButton.setBounds (b.removeFromRight (34).reduced (2, 0));
+    prevButton.setBounds (b.removeFromLeft (34).reduced (2, 0));
+    box.setBounds (b.reduced (2, 0));
+}
+
+// ===========================================================================
 // Editor
 // ===========================================================================
 VibeAmpEditor::VibeAmpEditor (VibeAmpProcessor& p) : AudioProcessorEditor (&p), proc (p)
@@ -108,7 +213,11 @@ VibeAmpEditor::VibeAmpEditor (VibeAmpProcessor& p) : AudioProcessorEditor (&p), 
     inSec->add<Knob> (s, ids::inGain, "Level", colours::text);
     inSec->add<LevelMeter> ([this] { return proc.popInputPeak(); }, true);
 
-    gateSec = std::make_unique<Section> ("3-BAND GATE", colours::teal, &s, ids::gateOn);
+    inGateSec = std::make_unique<Section> ("INPUT GATE", colours::teal, &s, ids::inGateOn);
+    inGateSec->add<Knob> (s, ids::inGateThresh, "Thresh", colours::teal);
+    inGateSec->add<Knob> (s, ids::inGateRelease, "Release", colours::teal);
+
+    gateSec = std::make_unique<Section> ("3-BAND GATE (LOOP)", colours::teal, &s, ids::gateOn);
     gateSec->add<Knob> (s, ids::gateThresh, "Thresh", colours::teal);
     gateSec->add<Knob> (s, ids::gateRelease, "Release", colours::teal);
     gateSec->add<Knob> (s, ids::gateLow, "Low", colours::teal);
@@ -145,6 +254,7 @@ VibeAmpEditor::VibeAmpEditor (VibeAmpProcessor& p) : AudioProcessorEditor (&p), 
     ampSec->add<Knob> (s, ids::presence, "Presence", colours::red);
     ampSec->add<Knob> (s, ids::resonance, "Resonance", colours::red);
     ampSec->add<Knob> (s, ids::master, "Master", colours::red);
+    ampSec->add<Knob> (s, ids::ampVolume, "Volume", colours::red);
     setAmpChannelColour (juce::roundToInt (s.getRawParameterValue (ids::channel)->load()));
 
     // ---- row 3: cab + EQ ----
@@ -178,13 +288,15 @@ VibeAmpEditor::VibeAmpEditor (VibeAmpProcessor& p) : AudioProcessorEditor (&p), 
     outSec->add<Knob> (s, ids::outGain, "Level", colours::text);
     outSec->add<LevelMeter> ([this] { return proc.popOutputPeak(); }, false);
 
-    for (auto* sec : { inSec.get(), gateSec.get(), pitchSec.get(), compSec.get(), boostSec.get(), ampSec.get(),
+    addAndMakeVisible (presetBar);
+
+    for (auto* sec : { inSec.get(), inGateSec.get(), gateSec.get(), pitchSec.get(), compSec.get(), boostSec.get(), ampSec.get(),
                        cabSec.get(), eqSec.get(), phaserSec.get(), delaySec.get(), reverbSec.get(), outSec.get() })
         addAndMakeVisible (sec);
 
     setResizable (true, true);
-    setResizeLimits (1100, 680, 2200, 1400);
-    setSize (1360, 820);
+    setResizeLimits (1200, 700, 2400, 1500);
+    setSize (1480, 840);
 }
 
 VibeAmpEditor::~VibeAmpEditor()
@@ -209,10 +321,9 @@ void VibeAmpEditor::paint (juce::Graphics& g)
     g.setFont (font (26.0f, true));
     g.drawText ("DJENTY DONKEY", header, juce::Justification::centredLeft);
 
-    g.setColour (colours::text.withAlpha (0.6f));
-    g.setFont (font (13.0f));
-    g.drawText ("component-level 5150 / 6505  -  precision drive  -  IR cab  -  fx  -  v" JucePlugin_VersionString,
-                header, juce::Justification::centredRight);
+    g.setColour (colours::text.withAlpha (0.5f));
+    g.setFont (font (12.0f));
+    g.drawText ("v" JucePlugin_VersionString, header.withTrimmedLeft (215), juce::Justification::centredLeft);
 
     const auto accent = ampSec ? ampSec->getAccent() : colours::red;
     g.setColour (accent);
@@ -239,7 +350,7 @@ void layoutRow (juce::Rectangle<int> r, std::initializer_list<std::pair<juce::Co
 void VibeAmpEditor::resized()
 {
     auto b = getLocalBounds().reduced (16, 10);
-    b.removeFromTop (50);
+    presetBar.setBounds (b.removeFromTop (50).removeFromRight (640).reduced (0, 6));
 
     constexpr int gap = 8;
     const int h = b.getHeight() - gap * 3;
@@ -248,8 +359,8 @@ void VibeAmpEditor::resized()
     auto row3 = b.removeFromTop (juce::roundToInt (h * 0.27f)); b.removeFromTop (gap);
     auto row4 = b;
 
-    layoutRow (row1, { { inSec.get(), 2.0f }, { gateSec.get(), 6.0f }, { pitchSec.get(), 2.2f },
-                       { compSec.get(), 5.0f } });
+    layoutRow (row1, { { inSec.get(), 2.0f }, { inGateSec.get(), 2.0f }, { gateSec.get(), 6.0f },
+                       { pitchSec.get(), 2.2f }, { compSec.get(), 5.0f } });
     layoutRow (row2, { { boostSec.get(), 4.0f }, { ampSec.get(), 8.5f } });
     layoutRow (row3, { { cabSec.get(), 3.0f }, { eqSec.get(), 7.0f } });
     layoutRow (row4, { { phaserSec.get(), 4.0f }, { delaySec.get(), 4.0f },

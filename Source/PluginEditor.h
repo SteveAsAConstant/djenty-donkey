@@ -29,6 +29,25 @@ private:
     bool dragOver = false;
 };
 
+// Header bar: preset list, previous / next, save, delete, open folder
+class PresetBar : public juce::Component
+{
+public:
+    explicit PresetBar (VibeAmpProcessor&);
+    void resized() override;
+    void refreshList();
+
+private:
+    void step (int direction);
+    void savePreset();
+    void deletePreset();
+
+    VibeAmpProcessor& proc;
+    juce::ComboBox box;
+    juce::TextButton prevButton { "<" }, nextButton { ">" }, saveButton { "SAVE" },
+                     deleteButton { "DELETE" }, folderButton { "FOLDER" };
+};
+
 class VibeAmpEditor : public juce::AudioProcessorEditor
 {
 public:
@@ -45,7 +64,8 @@ private:
     ui::LookAndFeel lnf;
     juce::TooltipWindow tooltipWindow { this, 400 };
 
-    std::unique_ptr<ui::Section> inSec, gateSec, pitchSec, compSec, boostSec;
+    PresetBar presetBar { proc };
+    std::unique_ptr<ui::Section> inSec, inGateSec, gateSec, pitchSec, compSec, boostSec;
     std::unique_ptr<ui::Section> ampSec;
     std::unique_ptr<ui::Section> cabSec, eqSec;
     std::unique_ptr<ui::Section> phaserSec, delaySec, reverbSec, outSec;
