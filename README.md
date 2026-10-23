@@ -20,7 +20,7 @@ Windows SmartScreen may warn because the exe is not code-signed: click *More inf
 ## Signal chain
 
 ```
-Input ─ Gate ─ Transpose ─ Compressor ─┬─ [4x oversampled] ───────────────────────────────┐
+Input ─ Gate ─ Transpose ─ Compressor ─┬─ [8x oversampled] ───────────────────────────────┐
                                        │  Precision Drive → 5150 preamp → tone stack → power │
                                        └──────────────────────────────────────────────────┘
       ─ Cabinet IR ─ 10-band EQ ─ Phaser ─ Delay ─ Reverb ─ Output

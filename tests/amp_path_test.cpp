@@ -1,4 +1,4 @@
-// Checks of the plugin's real amp path (AmpSim: JUCE 4x polyphase-IIR oversampling at 48 kHz) against
+// Checks of the plugin's real amp path (AmpSim at 48 kHz: JUCE polyphase-IIR oversampling, 8x) against
 //   ideal  the same DSP at 4x / 8x / 16x with a long linear-phase decimator (16x: practically alias-free)
 //   NAM    a capture of a real 6505 (optional), which has no aliasing of its own beyond its 48 kHz model
 //
@@ -10,6 +10,7 @@
 // 4. dynamics: RMS envelope of a 110 Hz tone burst (quiet / loud / quiet), plugin vs NAM
 // Settings: lead channel, gain 5, bass 6, mid 4, treble 6, presence 8, resonance 9, master 3
 // (the "6505 1992 Ld Pr-5 B-6 M-4 T-6 Po-3 R-9 P-8" capture).
+#include <chrono>
 #include <complex>
 #include <cstdio>
 #include <functional>
@@ -189,7 +190,8 @@ int main (int argc, char** argv)
     namcmp::NamWaveNet nam;
     const bool haveNam = argc > 1 && nam.load (argv[1]);
     if (argc > 2) voltsPerFS = 0.7746 * std::pow (10.0, std::atof (argv[2]) / 20.0) * std::sqrt (2.0);
-    std::printf ("plugin path = AmpSim at 48 kHz (JUCE 4x IIR oversampling); ideal = 16x + linear-phase decimation%s\n",
+    std::printf ("plugin path = AmpSim at 48 kHz (JUCE IIR oversampling, %d samples latency); ideal = N x + linear-phase decimation%s\n",
+                 [] { vamp::AmpSim a; a.prepare (fs, 64); return a.getLatencySamples(); }(),
                  haveNam ? "; NAM = real 6505 capture" : "");
 
     // 1. aliasing
@@ -224,6 +226,26 @@ int main (int argc, char** argv)
         if (bi_ % 3 == 0) std::printf ("  %5.0f Hz %+5.2f", fc, d);
     }
     std::printf ("\n  max |difference| over all bands: %.2f dB\n", worst);
+
+    // CPU of the whole plugin amp path (oversampling filters included), 10 s of chugs, 64-sample blocks
+    {
+        vamp::AmpSim amp;
+        amp.prepare (fs, 64);
+        const auto s = settings();
+        const auto x = sample (chug, fs, 10.0);
+        std::vector<float> buf (64);
+        double total = 0, worst = 0;
+        for (size_t start = 0; start + 64 <= x.size(); start += 64)
+        {
+            for (int i = 0; i < 64; ++i) buf[(size_t) i] = (float) x[start + (size_t) i];
+            const auto t0 = std::chrono::high_resolution_clock::now();
+            amp.process (buf.data(), 64, s);
+            const double us = std::chrono::duration<double, std::micro> (std::chrono::high_resolution_clock::now() - t0).count();
+            total += us; worst = std::max (worst, us);
+        }
+        std::printf ("\n== CPU of the plugin amp path (RED, gain 5, master 3): avg %.1f%% of one core, worst 64-sample block %.0f%% ==\n",
+                     100.0 * total / 10e6, 100.0 * worst / (64.0 / fs * 1e6));
+    }
 
     if (! haveNam) return 0;
 

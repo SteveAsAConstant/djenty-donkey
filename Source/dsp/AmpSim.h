@@ -31,11 +31,16 @@ public:
 
     void prepare (double sampleRate, int maxBlock)
     {
-        // 4x oversampling around the whole non-linear amp (preamp + power amp)
+        // Oversampling around the whole non-linear amp (preamp + power amp), to at least kMinOsRate:
+        // 8x at 44.1 / 48 kHz, 4x at 88.2 / 96 kHz, 2x at 176.4 / 192 kHz. Aliasing (inharmonic energy for
+        // heavily clipped 1-5 kHz sines, tests/amp_path_test): 4x -50..-55 dB, 8x -61..-70 dB, ~1.7x the CPU.
+        int stages = 1;
+        while (sampleRate * (1 << stages) < kMinOsRate && stages < 3)
+            ++stages;
         oversampler = std::make_unique<juce::dsp::Oversampling<float>> (
-            1, 2, juce::dsp::Oversampling<float>::filterHalfBandPolyphaseIIR, true, false);
+            1, (size_t) stages, juce::dsp::Oversampling<float>::filterHalfBandPolyphaseIIR, true, false);
         oversampler->initProcessing ((size_t) maxBlock);
-        osRate = sampleRate * 4.0;
+        osRate = sampleRate * (1 << stages);
 
         drive.prepare (osRate);
         preamp.prepare (osRate);
@@ -85,6 +90,7 @@ public:
     }
 
 private:
+    static constexpr double kMinOsRate = 352800.0; // 8 x 44.1 kHz
     std::unique_ptr<juce::dsp::Oversampling<float>> oversampler;
     double osRate = 176400.0;
 
