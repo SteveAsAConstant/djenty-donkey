@@ -15,11 +15,23 @@
 V0 v0 0 500
 Dr v0 vr DR
 Rsup vr bplus 60
-Cres bplus 0 100u
+* factory supply chain (schematic sheet 2): PLATE -> R210 -> SCREEN -> R59 -> V3+ (PI) -> R60 -> V2+ (V3A, V3B,
+* preamp V2B V5B V5A) -> R61 -> V1+ (preamp V1A V1B V2A); the preamp as its idle currents, V3B as a real tube
+Cres bplus 0 165u
 Rscr bplus scr 400
-Cscr scr 0 47u
-B3 v3 0 V=0.86*V(bplus)
-VB1 vb320 0 320
+Cscr scr 0 50u
+R59 scr v3 4k
+C36 v3 0 47u
+R60 v3 v2 22k
+C37 v2 0 22u
+R61 v2 v1 10k
+C33 v1 0 22u
+Ipre2 v2 0 2.19m
+Ipre1 v1 0 1.65m
+X3B v2 g3b k3b 12AX7
+R80 k3b j3b 1k
+R16 j3b 0 100k
+R79 g3b j3b 1Meg
 Vbias bias 0 -54.01
 .model DR D(Ron=0.01 Roff=1G Vfwd=0)
 
@@ -30,7 +42,7 @@ C11 n1 na 47n
 R26 na 0 1Meg
 Rs3 na g3 1k
 X3A p3 g3 k3 12AX7
-R5 vb320 p3 68k
+R5 v2 p3 68k
 R14 k3 0 3.3k
 C61 k3 0 4.7n
 

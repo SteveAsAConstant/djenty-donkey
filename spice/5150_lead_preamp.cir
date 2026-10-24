@@ -1,11 +1,12 @@
 * EVH 5150 LEAD preamp: input -> V1A -> lead gain -> V1B -> V2A -> V2B -> V5B -> V5A -> (to tone stack)
 * Reference for the C++ component-level model. Values from docs/5150_schematic_notes.md
+* Rails: the factory supply chain at idle (Supply5150: V1+ 305.7 V, V2+ 322.1 V); V5A loaded by the tone-stack feed.
 .include 12AX7.inc
 .param gain=0.5
 .param amp=0.01
 
-VB1 vb1 0 320
-VB2 vb2 0 320
+VB1 vb1 0 305.7
+VB2 vb2 0 322.1
 VIN src 0 SINE(0 {amp} 1k)
 
 * ---- input ----
@@ -75,7 +76,9 @@ R93 k5a 0 2.2k
 C58 p5a out 22n
 R88 g5a out 1Meg
 R89 out ts 470k
-RTS ts 0 100k
+R24 ts 0 33k
+C59 ts c59 10n
+R94 c59 0 47k
 
 .tran 0 60m 0 2u
 .step param amp list 0.001 0.01 0.1 0.5

@@ -159,6 +159,7 @@ public:
         KorenTriode::softplusPow(); // builds the table on first use: here, not on the audio thread
         cfg = c;
         T = 1.0 / sampleRate;
+        maxHeldRun = std::max (1, (int) (1e-3 * sampleRate));
         derive();
         initDC();
     }
@@ -166,7 +167,13 @@ public:
     // vin is the AC input voltage, returns the AC plate voltage (plate - quiescent plate)
     double process (double vin)
     {
-        const double alpha = (Gs * (vin - h) + IeqA) * invGAtot;
+        // A non-finite input sample is treated as lost: replaced by the last accepted one, the stage then advances
+        // normally. That is the smallest disturbance possible; skipping the update instead upsets the trapezoidal
+        // capacitor companions (a one-sample current spike through Cgp / Cgk that the following stages amplify:
+        // ~4 V at the speaker vs ~0.1 V, tests/dsp_test fault).
+        if (! std::isfinite (vin)) vin = lastVin;
+
+        double alpha = (Gs * (vin - h) + IeqA) * invGAtot;
         const double beta = betaA;
 
         // Newton solve of the 3 node equations (grid, cathode, plate); true when the KCL residual < 1 nA
@@ -225,13 +232,38 @@ public:
             g = vG; k = vK; p = vP;
             if (! newton (g, k, p, 30)) ++statFailures;
         }
-        prevG = vG; prevK = vK; prevP = vP;
 
-        if (! std::isfinite (g + k + p) || p < -50.0 || p > cfg.vb + 50.0)
+        // A non-finite or out-of-range solve is retried as a lost input sample (the last accepted input, from the
+        // last solution). If that fails too, the sample is dropped: the states still hold the last accepted
+        // sample, and its output is repeated. Resetting to the quiescent point instead (v0.4) discharged the
+        // coupling / cathode caps mid-note: a step the following stages amplify, >100 V at the speaker for
+        // ~25 ms. Only a fault that persists for 1 ms falls back to the quiescent point.
+        auto bad = [&]
         {
-            initDC();
-            return 0.0;
+            if (testFaults > 0) { --testFaults; return true; }
+            return ! std::isfinite (g + k + p) || p < -50.0 || p > cfg.vb + 50.0;
+        };
+        if (bad())
+        {
+            ++statRetries;
+            vin = lastVin;
+            alpha = (Gs * (vin - h) + IeqA) * invGAtot;
+            g = vG; k = vK; p = vP;
+            newton (g, k, p, 30);
+            if (bad())
+            {
+                ++statHeld;
+                if (++heldRun > maxHeldRun)
+                {
+                    initDC();
+                    return 0.0;
+                }
+                return vP - vPdc;
+            }
         }
+        heldRun = 0;
+        lastVin = vin;
+        prevG = vG; prevK = vK; prevP = vP;
 
         vG = g; vK = k; vP = p;
         vA = alpha + beta * g;
@@ -263,11 +295,17 @@ public:
     }
 
     // Newton statistics (for tests)
-    long long statSamples = 0, statEvals = 0, statFallbacks = 0, statFailures = 0;
+    long long statSamples = 0, statEvals = 0, statFallbacks = 0, statFailures = 0, statRetries = 0, statHeld = 0;
+    int testFaults = 0; // tests: the next this-many fault checks report a bad solve
 
     // Reference renders for the tone regression: 1000x tighter residual, no early step acceptance and the
     // original (untabulated) tube formula
     void setReferencePrecision (bool on) { resTol = on ? 2e-12 : 2e-9; acceptSmallStep = ! on; tube.exact = on; }
+
+    // B+ of this stage per sample (the supply rail sags with load); the quiescent plate getVpDC() stays the
+    // configure() value, so a rail change shows up as a slow offset in the AC output (blocked by the next coupling cap)
+    void setSupply (double vb) { cfg.vb = vb; }
+    double getPlateCurrent() const { return (cfg.vb - vP) / cfg.rp; } // drawn from the rail (through the plate resistor)
 
     double getVk() const { return vK; }
     double getVp() const { return vP; }
@@ -355,6 +393,8 @@ private:
         }
         vK = k; vP = p; vPdc = p; vG = 0.0; vA = 0.0;
         prevG = vG; prevK = vK; prevP = vP;
+        heldRun = 0;
+        lastVin = 0.0;
         h = 0.0;
         IeqA = 0.0;
         IeqK = GcK * vK;
@@ -378,6 +418,8 @@ private:
     double Gk2 = 0, halfTk2 = 0, Gfb = 0, GAtot = 1, invGAtot = 1, betaA = 0, Gcgp = 0, Gcgk = 0;
 
     double vG = 0, vK = 0, vP = 0, vA = 0, vPdc = 0;
+    int heldRun = 0, maxHeldRun = 192; // consecutive dropped samples; beyond the limit -> initDC()
+    double lastVin = 0.0;
     double prevG = 0, prevK = 0, prevP = 0;
     double h = 0, IeqA = 0, IeqK = 0, h2 = 0, IeqGP = 0, IeqGK = 0;
 };

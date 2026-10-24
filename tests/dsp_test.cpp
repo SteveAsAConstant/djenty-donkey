@@ -8,6 +8,7 @@
 #include <vector>
 #include "dsp/MultibandGate.h"
 #include "dsp/PitchShifter.h"
+#include "dsp/Amp5150.h"
 #include "dsp/PowerAmp5150.h"
 #include "dsp/Preamp5150.h"
 #include "dsp/PrecisionDrive.h"
@@ -26,24 +27,23 @@ struct Stat
 
 static void leadPreampVsSpice()
 {
-    std::printf ("\n== 5150 lead preamp (B+ 320V, pot 0.5, 1 kHz) ==\n");
+    std::printf ("\n== 5150 lead preamp (factory rails 305.7 / 322.1 V, V5A loaded, pot 0.5, 1 kHz) ==\n");
     std::printf ("%-8s %8s %8s %8s %8s %8s %8s | %8s %8s %8s %8s %8s %8s\n", "amp",
                  "Vk1a", "Vk1b", "Vk2a", "Vk2b", "Vk5b", "Vk5a", "p1a_pp", "p1b_pp", "p2a_pp", "p2b_pp", "p5b_pp", "out_pp");
 
     for (double amp : { 0.001, 0.01, 0.1, 0.5 })
     {
-        Preamp5150 pre;
+        Preamp5150 pre (true); // diagnostics: all plate and cathode voltages
         pre.prepare (fs); // mode Red by default
         pre.setPreGainPot (0.5);
 
-        TriodeStage* st[] = { &pre.v1a, &pre.v1b, &pre.v2a, &pre.v2b, &pre.v5b, &pre.v5a };
-        Stat k[6], p[6];
+        Stat k[6], p[6]; // RED: the whole preamp is pre.lead (coupled), real plate voltages
         const int total = (int) (fs * 0.06), from = (int) (fs * 0.04);
         for (int i = 0; i < total; ++i)
         {
             pre.process (amp * std::sin (2.0 * kPi * 1000.0 * i / fs));
             if (i >= from)
-                for (int s = 0; s < 6; ++s) { k[s].add (st[s]->getVk()); p[s].add (st[s]->getVp()); }
+                for (int s = 0; s < 6; ++s) { k[s].add (pre.lead.getVk (s)); p[s].add (pre.lead.getVp (s)); }
         }
         std::printf ("%-8g %8.2f %8.2f %8.2f %8.2f %8.2f %8.2f | %8.3f %8.2f %8.2f %8.1f %8.1f %8.1f\n", amp,
                      k[0].avg(), k[1].avg(), k[2].avg(), k[3].avg(), k[4].avg(), k[5].avg(),
@@ -214,12 +214,12 @@ static void powerAmpTests()
     std::printf ("\n== power amp: idle operating point ==\n");
     {
         PowerAmp5150 pa;
-        pa.setControls (0.5, 0.5);
+        pa.setControls (0.0, 0.0); // as spice/5150_power_amp.cir run 1 (VR8 is in the tail's DC path)
         pa.prepare (fs);
         for (int i = 0; i < (int) (fs * 0.2); ++i) pa.process (0.0);
-        std::printf ("B+ %.1f V, bias %.2f V, output plate %.1f V, PI cathode %.2f V, PI plates %.1f / %.1f V\n",
+        std::printf ("B+ %.1f V, bias %.2f V, output plate %.1f V, PI cathode %.2f V, PI plates %.1f / %.1f V, V3A plate %.1f V\n",
                      pa.getSupplyVoltage(), pa.getBiasVoltage(), pa.getPlate1(), pa.getPIcathode(),
-                     pa.getPIplateA(), pa.getPIplateB());
+                     pa.getPIplateA(), pa.getPIplateB(), pa.getV3a());
     }
 
     std::printf ("\n== power amp: small-signal response, 20 mV at master node, speaker Vpk (dB re 1 V) ==\n");
@@ -287,9 +287,9 @@ static void powerAmpDebug (double amp)
         if (! pa.lastConverged || std::abs (y) > 80.0)
         {
             std::printf ("t=%.5f out=%.1f B+=%.1f V3A=%.1f | ports:", i / fs, y, pa.getSupplyVoltage(), pa.getV3a());
-            for (int k = 0; k < 8; ++k) std::printf (" %.2f", pa.getPort (k));
+            for (int k = 0; k < PowerAmp5150::kPorts; ++k) std::printf (" %.2f", pa.getPort (k));
             std::printf (" | p0:");
-            for (int k = 0; k < 8; ++k) std::printf (" %.1f", pa.lastP0[k]);
+            for (int k = 0; k < PowerAmp5150::kPorts; ++k) std::printf (" %.1f", pa.lastP0[k]);
             std::printf ("\n");
             ++shown;
             i += 20;
@@ -449,13 +449,13 @@ static void cpuModules()
         PrecisionDrive pd; pd.prepare (os); pd.setControls (0.5, 0.5, 3, 0.7);
         Preamp5150 pre; pre.prepare (os); pre.setMode (2); pre.setControls (0.7, 0.5, 0.5, 0.6, 0.5);
         PowerAmp5150 pa; pa.setControls (0.5, 0.5); pa.prepare (os);
-        auto fn = [&] (int i) { return pa.process (pre.process (pd.process (diOs[(size_t) i]))); };
+        auto fn = [&] (int i) { return processAmp5150 (pre, pa, pd.process (diOs[(size_t) i]), 1.0); };
         timeModule ("FULL amp: drive+RED+power (4x)", os, 256, nOs, loop (fn));
     }
     {
         Preamp5150 pre; pre.prepare (os); pre.setMode (0); pre.setControls (0.7, 0.5, 0.5, 0.6, 0.5);
         PowerAmp5150 pa; pa.setControls (0.5, 0.5); pa.prepare (os);
-        auto fn = [&] (int i) { return pa.process (pre.process (diOs[(size_t) i]) * 25.0); }; // AmpSim kChannelPost
+        auto fn = [&] (int i) { return processAmp5150 (pre, pa, diOs[(size_t) i], 25.0); }; // AmpSim kChannelPost
         timeModule ("FULL amp: CLEAN+power (4x)", os, 256, nOs, loop (fn));
     }
 
@@ -463,17 +463,23 @@ static void cpuModules()
     for (int mode : { 0, 1, 2 })
     {
         Preamp5150 pre; pre.prepare (os); pre.setMode (mode); pre.setControls (0.7, 0.5, 0.5, 0.6, 0.5);
-        TriodeStage* st[] = { &pre.v1a, &pre.v1b, &pre.v2a, &pre.v2b, &pre.v5b, &pre.v5a };
+        TriodeStage* st[] = { &pre.v1a, &pre.v1b, &pre.v2a };
         for (auto* s : st) s->statSamples = s->statEvals = s->statFallbacks = 0;
+        pre.late.net.statSamples = pre.late.net.statIterations = pre.late.net.statFailures = 0;
+        pre.lead.net.statSamples = pre.lead.net.statIterations = pre.lead.net.statFailures = 0;
         double a = 0;
         for (int i = 0; i < nOs; ++i) a += pre.process (diOs[(size_t) i]);
         sink = sink + a;
         std::printf ("%-6s", names[mode] + 7);
-        const char* sn[] = { "V1A", "V1B", "V2A", "V2B", "V5B", "V5A" };
-        for (int k = 0; k < 6; ++k)
+        const char* sn[] = { "V1A", "V1B", "V2A" };
+        for (int k = 0; k < 3; ++k)
             if (st[k]->statSamples > 0)
                 std::printf ("  %s %.2f (%.1f%%)", sn[k], (double) st[k]->statEvals / st[k]->statSamples,
                              100.0 * st[k]->statFallbacks / st[k]->statSamples);
+        if (pre.late.net.statSamples > 0)
+            std::printf ("  V2B-V5A %.2f (%lld failures)", (double) pre.late.net.statIterations / pre.late.net.statSamples, pre.late.net.statFailures);
+        if (pre.lead.net.statSamples > 0)
+            std::printf ("  V1A-V5A %.2f (%lld failures)", (double) pre.lead.net.statIterations / pre.lead.net.statSamples, pre.lead.net.statFailures);
         std::printf ("\n");
     }
     {
@@ -481,7 +487,7 @@ static void cpuModules()
         PowerAmp5150 pa; pa.setControls (0.5, 0.5); pa.prepare (os);
         pa.statSamples = pa.statIterations = pa.statFailures = 0;
         double a = 0;
-        for (int i = 0; i < nOs; ++i) a += pa.process (pre.process (diOs[(size_t) i]));
+        for (int i = 0; i < nOs; ++i) a += processAmp5150 (pre, pa, diOs[(size_t) i], 1.0);
         sink = sink + a;
         std::printf ("Power amp DK: %.2f evals/sample, %lld failures\n", (double) pa.statIterations / pa.statSamples, pa.statFailures);
     }
@@ -646,7 +652,7 @@ static void chainLevels()
             {
                 const double t = i / fs, env = std::exp (-3.0 * std::fmod (t, 0.5));
                 const double x = 0.2 * env * (std::sin (2 * kPi * 82.4 * t) + std::sin (2 * kPi * 123.5 * t) + std::sin (2 * kPi * 164.8 * t)) / 3.0;
-                const double y = pa.process (pre.process (x) * post[mode]);
+                const double y = processAmp5150 (pre, pa, x, post[mode]);
                 if (i > (int) (fs * 0.1)) { sq += y * y; ++n; }
             }
             std::printf ("  m%.1f %6.2f V", master, std::sqrt (sq / n));
@@ -655,8 +661,165 @@ static void chainLevels()
     }
 }
 
+// Fault recovery: a single non-finite or absurd sample must not leave the circuit in a state that differs
+// from an undisturbed render for longer than the sample itself. RED preamp + power amp at the plugin's
+// internal rate, palm-muted chord chugs; one bad sample at 0.4 s, compared to the clean render.
+static bool faultRecoveryTests()
+{
+    std::printf ("\n== fault recovery: one bad sample at 0.4 s (RED gain 5, master 6, 352.8 kHz) ==\n");
+    constexpr double rate = 352800.0;
+    const int n = (int) (rate * 1.0), at = (int) (rate * 0.4);
+
+    auto dry = [&] (int i)
+    {
+        const double t = i / rate, env = std::exp (-12.0 * std::fmod (t, 0.125));
+        return 0.3 * env * (std::sin (2 * kPi * 82.4 * t) + std::sin (2 * kPi * 123.5 * t)) / 2.0;
+    };
+
+    // where = 0: bad sample into the preamp input, 1: into the power amp input, 2: the input sample replaced
+    // by the previous one (a lost sample can't be recovered: this is the best any fault handling can do)
+    // mode: Preamp5150 channel (RED = the coupled lead preamp, BLUE = single stages + LateStages5150)
+    auto render = [&] (int where, double bad, long long* failures = nullptr, int mode = Preamp5150::Red)
+    {
+        Preamp5150 pre;
+        PowerAmp5150 pa;
+        pre.prepare (rate);
+        pre.setMode (mode);
+        pre.setControls (0.5, 0.5, 0.5, 0.6, 0.6);
+        pa.setControls (0.5, 0.5);
+        pa.prepare (rate);
+        pa.statFailures = 0;
+        std::vector<double> y ((size_t) n);
+        for (int i = 0; i < n; ++i)
+        {
+            const bool hit = i == at && where >= 0;
+            // solve reported bad once (retry) / twice (hold): 3 / 4 V1A (BLUE), 5 / 6 power amp,
+            // 7 / 8 the coupled block (RED: the whole preamp, BLUE: V2B-V5A)
+            if (hit && (where == 3 || where == 4)) pre.v1a.testFaults = where - 2;
+            if (hit && (where == 5 || where == 6)) pa.testFaults = where - 4;
+            if (hit && (where == 7 || where == 8)) (mode == Preamp5150::Red ? pre.lead.net.testFaults : pre.late.net.testFaults) = where - 6;
+            double v = pre.process (hit && where == 0 ? bad : hit && where == 2 ? dry (i - 1) : dry (i));
+            y[(size_t) i] = pa.process (hit && where == 1 ? bad : v);
+        }
+        if (failures) *failures = pa.statFailures + pre.lead.net.statFailures + pre.late.net.statFailures;
+        return y;
+    };
+
+    const std::vector<double> refs[2] = { render (-1, 0.0, nullptr, Preamp5150::Red), render (-1, 0.0, nullptr, Preamp5150::Blue) };
+    const auto& ref = refs[0];
+    double refPeak = 0.0;
+    for (double v : ref) refPeak = std::max (refPeak, std::abs (v));
+
+    // audio-band deviation from the clean render of the same channel: max and the time it stays above 1% of the
+    // clean (RED) peak
+    struct Dev { bool finite; double raw, band, ms; };
+    auto deviation = [&] (const std::vector<double>& y, int mode = Preamp5150::Red)
+    {
+        const auto& ref = refs[mode == Preamp5150::Red ? 0 : 1];
+        Biquad lp1, lp2;
+        lp1.set (Biquad::Type::lowPass, rate, 20000.0, 0.5412);
+        lp2.set (Biquad::Type::lowPass, rate, 20000.0, 1.3066);
+        Dev r { true, 0.0, 0.0, 0.0 };
+        int last = at;
+        for (int i = 0; i < n; ++i)
+        {
+            if (! std::isfinite (y[(size_t) i])) { r.finite = false; continue; }
+            const double e = y[(size_t) i] - ref[(size_t) i];
+            const double d = std::abs ((double) lp2.process (lp1.process ((float) e)));
+            r.raw = std::max (r.raw, std::abs (e));
+            r.band = std::max (r.band, d);
+            if (d > 0.01 * refPeak) last = i;
+        }
+        r.ms = (last - at) * 1000.0 / rate;
+        return r;
+    };
+    const Dev best[2] = { deviation (render (2, 0.0, nullptr, Preamp5150::Red), Preamp5150::Red),
+                          deviation (render (2, 0.0, nullptr, Preamp5150::Blue), Preamp5150::Blue) };
+
+    bool ok = true;
+    constexpr int R = Preamp5150::Red, B = Preamp5150::Blue;
+    struct Case { const char* name; int where; double bad; int mode; };
+    const Case cases[] = {
+        { "NaN  -> power amp",            1, std::nan (""), R },
+        { "+inf -> power amp",            1, HUGE_VAL,      R },
+        { "NaN  -> preamp (RED)",         0, std::nan (""), R },
+        { "+inf -> preamp (RED)",         0, HUGE_VAL,      R },
+        { "NaN  -> preamp (BLUE)",        0, std::nan (""), B },
+        { "RED preamp fails, retry",      7, 0.0,           R },
+        { "V1A (BLUE) fails, retry",      3, 0.0,           B },
+        { "V2B-V5A (BLUE) fails, retry",  7, 0.0,           B },
+        { "power amp fails, retry",       5, 0.0,           R },
+    };
+    std::printf ("clean render: peak %.1f V at the speaker (RED)\n", refPeak);
+    // Deviation in the audio band (4th-order Butterworth low-pass at 20 kHz, what the downsampler keeps).
+    // Pass: finite, no worse than the lost-sample floor (+10% / 0.1 V), back within 1% of the peak after 1 ms.
+    std::printf ("%-28s %7s %12s %14s %15s %7s\n", "case", "finite", "raw max (V)", "<20k max (V)", "<20k > 1% (ms)", "result");
+    for (int m : { R, B })
+    {
+        const Dev& f = best[m == R ? 0 : 1];
+        std::printf ("%-28s %7s %12.2f %14.2f %15.2f %7s\n", m == R ? "(floor: input held, RED)" : "(floor: input held, BLUE)",
+                     "yes", f.raw, f.band, f.ms, "");
+    }
+    for (const auto& c : cases)
+    {
+        const Dev& f = best[c.mode == R ? 0 : 1];
+        const Dev r = deviation (render (c.where, c.bad, nullptr, c.mode), c.mode);
+        const bool pass = r.finite && r.band < 1.1 * f.band + 0.1 && r.ms < 1.0;
+        ok = ok && pass;
+        std::printf ("%-28s %7s %12.2f %14.2f %15.2f %7s\n", c.name, r.finite ? "yes" : "NO", r.raw, r.band, r.ms, pass ? "PASS" : "FAIL");
+    }
+    // Last resort when the retry fails as well: the sample is dropped (states held). Worse than the floor (it
+    // upsets the trapezoidal companions), so only finiteness and recovery within 1 ms are required.
+    const Case holds[] = { { "RED preamp fails twice, hold", 8, 0.0, R }, { "V1A (BLUE) twice, hold", 4, 0.0, B },
+                           { "V2B-V5A (BLUE) twice, hold", 8, 0.0, B }, { "power amp twice, hold", 6, 0.0, R } };
+    for (const auto& c : holds)
+    {
+        const Dev r = deviation (render (c.where, c.bad, nullptr, c.mode), c.mode);
+        const bool pass = r.finite && r.ms < 1.0;
+        ok = ok && pass;
+        std::printf ("%-24s %7s %12.2f %14.2f %15.2f %7s\n", c.name, r.finite ? "yes" : "NO", r.raw, r.band, r.ms, pass ? "PASS" : "FAIL");
+    }
+
+    // Absurd but finite input: a 1 kV spike and 2 s of a 100 V sine at the guitar jack. Large deviations are
+    // legitimate here (the circuit really is overdriven); the output must stay finite and physically bounded
+    // (the speaker cannot exceed what the output stage can deliver from B+), with no Newton failures.
+    std::printf ("\n== extreme input: 1 kV spike, 100 V sine (stays finite and bounded) ==\n");
+    {
+        long long fails = 0;
+        const auto y = render (0, 1000.0, &fails);
+        double peak = 0.0; bool finite = true;
+        for (double v : y) { finite = finite && std::isfinite (v); peak = std::max (peak, std::abs (v)); }
+        const bool pass = finite && peak < 100.0 && fails == 0;
+        ok = ok && pass;
+        std::printf ("1 kV spike:   finite %s, speaker peak %.1f V, %lld Newton failures  %s\n",
+                     finite ? "yes" : "NO", peak, fails, pass ? "PASS" : "FAIL");
+    }
+    {
+        Preamp5150 pre;
+        PowerAmp5150 pa;
+        pre.prepare (rate);
+        pre.setControls (1.0, 0.5, 0.5, 0.6, 1.0);
+        pa.setControls (1.0, 1.0);
+        pa.prepare (rate);
+        pa.statFailures = 0;
+        double peak = 0.0; bool finite = true;
+        for (int i = 0; i < (int) (rate * 2.0); ++i)
+        {
+            const double y = processAmp5150 (pre, pa, 100.0 * std::sin (2 * kPi * 110.0 * i / rate), 1.0);
+            finite = finite && std::isfinite (y);
+            peak = std::max (peak, std::abs (y));
+        }
+        const bool pass = finite && peak < 100.0 && pa.statFailures + pre.lead.net.statFailures + pre.late.net.statFailures == 0;
+        ok = ok && pass;
+        std::printf ("100 V sine:   finite %s, speaker peak %.1f V, %lld Newton failures  %s\n",
+                     finite ? "yes" : "NO", peak, pa.statFailures + pre.lead.net.statFailures + pre.late.net.statFailures, pass ? "PASS" : "FAIL");
+    }
+    return ok;
+}
+
 int main (int argc, char** argv)
 {
+    if (argc > 1 && std::string (argv[1]) == "fault") return faultRecoveryTests() ? 0 : 1;
     if (argc > 1 && std::string (argv[1]) == "cpu") { cpuModules(); return 0; }
     if (argc > 1 && std::string (argv[1]) == "tables") { tubeTableAccuracy(); return 0; }
     if (argc > 1 && std::string (argv[1]) == "chain") { chainLevels(); return 0; }
@@ -672,6 +835,7 @@ int main (int argc, char** argv)
     toneStackResponse();
     driveSanity();
     tubeTableAccuracy();
+    const bool faultsOk = faultRecoveryTests();
     cpuBenchmark();
-    return 0;
+    return faultsOk ? 0 : 1;
 }

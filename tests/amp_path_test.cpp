@@ -75,7 +75,7 @@ Signal idealPath (const Gen& g, double secs, int os = 16)
     vamp::PowerAmp5150 pa; pa.setControls (s.presence, s.resonance); pa.prepare (rate);
     const auto x = sample (g, rate, secs);
     Signal y (x.size());
-    for (size_t i = 0; i < x.size(); ++i) y[i] = pa.process (pre.process (x[i])) * vamp::kSpeakerToDigital;
+    for (size_t i = 0; i < x.size(); ++i) y[i] = vamp::processAmp5150 (pre, pa, x[i], 1.0) * vamp::kSpeakerToDigital;
 
     constexpr int taps = 2047;
     std::vector<double> h (taps);
@@ -134,7 +134,7 @@ std::vector<double> spectrum (const Signal& y)
 }
 
 // inharmonic / total energy in 20 Hz .. 20 kHz (harmonics = bins within 6 of k*f0)
-double inharmonicDb (const Signal& y, double f0)
+double inharmonicDb (const Signal& y, double f0, double tolHz = 0.0) // tolHz: harmonic zone half-width (0: 6 bins)
 {
     const auto p = spectrum (y);
     const double binHz = fs / (2.0 * (double) p.size());
@@ -145,7 +145,7 @@ double inharmonicDb (const Signal& y, double f0)
         if (f < 20.0 || f > 20000.0) continue;
         tot += p[k];
         const double h = std::round (f / f0);
-        if (h < 1.0 || std::abs (f - h * f0) > 6.0 * binHz) inh += p[k];
+        if (h < 1.0 || std::abs (f - h * f0) > (tolHz > 0.0 ? tolHz : 6.0 * binHz)) inh += p[k];
     }
     return 10.0 * std::log10 (std::max (inh, 1e-30) / tot);
 }
@@ -183,10 +183,54 @@ double pickNoise (double t)
     const unsigned u = (unsigned) (t * 1e7) * 2654435761u;
     return 0.04 * ((u >> 8) / 8388608.0 - 1.0) * (1.0 - t / 0.0015);
 }
+// Zipper noise while a knob moves: a 220 Hz sine through the plugin path, one knob automated linearly from a to b
+// over 0.4 s in the middle of the analysis window (the host delivers it once per block). Without zipper noise the
+// output is the 220 Hz harmonic series with a slowly changing level; steps add energy between the harmonics.
+// knob: 0 gain, 4 master, 5 presence, 6 resonance (AmpSim::Settings order). Returns inharmonic energy (dB re total).
+double zipperDb (int knob, double a, double b, int blockSize, double smoothMs)
+{
+    vamp::AmpSim amp;
+    amp.prepare (fs, blockSize);
+    amp.setKnobSmoothing (smoothMs);
+    auto s = settings();
+    auto set = [&] (double v) { float* k[] = { &s.gain, nullptr, nullptr, nullptr, &s.master, &s.presence, &s.resonance }; *k[knob] = (float) v; };
+    set (a);
+    std::vector<float> buf ((size_t) blockSize);
+    auto block = [&] (long long& n, Signal* out)
+    {
+        for (int i = 0; i < blockSize; ++i) buf[(size_t) i] = (float) (0.1 * std::sin (2 * kPi * 220.0 * (double) (n + i) / fs));
+        amp.process (buf.data(), blockSize, s);
+        if (out) for (float v : buf) out->push_back (v);
+        n += blockSize;
+    };
+    long long n = 0;
+    while (n < (long long) fs) block (n, nullptr); // settle at a
+    Signal y;
+    const long long start = n, len = 1 << 16, rampFrom = start + len / 2 - (long long) (0.2 * fs), rampTo = rampFrom + (long long) (0.4 * fs);
+    while (n < start + len)
+    {
+        set (n < rampFrom ? a : n > rampTo ? b : a + (b - a) * (double) (n - rampFrom) / (double) (rampTo - rampFrom));
+        block (n, &y);
+    }
+    return inharmonicDb (y, 220.0, 20.0); // +-20 Hz: the level change itself widens each harmonic by a few Hz
+}
+
+void zipperTests()
+{
+    std::printf ("\n== zipper noise: knob automated over 0.4 s, 220 Hz 0.1 V in, inharmonic energy re total (dB, lower is cleaner) ==\n");
+    std::printf ("%-28s %7s | %12s %12s\n", "knob", "block", "no smoothing", "20 ms");
+    struct K { const char* name; int knob; double a, b; };
+    for (const auto& k : { K { "Master 0.2 -> 0.6", 4, 0.2, 0.6 }, K { "Gain 0.3 -> 0.7", 0, 0.3, 0.7 },
+                           K { "Presence 0 -> 1", 5, 0.0, 1.0 }, K { "Resonance 0 -> 1", 6, 0.0, 1.0 } })
+        for (int bs : { 512, 64 })
+            std::printf ("%-28s %7d | %+12.1f %+12.1f\n", k.name, bs, zipperDb (k.knob, k.a, k.b, bs, 0.0), zipperDb (k.knob, k.a, k.b, bs, 20.0));
+    std::printf ("(reference: knob held still)  512 | %+12.1f\n", zipperDb (4, 0.3, 0.3, 512, 20.0));
+}
 } // namespace
 
 int main (int argc, char** argv)
 {
+    if (argc > 1 && std::string (argv[1]) == "knobs") { zipperTests(); return 0; }
     namcmp::NamWaveNet nam;
     const bool haveNam = argc > 1 && nam.load (argv[1]);
     if (argc > 2) voltsPerFS = 0.7746 * std::pow (10.0, std::atof (argv[2]) / 20.0) * std::sqrt (2.0);
@@ -227,24 +271,33 @@ int main (int argc, char** argv)
     }
     std::printf ("\n  max |difference| over all bands: %.2f dB\n", worst);
 
-    // CPU of the whole plugin amp path (oversampling filters included), 10 s of chugs, 64-sample blocks
+    // CPU of the whole plugin amp path (oversampling filters included), 10 s of chugs, 64-sample blocks; knobs still,
+    // then Gain and Presence moving all the time (0.5 Hz LFO): each smoothing step rebuilds the lead preamp's and
+    // the power amp's circuit matrices
+    for (const bool moving : { false, true })
     {
         vamp::AmpSim amp;
         amp.prepare (fs, 64);
-        const auto s = settings();
+        auto s = settings();
         const auto x = sample (chug, fs, 10.0);
         std::vector<float> buf (64);
         double total = 0, worst = 0;
         for (size_t start = 0; start + 64 <= x.size(); start += 64)
         {
+            if (moving)
+            {
+                const double lfo = 0.5 + 0.5 * std::sin (2 * kPi * 0.5 * (double) start / fs);
+                s.gain = (float) (0.3 + 0.4 * lfo);
+                s.presence = (float) lfo;
+            }
             for (int i = 0; i < 64; ++i) buf[(size_t) i] = (float) x[start + (size_t) i];
             const auto t0 = std::chrono::high_resolution_clock::now();
             amp.process (buf.data(), 64, s);
             const double us = std::chrono::duration<double, std::micro> (std::chrono::high_resolution_clock::now() - t0).count();
             total += us; worst = std::max (worst, us);
         }
-        std::printf ("\n== CPU of the plugin amp path (RED, gain 5, master 3): avg %.1f%% of one core, worst 64-sample block %.0f%% ==\n",
-                     100.0 * total / 10e6, 100.0 * worst / (64.0 / fs * 1e6));
+        std::printf ("\n== CPU of the plugin amp path (RED, gain 5, master 3%s): avg %.1f%% of one core, worst 64-sample block %.0f%% ==\n",
+                     moving ? ", Gain + Presence moving" : "", 100.0 * total / 10e6, 100.0 * worst / (64.0 / fs * 1e6));
     }
 
     if (! haveNam) return 0;

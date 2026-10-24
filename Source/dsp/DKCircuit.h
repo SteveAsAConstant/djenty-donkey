@@ -44,8 +44,12 @@ public:
         if (resistors[(size_t) idx].g != g) { resistors[(size_t) idx].g = g; dirty = true; }
     }
 
-    void addC (int a, int b, double c) { caps.push_back ({ a, b, c, 0 }); dirty = true; }
-    void addL (int a, int b, double l) { inds.push_back ({ a, b, l, 0 }); dirty = true; }
+    int addC (int a, int b, double c) { caps.push_back ({ a, b, c, 0 }); dirty = true; return (int) caps.size() - 1; }
+    int addL (int a, int b, double l) { inds.push_back ({ a, b, l, 0 }); dirty = true; return (int) inds.size() - 1; }
+
+    // change a capacitor / inductor (addC / addL index) after prepare(): the matrices are rebuilt on the next sample
+    void setC (int idx, double c) { auto& e = caps[(size_t) idx]; e.c = c; e.gc = 2.0 * c / T; dirty = true; }
+    void setL (int idx, double l) { auto& e = inds[(size_t) idx]; e.l = l; e.gl = T / (2.0 * l); dirty = true; }
 
     // node --[rs]-- u[k]; returns the input index k
     int addSource (int node, double rs)
@@ -53,6 +57,12 @@ public:
         sources.push_back ({ node, 1.0 / rs });
         dirty = true;
         return (int) sources.size() - 1;
+    }
+
+    void setSourceResistance (int k, double rs)
+    {
+        sources[(size_t) k].g = 1.0 / rs;
+        dirty = true;
     }
 
     void addTransformer (std::vector<Winding> w)
@@ -88,6 +98,16 @@ public:
         x.assign ((size_t) N, 0.0);
         z.assign ((size_t) (numS + numU + m), 0.0);
         p0.assign ((size_t) m, 0.0);
+        // rebuild() reuses these (assign to the same size does not reallocate)
+        const size_t nz = (size_t) (numS + numU + m);
+        bufA.assign ((size_t) N * N, 0.0);
+        bufInv.assign ((size_t) N * N, 0.0);
+        bufAinvNi.assign ((size_t) N * m, 0.0);
+        bufV.assign ((size_t) N * nz, 0.0);
+        K.assign ((size_t) m * m, 0.0);
+        P.assign ((size_t) m * (numS + numU), 0.0);
+        M.assign ((size_t) numS * nz, 0.0);
+        O.assign (outputs.size() * nz, 0.0);
         dirty = true;
         reset();
     }
@@ -96,6 +116,20 @@ public:
     {
         std::fill (z.begin(), z.end(), 0.0);
         std::fill (x.begin(), x.end(), 0.0);
+    }
+
+    // Start capacitor idx (addC's return value) charged to v = v(a) - v(b) with no current (DC steady state of
+    // the trapezoidal companion: ieq = gc v). Call after prepare().
+    void setCapVoltage (int idx, double v) { z[(size_t) idx] = caps[(size_t) idx].gc * v; }
+
+    // Remember / go back to a state (reactive states and output nodes), e.g. the settled idle point.
+    // saveState() allocates (call it from prepare); restoreState() does not.
+    void saveState() { zSaved = z; xSaved = x; }
+    void restoreState()
+    {
+        if (zSaved.size() != z.size()) { reset(); return; }
+        std::copy (zSaved.begin(), zSaved.end(), z.begin());
+        std::copy (xSaved.begin(), xSaved.end(), x.begin());
     }
 
     // p0 = P [s; u] for the source values u and the current reactive states
@@ -166,7 +200,9 @@ private:
 
     void rebuild()
     {
-        std::vector<double> A ((size_t) N * N, 0.0);
+        // all buffers are sized in prepare(): rebuilding when a pot moves does not allocate (audio thread)
+        auto& A = bufA;
+        A.assign ((size_t) N * N, 0.0);
         for (auto& r : resistors) stamp (A, N, r.a, r.b, r.g);
         for (auto& c : caps)      stamp (A, N, c.a, c.b, c.gc);
         for (auto& l : inds)      stamp (A, N, l.a, l.b, l.gl);
@@ -188,10 +224,12 @@ private:
             aux = eIdx + 1;
         }
 
-        const auto Ainv = invert (A, N);
+        invert (A, bufInv, N);
+        const auto& Ainv = bufInv;
 
         // Ni: port current a -> b leaves node a (-1) and enters node b (+1); Nv = -Ni^T
-        std::vector<double> AinvNi ((size_t) N * m, 0.0);
+        auto& AinvNi = bufAinvNi;
+        AinvNi.assign ((size_t) N * m, 0.0);
         for (int r = 0; r < N; ++r)
             for (int k = 0; k < m; ++k)
             {
@@ -220,7 +258,8 @@ private:
         // Node voltages are then  v = Ainv Bs s + Ainv Bu u + AinvNi i,  written here as one row
         // per node over z = [s; u; i].
         const int nz = numS + numU + m;
-        std::vector<double> V ((size_t) N * nz, 0.0);
+        auto& V = bufV;
+        V.assign ((size_t) N * nz, 0.0);
         for (int r = 0; r < N; ++r)
         {
             double* row = &V[(size_t) r * nz];
@@ -278,9 +317,10 @@ private:
         dirty = false;
     }
 
-    static std::vector<double> invert (std::vector<double> A, int n)
+    // Gauss-Jordan with partial pivoting: A (destroyed) -> I = A^-1, in place
+    static void invert (std::vector<double>& A, std::vector<double>& I, int n)
     {
-        std::vector<double> I ((size_t) n * n, 0.0);
+        I.assign ((size_t) n * n, 0.0);
         for (int i = 0; i < n; ++i) I[(size_t) i * n + i] = 1.0;
 
         for (int col = 0; col < n; ++col)
@@ -308,7 +348,7 @@ private:
                 }
             }
         }
-        return I;
+
     }
 
     static constexpr int kMaxStates = 64; // capacitors + inductors (finish() keeps s' on the stack)
@@ -328,6 +368,8 @@ private:
     std::vector<double> K, P, M, O;
     std::vector<double> z;     // [s; u; i]: reactive states, then the inputs and port currents of this sample
     std::vector<double> x, p0; // x: output node voltages (others stay 0)
+    std::vector<double> zSaved, xSaved;
+    std::vector<double> bufA, bufInv, bufAinvNi, bufV; // rebuild work buffers
 };
 
 } // namespace vamp

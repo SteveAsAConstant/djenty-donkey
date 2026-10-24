@@ -13,11 +13,15 @@ inline void upgradeKnobCurves (juce::XmlElement& xml)
 {
     if (xml.getIntAttribute (kKnobCurvesAttr, 1) >= kKnobCurvesVersion)
         return;
+    bool lead = true; // the Gain curve differs per channel (lead pre-gain low end, see Preamp5150.h)
+    for (auto* p : xml.getChildWithTagNameIterator ("PARAM"))
+        if (p->getStringAttribute ("id") == ids::channel)
+            lead = juce::roundToInt (p->getDoubleAttribute ("value")) == vamp::Preamp5150::Red;
     for (auto* p : xml.getChildWithTagNameIterator ("PARAM"))
     {
         const auto id = p->getStringAttribute ("id");
         const double v = p->getDoubleAttribute ("value") * 0.1;
-        if (id == ids::ampGain) p->setAttribute ("value", 10.0 * vamp::gainKnobFromV03 (v));
+        if (id == ids::ampGain) p->setAttribute ("value", 10.0 * vamp::gainKnobFromV03 (v, lead));
         else if (id == ids::master) p->setAttribute ("value", 10.0 * vamp::masterKnobFromV03 (v));
     }
     xml.setAttribute (kKnobCurvesAttr, kKnobCurvesVersion);

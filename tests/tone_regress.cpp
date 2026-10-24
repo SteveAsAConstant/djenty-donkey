@@ -30,6 +30,7 @@
 #include <memory>
 #include <string>
 #include <vector>
+#include "dsp/Amp5150.h"
 #include "dsp/PowerAmp5150.h"
 #include "dsp/Preamp5150.h"
 #include "dsp/PrecisionDrive.h"
@@ -252,7 +253,7 @@ struct Input { const char* name; Signal x; };
 void preampControls (vamp_baseline::Preamp5150& p, double g, double b, double m, double t, double post) { p.setControls (g, b, m, t, post); }
 void preampControls (vamp::Preamp5150& p, double g, double b, double m, double t, double post)
 {
-    p.setControls (vamp::gainKnobFromV03 (g), b, m, t, vamp::masterKnobFromV03 (post));
+    p.setControls (vamp::gainKnobFromV03 (g, p.getMode() == vamp::Preamp5150::Red), b, m, t, vamp::masterKnobFromV03 (post));
 }
 
 template <typename T> auto setReference (T& t, int) -> decltype (t.setReferencePrecision (true), void()) { t.setReferencePrecision (true); }
@@ -317,6 +318,10 @@ void driveCases (const std::vector<Input>& inputs)
             }
 }
 
+// v0.3.0: preamp -> power amp; current: the same on the power amp's supply rails (Amp5150.h)
+inline double chainStep (vamp_baseline::Preamp5150& p, vamp_baseline::PowerAmp5150& w, double v, double post) { return w.process (p.process (v) * post); }
+inline double chainStep (vamp::Preamp5150& p, vamp::PowerAmp5150& w, double v, double post) { return vamp::processAmp5150 (p, w, v, post); }
+
 template <typename Drive, typename Pre, typename Power>
 std::function<Proc()> chainMaker (int mode, bool reference = false)
 {
@@ -326,7 +331,7 @@ std::function<Proc()> chainMaker (int mode, bool reference = false)
         auto p = std::make_shared<Pre>();   if (reference) setReference (*p, 0); p->prepare (fs); p->setMode (mode); preampControls (*p, 0.8, 0.5, 0.5, 0.6, 0.6);
         auto w = std::make_shared<Power>(); if (reference) setReference (*w, 0); w->setControls (0.6, 0.5); w->prepare (fs);
         const double post = mode == 0 ? 25.0 : 1.0; // AmpSim kChannelPost (CLEAN has only 2 stages)
-        return Proc ([d, p, w, post] (double v) { return w->process (p->process (d->process (v)) * post); });
+        return Proc ([d, p, w, post] (double v) { return chainStep (*p, *w, d->process (v), post); });
     };
 }
 

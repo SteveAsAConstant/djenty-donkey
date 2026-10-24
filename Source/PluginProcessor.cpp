@@ -208,6 +208,14 @@ void VibeAmpProcessor::processChunk (juce::AudioBuffer<float>& buffer, int start
         monoBuf.clear (0, 0, len);
 
     float* mono = monoBuf.getWritePointer (0);
+    // A non-finite input sample (broken upstream plugin / host) would poison every stateful block after it
+    // (pitch shifter, compressor, oversampling filters, cab, delay, reverb) until the plugin is reloaded.
+    // It is treated as lost: the last finite sample stands in.
+    for (int i = 0; i < len; ++i)
+    {
+        if (std::isfinite (mono[i])) lastInput = mono[i];
+        else mono[i] = lastInput;
+    }
     auto monoBlock = juce::dsp::AudioBlock<float> (monoBuf).getSubBlock (0, (size_t) len);
     juce::dsp::ProcessContextReplacing<float> monoCtx (monoBlock);
 

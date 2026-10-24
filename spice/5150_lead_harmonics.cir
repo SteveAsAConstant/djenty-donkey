@@ -1,0 +1,90 @@
+* Harmonics of the lead preamp's late stages (V2B, V5B, V5A plates), fully coupled, 110 Hz, input sweep.
+* Reference for Source/dsp/LateStages5150.h: the 12AX7 here uses exactly the C++ device equations (12AX7_cpp.inc),
+* so differences come from the circuit solution only. rload=1e12: no V5A load beyond R88 (as the C++);
+* rload=470k: R89 into R24 33k || C59 + R94 (schematic). Lead pot fraction 0.0132. See docs/spice_reference_lead.md.
+.include 12AX7_cpp.inc
+.param gain=0.0132
+.param rload=1e12
+.param amp=0.01
+
+VB1 vb1 0 320
+VB2 vb2 0 320
+VIN src 0 SINE(0 {amp} 110)
+
+* ---- input ----
+R27 src nin 22k
+C20 nin 0 39p
+C15 nin ng1 0.1u
+R25 ng1 0 1Meg
+R22 ng1 g1a 68k
+
+* ---- V1A ----
+X1A p1a g1a k1a 12AX7C
+R2  vb1 p1a 220k
+R12 k1a 0 1.82k
+C3  k1a 0 1u
+C6  p1a n1 22n
+
+* ---- lead pre-gain network ----
+R29 n1 n2 470k
+C17 n1 n2 2.2n
+R41 n2 0 1Meg
+RVR2a n2 w {1Meg*(1-gain)+10}
+RVR2b w 0 {1Meg*gain+10}
+C19 n2 w 1n
+R40 n2 w 1Meg
+
+* ---- V1B ----
+R82 w g1b 470k
+X1B p1b g1b k1b 12AX7C
+R3  vb1 p1b 100k
+R17 k1b 0 1.82k
+C4  k1b 0 1u
+C26 k1b 0 22u
+C2  p1b n3 22n
+R6  n3 g2a 470k
+R9  g2a 0 1Meg
+
+* ---- V2A (cold clipper, 39k unbypassed) ----
+X2A p2a g2a k2a 12AX7C
+R1  vb1 p2a 100k
+R15 k2a 0 39k
+C1  p2a n4 22n
+C48 n4 0 1n
+R11 n4 0 330k
+R7  n4 g2b 220k
+
+* ---- V2B ----
+X2B p2b g2b k2b 12AX7C
+R4  vb2 p2b 220k
+R13 k2b 0 1.82k
+C5  k2b 0 1u
+R32 p2b n5 1Meg
+C57 n5 g5b 22n
+R101 g5b 0 100k
+
+* ---- V5B ----
+X5B p5b g5b k5b 12AX7C
+R96 vb2 p5b 220k
+R102 k5b 0 2.2k
+R87 p5b n6 1Meg
+C56 n6 g5a 22n
+R91 g5a 0 1Meg
+
+* ---- V5A (shunt feedback stage) ----
+X5A p5a g5a k5a 12AX7C
+R86 vb2 p5a 100k
+R93 k5a 0 2.2k
+C58 p5a out 22n
+R88 g5a out 1Meg
+* V5A load: R89 -> R24 33k || (C59 10n + R94 47k); rload = 1e12 removes it (C++ assumption)
+R89 out ts {rload}
+R24 ts 0 33k
+C59 ts c59 10n
+R94 c59 0 47k
+
+.options plotwinsize=0 numdgt=15 maxstep=2u
+.tran 0 0.7 0.5 2u
+.step param amp list 0.001 0.002 0.004 0.008 0.016 0.032 0.0632 0.125 0.25 0.5 1.0
+.four 110 6 20 V(p1a) V(p1b) V(p2a) V(p2b) V(p5b) V(p5a)
+.end

@@ -85,6 +85,7 @@ private:
     double sampleRateHz = 44100.0;
     int maxBlock = 512;
     juce::AudioBuffer<float> monoBuf, stereoBuf, keyBuf;
+    float lastInput = 0.0f; // last finite input sample (stands in for a non-finite one)
 
     // signal chain
     juce::dsp::Gain<float> inputGain, compMakeup, outputGain;

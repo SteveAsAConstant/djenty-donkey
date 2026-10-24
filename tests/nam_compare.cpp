@@ -23,6 +23,7 @@
 #include <string>
 #include <vector>
 #include "dsp/Filters.h"
+#include "dsp/Amp5150.h"
 #include "dsp/PowerAmp5150.h"
 #include "dsp/Preamp5150.h"
 #include "NamWaveNet.h"
@@ -164,15 +165,18 @@ struct Rig
     NamWaveNet nam;
     Settings s;
     double voltsPerFS = 4.12, rateNam = 48000.0, rateOurs = 192000.0;
+    bool frozenSupply = false; // --frozen-supply: rails held at their DC point (no sag), to separate DC from dynamics
 
     std::vector<double> ours (const std::vector<double>& v, double preKnob, double drive) const
     {
-        vamp::Preamp5150 pre; pre.prepare (rateOurs); pre.setMode (s.mode);
+        vamp::Preamp5150 pre;
+        pre.prepare (rateOurs); pre.setMode (s.mode);
         pre.setControls (preKnob, s.bass, s.mid, s.treble, vamp::masterKnobForDrive (drive));
         vamp::PowerAmp5150 pa; pa.setControls (s.presence, s.resonance); pa.prepare (rateOurs);
+        if (frozenSupply) pa.beginSupplySettle();
         const double post = s.mode == 0 ? 25.0 : 1.0; // AmpSim kChannelPost
         std::vector<double> y (v.size());
-        for (size_t i = 0; i < v.size(); ++i) y[i] = pa.process (pre.process (v[i]) * post);
+        for (size_t i = 0; i < v.size(); ++i) y[i] = vamp::processAmp5150 (pre, pa, v[i], post);
         return y;
     }
     std::vector<double> namRun (const std::vector<double>& v) const
@@ -291,7 +295,7 @@ int main (int argc, char** argv)
     double dbu = 11.5, driveDb = 0.0, preOverride = -1.0;
     bool driveOverride = false;
     std::string wavDir;
-    bool fit = false, residual = false;
+    bool fit = false, fitPre = false, fitDrive = false, residual = false, sweep = false;
     for (int i = 2; i < argc; ++i)
     {
         const std::string a = argv[i];
@@ -300,7 +304,11 @@ int main (int argc, char** argv)
         else if (a == "--drive-db" && i + 1 < argc) { driveDb = std::atof (argv[++i]); driveOverride = true; }
         else if (a == "--wav" && i + 1 < argc) wavDir = argv[++i];
         else if (a == "--fit") fit = true;
+        else if (a == "--fit-pre") fitPre = true;
         else if (a == "--residual") residual = true;
+        else if (a == "--sweep") sweep = true;
+        else if (a == "--frozen-supply") rig.frozenSupply = true;
+        else if (a == "--fit-drive") fitDrive = true;
     }
     rig.s = parseSettings (rig.nam.getName());
     rig.voltsPerFS = 0.7746 * std::pow (10.0, dbu / 20.0) * std::sqrt (2.0); // full-scale sine peak
@@ -312,6 +320,47 @@ int main (int argc, char** argv)
     std::printf ("%s\n%s, pre %.1f bass %.1f mid %.1f treble %.1f post %.1f res %.1f pres %.1f | input %.1f dBu -> 1.0 FS = %.2f V\n",
                  rig.nam.getName().c_str(), rig.s.mode == 2 ? "RED" : "BLUE", rig.s.pre * 10, rig.s.bass * 10, rig.s.mid * 10,
                  rig.s.treble * 10, rig.s.post * 10, rig.s.resonance * 10, rig.s.presence * 10, dbu, rig.voltsPerFS);
+
+    if (sweep)
+    {
+        // Distortion onset: 110 Hz sine from 1 mV to 1 V in 2 dB steps at the capture's dials. Per level the
+        // output re its level at 1 V (compression curve) and H2..H4 re the fundamental, ours and NAM.
+        // Last line (SWEEP): mean |ours - NAM| of the compression curve and of H2 / H3 / H4 (harmonics floored at
+        // -70 dB), over all levels and over the levels below 30 mV (small signal / onset).
+        std::vector<double> lv;
+        for (double d = -60.0; d <= 0.01; d += 2.0) lv.push_back (std::pow (10.0, d / 20.0));
+        struct Row { double h[5]; };
+        std::vector<Row> ro, rn;
+        for (double a : lv)
+        {
+            const Test t { "sine", 0.8, [a] (double tt) { return a * std::sin (2 * kPi * 110.0 * tt); } };
+            const auto yo = rig.ours (sample (t, rig.rateOurs), rig.s.pre, driveCalibrated);
+            const auto yn = rig.namRun (sample (t, rig.rateNam));
+            Row o {}, m {};
+            for (int h = 1; h <= 4; ++h)
+            {
+                o.h[h] = harmonic (yo, rig.rateOurs, 110.0, h);
+                m.h[h] = harmonic (yn, rig.rateNam, 110.0, h);
+            }
+            ro.push_back (o); rn.push_back (m);
+        }
+        auto hdb = [] (const Row& r, int h) { return std::max (db (r.h[h] / r.h[1]), -70.0); };
+        std::printf ("%8s | %7s %7s | %13s | %13s | %13s\n", "in dBV", "comp", "comp N", "H2 ours/NAM", "H3 ours/NAM", "H4 ours/NAM");
+        double sum[4] {}, sumLo[4] {}; int n = 0, nLo = 0;
+        for (size_t i = 0; i < lv.size(); ++i)
+        {
+            const double co = db (ro[i].h[1] / ro.back().h[1]) - db (lv[i]), cn = db (rn[i].h[1] / rn.back().h[1]) - db (lv[i]);
+            std::printf ("%8.0f | %+7.1f %+7.1f | %6.1f %6.1f | %6.1f %6.1f | %6.1f %6.1f\n", db (lv[i]), co, cn,
+                         hdb (ro[i], 2), hdb (rn[i], 2), hdb (ro[i], 3), hdb (rn[i], 3), hdb (ro[i], 4), hdb (rn[i], 4));
+            const double d[4] = { std::abs (co - cn), std::abs (hdb (ro[i], 2) - hdb (rn[i], 2)),
+                                  std::abs (hdb (ro[i], 3) - hdb (rn[i], 3)), std::abs (hdb (ro[i], 4) - hdb (rn[i], 4)) };
+            for (int k = 0; k < 4; ++k) { sum[k] += d[k]; if (lv[i] < 0.03) sumLo[k] += d[k]; }
+            ++n; if (lv[i] < 0.03) ++nLo;
+        }
+        std::printf ("SWEEP pre %.1f | all: comp %.2f H2 %.2f H3 %.2f H4 %.2f | <30mV: comp %.2f H2 %.2f H3 %.2f H4 %.2f\n", rig.s.pre * 10,
+                     sum[0] / n, sum[1] / n, sum[2] / n, sum[3] / n, sumLo[0] / nLo, sumLo[1] / nLo, sumLo[2] / nLo, sumLo[3] / nLo);
+        return 0;
+    }
 
     if (residual)
     {
@@ -337,6 +386,47 @@ int main (int argc, char** argv)
                      rig.s.presence * 10, rig.s.resonance * 10);
         for (double s : sum) std::printf (" %.2f", s - g);
         std::printf ("\n");
+        return 0;
+    }
+
+    if (fitDrive)
+    {
+        // power-amp drive only (Gain at the capture's dial): checks the Master scale
+        const auto tests = guitarTests (1.5);
+        const auto ref = makeReference (rig, tests);
+        Cost best { 1e9, 0, 0, 0, 0 };
+        double bestDb = 0.0;
+        for (double d = -15.0; d <= 15.01; d += 1.0)
+        {
+            const auto c = evaluate (rig, ref, tests, rig.s.pre, driveCalibrated * std::pow (10.0, d / 20.0));
+            if (c.total < best.total) { best = c; bestDb = d; }
+        }
+        const auto atNominal = evaluate (rig, ref, tests, rig.s.pre, driveCalibrated);
+        std::printf ("FITDRIVE pre_dial %.1f -> drive %+.1f dB re the Master scale | cost %.2f (spec %.2f harm %.2f comp %.2f) highs %+.1f | nominal cost %.2f (spec %.2f harm %.2f comp %.2f) highs %+.1f\n",
+                     rig.s.pre * 10, bestDb, best.total, best.spectrum, best.harmonics, best.compression, best.highs,
+                     atNominal.total, atNominal.spectrum, atNominal.harmonics, atNominal.compression, atNominal.highs);
+        return 0;
+    }
+
+    if (fitPre)
+    {
+        // pre-gain only, with the power-amp drive fixed at the plugin's Master calibration: for recalibrating
+        // the Gain curve (the joint fit trades pre-gain against drive where the cost is flat in one of them)
+        const auto tests = guitarTests (1.5);
+        const auto ref = makeReference (rig, tests);
+        Cost best { 1e9, 0, 0, 0, 0 };
+        double bestPre = rig.s.pre;
+        for (double p = std::max (0.02, rig.s.pre - 0.15); p <= std::min (1.0, rig.s.pre + 0.25); p += 0.01)
+        {
+            const auto c = evaluate (rig, ref, tests, p, driveCalibrated);
+            if (c.total < best.total) { best = c; bestPre = p; }
+        }
+        const auto atNominal = evaluate (rig, ref, tests, rig.s.pre, driveCalibrated);
+        std::printf ("FITPRE pre_dial %.1f -> our_pre %.2f | pot %.2f dB, at dial %.2f dB -> %+.2f dB | cost %.2f (spec %.2f harm %.2f comp %.2f) | nominal cost %.2f (spec %.2f harm %.2f comp %.2f)\n",
+                     rig.s.pre * 10, bestPre, db (vamp::leadPreTaper (bestPre)), db (vamp::leadPreTaper (rig.s.pre)),
+                     db (vamp::leadPreTaper (bestPre) / vamp::leadPreTaper (rig.s.pre)),
+                     best.total, best.spectrum, best.harmonics, best.compression,
+                     atNominal.total, atNominal.spectrum, atNominal.harmonics, atNominal.compression);
         return 0;
     }
 

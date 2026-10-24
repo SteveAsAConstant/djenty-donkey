@@ -1,17 +1,26 @@
-* 5150 tone stack (Marshall-style TMB), ideal source, 1M load. Pot fractions: t, m, l
+* 5150 tone stack and its feed (factory schematic sheet 1), ideal source = driving plate (V5A).
+* V5A -> R89 470k (+ ~7.4k V5A output impedance with R88 feedback) -> in; in: R24 33k, C59 10n + R94 47k to gnd.
+* Treble cap C14 470p || C60 100p. C21 -> Mid pot wiper; Mid pot top = Bass bottom; R95 47k Bass bottom -> gnd.
+* Load: VR7 Ultra Post 1M || VR6 Clean Post 1M. Pot fractions: t, m (wiper from ground end), l (bass rheostat)
 .param t=table(run,1,0.5,2,1.0,3,0.0,4,0.7)
 .param m=table(run,1,0.5,2,0.0,3,1.0,4,0.3)
 .param l=table(run,1,0.5,2,1.0,3,0.0,4,0.1)
-V1 in 0 AC 1
-C14 in ttop 470p
+V1 src 0 AC 1
+RSRC src in 477.40k
+R24 in 0 33k
+C59 in c59 10n
+R94 c59 0 47k
+C14 in ttop 570p
 RTup ttop out {250k*(1-t)+1}
 RTlo out tbot {250k*t+1}
 R28 in x 47k
 C18 x tbot 22n
-C21 x mtop 22n
+C21 x mw 22n
 RB tbot mtop {1Meg*l+1}
-RM mtop 0 {50k*m+1}
-RL out 0 1Meg
+RMup mtop mw {50k*(1-m)+1}
+RMlo mw 0 {50k*m+1}
+R95 mtop 0 47k
+RL out 0 500k
 .ac list 50 100 200 500 1000 2000 5000 10000
 .step param run list 1 2 3 4
 .meas ac h50 FIND mag(V(out)) AT 50
