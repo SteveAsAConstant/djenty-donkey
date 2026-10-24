@@ -1,26 +1,26 @@
 // Tone regression: renders the same inputs through
-//   base   the frozen v0.3.0 DSP (tests/baseline/, namespace vamp_baseline)
+//   base   the frozen v0.5 DSP (tests/baseline/, namespace vamp_baseline; frozen 2026-10-24; the v0.3.0 one is the git tag
+//          v0.3.0-baseline)
 //   new    the current DSP (Source/dsp/, namespace vamp)
 //   ref    the current DSP with setReferencePrecision(): 1000x tighter Newton residuals, no early
 //          step acceptance, the original (untabulated) Koren formulas. This is the "true" solution
 //          of the circuit equations the model defines.
 // and reports, all as RMS error relative to the signal, band-limited to 20 kHz:
-//   new-base   how far the current code moved from v0.3.0
-//   base err   v0.3.0 vs ref: the original solver's own numerical error
+//   new-base   how far the current code moved from the baseline
+//   base err   baseline vs ref: the baseline solver's own numerical error
 //   new err    current vs ref
 //   new peak   largest single-sample error of the current code relative to the signal peak
 //   bands      largest 1/3-octave band level difference new vs ref, 50 Hz..16 kHz: the tone itself
 //
 // With the drive and RED in front of the power amp the waveform errors are dominated by the preamp's
-// own Newton tolerance (~0.2 mV per node in v0.3.0 and now), amplified by the following stages: square-wave
+// own Newton tolerance (~0.2 mV per node), amplified by the following stages: square-wave
 // edges land a fraction of a sample apart. That shows in the nulls but not in the band levels.
 //
-// Verdicts: "exact" new-base < -100 dB (rounding level); "pass" new err < -60 dB (inaudible);
-// "FIXED" new err < -60 dB while v0.3.0 was worse than -60 dB against ref: solver fixes (unconverged samples =
-// clicks, small-signal bias) and, since v0.4, intended model changes (C60 low-pass, speaker damping), which
-// the frozen v0.3.0 DSP does not have. The gate is new vs ref (solver accuracy) and the band levels;
-// "as v0.3" new err no worse than v0.3.0's own error.
-// "FAIL" otherwise, or any band off by 0.5 dB or more. Exit code 1 on any FAIL, so this gates optimizations.
+// Verdicts: "exact" new-base < -100 dB (rounding level: an optimization that changes nothing);
+// "pass" new err < -60 dB (inaudible); "FIXED" new err < -60 dB while the baseline was worse than -60 dB
+// against ref (a solver fix); "as base" new err no worse than the baseline's own error.
+// The gate is new vs ref (solver accuracy) and the band levels: an intended model change moves new-base but
+// passes. "FAIL" otherwise, or any band off by 0.5 dB or more. Exit code 1 on any FAIL, so this gates optimizations.
 //
 // Build target: tone_regress (no JUCE). Usage: tone_regress [filter-substring]
 #include <chrono>
@@ -34,6 +34,7 @@
 #include "dsp/PowerAmp5150.h"
 #include "dsp/Preamp5150.h"
 #include "dsp/PrecisionDrive.h"
+#include "baseline/Amp5150.h"
 #include "baseline/PowerAmp5150.h"
 #include "baseline/Preamp5150.h"
 #include "baseline/PrecisionDrive.h"
@@ -216,7 +217,7 @@ Signal render (const Signal& in, Proc fn, double& ms)
 std::string filter;
 bool selected (const std::string& name) { return filter.empty() || name.find (filter) != std::string::npos; }
 
-int failures = 0, cases = 0, fixedCases = 0;
+int failures = 0, cases = 0, fixedCases = 0, movedCases = 0;
 double timeBase = 0, timeNew = 0;
 
 // makeBase / makeNew / makeRef return a freshly prepared processor on every call
@@ -239,8 +240,9 @@ void runCase (const std::string& name, const Signal& in, const std::function<Pro
     ++cases;
     if (! ok) ++failures;
     if (fixed) ++fixedCases;
+    if (moved >= -100.0) ++movedCases;
     timeBase += ta; timeNew += tb;
-    const char* verdict = ! ok ? "FAIL" : fixed ? "FIXED" : moved < -100.0 ? "exact" : newErr.audio < -60.0 ? "pass" : "as v0.3";
+    const char* verdict = ! ok ? "FAIL" : fixed ? "FIXED" : moved < -100.0 ? "exact" : newErr.audio < -60.0 ? "pass" : "as base";
     std::printf ("%-44s %8.1f %8.1f %8.1f %8.1f %7.3f  %5.2fx  %s\n", name.c_str(), moved, baseErr, newErr.audio,
                  newErr.peak, bands, ta / tb, verdict);
 }
@@ -250,11 +252,9 @@ struct Input { const char* name; Signal x; };
 
 // Cases are written in v0.3 knob positions. v0.4 recalibrated the Gain / Master curves, so the current
 // code gets the knob positions that give the same pot settings (the plugin converts old sessions the same way).
-void preampControls (vamp_baseline::Preamp5150& p, double g, double b, double m, double t, double post) { p.setControls (g, b, m, t, post); }
-void preampControls (vamp::Preamp5150& p, double g, double b, double m, double t, double post)
-{
-    p.setControls (vamp::gainKnobFromV03 (g, p.getMode() == vamp::Preamp5150::Red), b, m, t, vamp::masterKnobFromV03 (post));
-}
+// baseline and current take the same knob values (same knob curves since v0.5; the v0.3.0 baseline needed
+// gainKnobFromV03 / masterKnobFromV03 on the current side)
+template <typename P> void preampControls (P& p, double g, double b, double m, double t, double post) { p.setControls (g, b, m, t, post); }
 
 template <typename T> auto setReference (T& t, int) -> decltype (t.setReferencePrecision (true), void()) { t.setReferencePrecision (true); }
 template <typename T> void setReference (T&, long) {} // no Newton tolerances to tighten
@@ -318,8 +318,8 @@ void driveCases (const std::vector<Input>& inputs)
             }
 }
 
-// v0.3.0: preamp -> power amp; current: the same on the power amp's supply rails (Amp5150.h)
-inline double chainStep (vamp_baseline::Preamp5150& p, vamp_baseline::PowerAmp5150& w, double v, double post) { return w.process (p.process (v) * post); }
+// preamp -> power amp on the power amp's supply rails (Amp5150.h)
+inline double chainStep (vamp_baseline::Preamp5150& p, vamp_baseline::PowerAmp5150& w, double v, double post) { return vamp_baseline::processAmp5150 (p, w, v, post); }
 inline double chainStep (vamp::Preamp5150& p, vamp::PowerAmp5150& w, double v, double post) { return vamp::processAmp5150 (p, w, v, post); }
 
 template <typename Drive, typename Pre, typename Power>
@@ -330,7 +330,7 @@ std::function<Proc()> chainMaker (int mode, bool reference = false)
         auto d = std::make_shared<Drive>(); d->prepare (fs); d->setControls (0.5, 0.5, 2, 0.7);
         auto p = std::make_shared<Pre>();   if (reference) setReference (*p, 0); p->prepare (fs); p->setMode (mode); preampControls (*p, 0.8, 0.5, 0.5, 0.6, 0.6);
         auto w = std::make_shared<Power>(); if (reference) setReference (*w, 0); w->setControls (0.6, 0.5); w->prepare (fs);
-        const double post = mode == 0 ? 25.0 : 1.0; // AmpSim kChannelPost (CLEAN has only 2 stages)
+        const double post = mode == 0 ? 54.0 : 1.0; // AmpSim kChannelPost (CLEAN has only 2 stages)
         return Proc ([d, p, w, post] (double v) { return chainStep (*p, *w, d->process (v), post); });
     };
 }
@@ -370,8 +370,8 @@ int main (int argc, char** argv)
     driveCases (short_);
     chainCases (guitar);
 
-    std::printf ("\n%d cases, %d failed, %d differ from v0.3.0 by more than -60 dB (solver fixes + v0.4 model changes).\n"
+    std::printf ("\n%d cases, %d failed, %d moved from the v0.5 baseline (new-base above -100 dB), %d fixed.\n"
                  "total time baseline %.0f ms, current %.0f ms -> %.2fx\n",
-                 cases, failures, fixedCases, timeBase, timeNew, timeBase / std::max (timeNew, 1e-9));
+                 cases, failures, movedCases, fixedCases, timeBase, timeNew, timeBase / std::max (timeNew, 1e-9));
     return failures > 0 ? 1 : 0;
 }

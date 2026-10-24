@@ -463,24 +463,19 @@ static void cpuModules()
     for (int mode : { 0, 1, 2 })
     {
         Preamp5150 pre; pre.prepare (os); pre.setMode (mode); pre.setControls (0.7, 0.5, 0.5, 0.6, 0.5);
-        TriodeStage* st[] = { &pre.v1a, &pre.v1b, &pre.v2a };
-        for (auto* s : st) s->statSamples = s->statEvals = s->statFallbacks = 0;
-        pre.late.net.statSamples = pre.late.net.statIterations = pre.late.net.statFailures = 0;
-        pre.lead.net.statSamples = pre.lead.net.statIterations = pre.lead.net.statFailures = 0;
+        long long *ns, *ni, *nf; // the channel's coupled circuit
+        if (mode == Preamp5150::Clean) { ns = &pre.clean.net.statSamples; ni = &pre.clean.net.statIterations; nf = &pre.clean.net.statFailures; }
+        else
+        {
+            auto& p = mode == Preamp5150::Red ? pre.lead : pre.blue;
+            ns = &p.net.statSamples; ni = &p.net.statIterations; nf = &p.net.statFailures;
+        }
+        *ns = *ni = *nf = 0;
         double a = 0;
         for (int i = 0; i < nOs; ++i) a += pre.process (diOs[(size_t) i]);
         sink = sink + a;
-        std::printf ("%-6s", names[mode] + 7);
-        const char* sn[] = { "V1A", "V1B", "V2A" };
-        for (int k = 0; k < 3; ++k)
-            if (st[k]->statSamples > 0)
-                std::printf ("  %s %.2f (%.1f%%)", sn[k], (double) st[k]->statEvals / st[k]->statSamples,
-                             100.0 * st[k]->statFallbacks / st[k]->statSamples);
-        if (pre.late.net.statSamples > 0)
-            std::printf ("  V2B-V5A %.2f (%lld failures)", (double) pre.late.net.statIterations / pre.late.net.statSamples, pre.late.net.statFailures);
-        if (pre.lead.net.statSamples > 0)
-            std::printf ("  V1A-V5A %.2f (%lld failures)", (double) pre.lead.net.statIterations / pre.lead.net.statSamples, pre.lead.net.statFailures);
-        std::printf ("\n");
+        std::printf ("%-6s  %s %.2f (%lld failures)\n", names[mode] + 7, mode == Preamp5150::Clean ? "V1A-V1B" : "V1A-V5A",
+                     (double) *ni / std::max (*ns, 1LL), *nf);
     }
     {
         Preamp5150 pre; pre.prepare (os); pre.setMode (2); pre.setControls (0.7, 0.5, 0.5, 0.6, 0.5);
@@ -634,7 +629,7 @@ static void inputGateTest()
 static void chainLevels()
 {
     std::printf ("\n== full chain: speaker V rms (gain 6, tone 5/5/6, pres/res 5), guitar-ish 0.2 V chord ==\n");
-    const double post[3] = { 25.0, 1.0, 1.0 }; // keep in sync with kChannelPost in AmpSim.h
+    const double post[3] = { 54.0, 1.0, 1.0 }; // keep in sync with kChannelPost in AmpSim.h
     for (int mode : { 0, 1, 2 })
     {
         std::printf ("mode %d:", mode);
@@ -678,7 +673,7 @@ static bool faultRecoveryTests()
 
     // where = 0: bad sample into the preamp input, 1: into the power amp input, 2: the input sample replaced
     // by the previous one (a lost sample can't be recovered: this is the best any fault handling can do)
-    // mode: Preamp5150 channel (RED = the coupled lead preamp, BLUE = single stages + LateStages5150)
+    // mode: Preamp5150 channel (RED and BLUE: each the whole preamp as one circuit)
     auto render = [&] (int where, double bad, long long* failures = nullptr, int mode = Preamp5150::Red)
     {
         Preamp5150 pre;
@@ -693,15 +688,14 @@ static bool faultRecoveryTests()
         for (int i = 0; i < n; ++i)
         {
             const bool hit = i == at && where >= 0;
-            // solve reported bad once (retry) / twice (hold): 3 / 4 V1A (BLUE), 5 / 6 power amp,
-            // 7 / 8 the coupled block (RED: the whole preamp, BLUE: V2B-V5A)
-            if (hit && (where == 3 || where == 4)) pre.v1a.testFaults = where - 2;
+            // solve reported bad once (retry) / twice (hold): 5 / 6 power amp,
+            // 7 / 8 the channel's preamp circuit
             if (hit && (where == 5 || where == 6)) pa.testFaults = where - 4;
-            if (hit && (where == 7 || where == 8)) (mode == Preamp5150::Red ? pre.lead.net.testFaults : pre.late.net.testFaults) = where - 6;
+            if (hit && (where == 7 || where == 8)) (mode == Preamp5150::Red ? pre.lead.net.testFaults : pre.blue.net.testFaults) = where - 6;
             double v = pre.process (hit && where == 0 ? bad : hit && where == 2 ? dry (i - 1) : dry (i));
             y[(size_t) i] = pa.process (hit && where == 1 ? bad : v);
         }
-        if (failures) *failures = pa.statFailures + pre.lead.net.statFailures + pre.late.net.statFailures;
+        if (failures) *failures = pa.statFailures + pre.lead.net.statFailures + pre.blue.net.statFailures;
         return y;
     };
 
@@ -746,8 +740,7 @@ static bool faultRecoveryTests()
         { "+inf -> preamp (RED)",         0, HUGE_VAL,      R },
         { "NaN  -> preamp (BLUE)",        0, std::nan (""), B },
         { "RED preamp fails, retry",      7, 0.0,           R },
-        { "V1A (BLUE) fails, retry",      3, 0.0,           B },
-        { "V2B-V5A (BLUE) fails, retry",  7, 0.0,           B },
+        { "BLUE preamp fails, retry",     7, 0.0,           B },
         { "power amp fails, retry",       5, 0.0,           R },
     };
     std::printf ("clean render: peak %.1f V at the speaker (RED)\n", refPeak);
@@ -770,8 +763,8 @@ static bool faultRecoveryTests()
     }
     // Last resort when the retry fails as well: the sample is dropped (states held). Worse than the floor (it
     // upsets the trapezoidal companions), so only finiteness and recovery within 1 ms are required.
-    const Case holds[] = { { "RED preamp fails twice, hold", 8, 0.0, R }, { "V1A (BLUE) twice, hold", 4, 0.0, B },
-                           { "V2B-V5A (BLUE) twice, hold", 8, 0.0, B }, { "power amp twice, hold", 6, 0.0, R } };
+    const Case holds[] = { { "RED preamp fails twice, hold", 8, 0.0, R },
+                           { "BLUE preamp fails twice, hold", 8, 0.0, B }, { "power amp twice, hold", 6, 0.0, R } };
     for (const auto& c : holds)
     {
         const Dev r = deviation (render (c.where, c.bad, nullptr, c.mode), c.mode);
@@ -809,10 +802,10 @@ static bool faultRecoveryTests()
             finite = finite && std::isfinite (y);
             peak = std::max (peak, std::abs (y));
         }
-        const bool pass = finite && peak < 100.0 && pa.statFailures + pre.lead.net.statFailures + pre.late.net.statFailures == 0;
+        const bool pass = finite && peak < 100.0 && pa.statFailures + pre.lead.net.statFailures + pre.blue.net.statFailures == 0;
         ok = ok && pass;
         std::printf ("100 V sine:   finite %s, speaker peak %.1f V, %lld Newton failures  %s\n",
-                     finite ? "yes" : "NO", peak, pa.statFailures + pre.lead.net.statFailures + pre.late.net.statFailures, pass ? "PASS" : "FAIL");
+                     finite ? "yes" : "NO", peak, pa.statFailures + pre.lead.net.statFailures + pre.blue.net.statFailures, pass ? "PASS" : "FAIL");
     }
     return ok;
 }

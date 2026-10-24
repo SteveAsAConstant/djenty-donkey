@@ -224,6 +224,30 @@ public:
     // plate current of triode t at the last accepted sample: what it draws from its supply rail
     double plateCurrent (int t) const { return plateI[t]; }
 
+    // Triode t takes over the state of triode u of another network (the same tube in another relay position):
+    // its port voltages (and the last ones, for the predictor), plate current and Miller capacitor states
+    template <int N2>
+    void copyTube (int t, const TriodeNetwork<N2>& o, int u)
+    {
+        for (int k = 0; k < 2; ++k)
+        {
+            p[2 * t + k] = o.port (2 * u + k);
+            pPrev[2 * t + k] = o.portPrev (2 * u + k);
+        }
+        plateI[t] = o.plateCurrent (u);
+        dk.setCapState (tube[t].cgk, o.dk.getCapState (o.tube[u].cgk));
+        dk.setCapState (tube[t].cgp, o.dk.getCapState (o.tube[u].cgp));
+    }
+    double port (int k) const { return p[k]; }
+    double portPrev (int k) const { return pPrev[k]; }
+
+    // back to the idle point saved by saveIdle() (no allocation: fine on the audio thread)
+    void resetToIdle()
+    {
+        restoreIdle();
+        for (int t = 0; t < NT; ++t) plateI[t] = 0.0;
+    }
+
     long long statSamples = 0, statIterations = 0, statFailures = 0, statRetries = 0, statHeld = 0;
     int testFaults = 0; // tests: the next this-many fault checks report a bad solve
 

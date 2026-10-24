@@ -3,7 +3,7 @@
 #include <cmath>
 #include "TriodeNetwork.h"
 
-namespace vamp
+namespace vamp_baseline
 {
 // V2B -> V5B -> V5A of the 5150 preamp (schematic page 2), solved simultaneously (TriodeNetwork):
 //
@@ -99,6 +99,9 @@ public:
         return out;
     }
 
+    // back to the DC operating point of configure() (channel switches; no allocation)
+    void reset() { net.resetToIdle(); lastIn = 0.0; out = 0.0; }
+
     void setSupply (double vb) { bplus = vb; } // V2+ per sample (a source input, no rebuild)
     double railCurrent() const { return net.plateCurrent (0) + net.plateCurrent (1) + net.plateCurrent (2); }
 
@@ -126,4 +129,4 @@ private:
     double lastIn = 0.0, out = 0.0;
 };
 
-} // namespace vamp
+} // namespace vamp_baseline

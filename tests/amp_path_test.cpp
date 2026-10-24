@@ -14,6 +14,7 @@
 #include <complex>
 #include <cstdio>
 #include <functional>
+#include <memory>
 #include <string>
 #include <vector>
 #include "dsp/AmpSim.h"
@@ -65,6 +66,34 @@ Signal pluginPath (const Gen& g, double secs)
     return y;
 }
 
+// from fs * os down to fs with a 2047-tap windowed sinc (20 kHz)
+Signal decimate (const Signal& y, int os)
+{
+    const double rate = fs * os;
+    constexpr int taps = 2047;
+    std::vector<double> h (taps);
+    double sum = 0;
+    for (int i = 0; i < taps; ++i)
+    {
+        const double m = i - (taps - 1) / 2.0, fc = 20000.0 / rate;
+        h[(size_t) i] = (m == 0 ? 2 * fc : std::sin (2 * kPi * fc * m) / (kPi * m))
+                      * (0.42 - 0.5 * std::cos (2 * kPi * i / (taps - 1)) + 0.08 * std::cos (4 * kPi * i / (taps - 1)));
+        sum += h[(size_t) i];
+    }
+    Signal out (y.size() / (size_t) os);
+    for (size_t o = 0; o < out.size(); ++o)
+    {
+        double acc = 0;
+        for (int i = 0; i < taps; ++i)
+        {
+            const long k = (long) (o * (size_t) os) - i + (taps - 1) / 2;
+            if (k >= 0 && k < (long) y.size()) acc += h[(size_t) i] * y[(size_t) k];
+        }
+        out[o] = acc / sum;
+    }
+    return out;
+}
+
 // ideal: the same DSP classes at 16x, decimated with a 2047-tap windowed sinc (20 kHz)
 Signal idealPath (const Gen& g, double secs, int os = 16)
 {
@@ -76,29 +105,7 @@ Signal idealPath (const Gen& g, double secs, int os = 16)
     const auto x = sample (g, rate, secs);
     Signal y (x.size());
     for (size_t i = 0; i < x.size(); ++i) y[i] = vamp::processAmp5150 (pre, pa, x[i], 1.0) * vamp::kSpeakerToDigital;
-
-    constexpr int taps = 2047;
-    std::vector<double> h (taps);
-    double sum = 0;
-    for (int i = 0; i < taps; ++i)
-    {
-        const double m = i - (taps - 1) / 2.0, fc = 20000.0 / rate;
-        h[(size_t) i] = (m == 0 ? 2 * fc : std::sin (2 * kPi * fc * m) / (kPi * m))
-                      * (0.42 - 0.5 * std::cos (2 * kPi * i / (taps - 1)) + 0.08 * std::cos (4 * kPi * i / (taps - 1)));
-        sum += h[(size_t) i];
-    }
-    Signal out (x.size() / os);
-    for (size_t o = 0; o < out.size(); ++o)
-    {
-        double acc = 0;
-        for (int i = 0; i < taps; ++i)
-        {
-            const long k = (long) (o * os) - i + (taps - 1) / 2;
-            if (k >= 0 && k < (long) y.size()) acc += h[(size_t) i] * y[(size_t) k];
-        }
-        out[o] = acc / sum;
-    }
-    return out;
+    return decimate (y, os);
 }
 
 double voltsPerFS = 4.12;
@@ -218,7 +225,7 @@ double zipperDb (int knob, double a, double b, int blockSize, double smoothMs)
 void zipperTests()
 {
     std::printf ("\n== zipper noise: knob automated over 0.4 s, 220 Hz 0.1 V in, inharmonic energy re total (dB, lower is cleaner) ==\n");
-    std::printf ("%-28s %7s | %12s %12s\n", "knob", "block", "no smoothing", "20 ms");
+    std::printf ("%-28s %7s | %12s %12s\n", "knob", "block", "block ramp", "+ 20 ms");
     struct K { const char* name; int knob; double a, b; };
     for (const auto& k : { K { "Master 0.2 -> 0.6", 4, 0.2, 0.6 }, K { "Gain 0.3 -> 0.7", 0, 0.3, 0.7 },
                            K { "Presence 0 -> 1", 5, 0.0, 1.0 }, K { "Resonance 0 -> 1", 6, 0.0, 1.0 } })
@@ -226,11 +233,108 @@ void zipperTests()
             std::printf ("%-28s %7d | %+12.1f %+12.1f\n", k.name, bs, zipperDb (k.knob, k.a, k.b, bs, 0.0), zipperDb (k.knob, k.a, k.b, bs, 20.0));
     std::printf ("(reference: knob held still)  512 | %+12.1f\n", zipperDb (4, 0.3, 0.3, 512, 20.0));
 }
+
+// Channel switch: 220 Hz 0.1 V sine at 8x (the plugin's internal rate), analysed after decimation to 48 kHz.
+// Pre-roll: channel `to` for 0.5 s, then `from` for 1 s (so `to` comes back after having been left mid-signal), then
+// a 2^16-sample window with the switch to `to` in the middle.
+// Reference: what a switch can do at best: two more preamps, each always running its channel (warm, steady),
+// crossfaded over 10 ms and fed to one power amp. The power amp's own response to a level change (it re-biases when
+// the drive jumps, as the real amp does) is in both. Returns { inharmonic dB (clicks), energy below 40 Hz dB re
+// total (thumps) } for the switch and for the reference.
+struct SwitchResult { double click, thump, refClick, refThump; };
+
+SwitchResult switchTest (int from, int to, double fadeMs)
+{
+    constexpr int os = 8;
+    const double rate = fs * os;
+    const long long pre1 = (long long) (0.5 * rate), pre2 = pre1 + (long long) rate, len = (1 << 16) * (long long) os;
+    const long long sw = pre2 + len / 2;
+    const auto s = settings();
+    auto makePre = [&] (int channel)
+    {
+        auto p = std::make_unique<vamp::Preamp5150>();
+        p->setChannelTrims (vamp::kChannelPost[0], vamp::kChannelPost[1], vamp::kChannelPost[2]);
+        p->switchFadeMs = fadeMs;
+        p->prepare (rate); p->setMode (channel);
+        p->setControls (s.gain, s.bass, s.mid, s.treble, s.master);
+        return p;
+    };
+    auto makePa = [&] { auto p = std::make_unique<vamp::PowerAmp5150>(); p->setControls (s.presence, s.resonance); p->prepare (rate); return p; };
+    auto in = [&] (long long n) { return 0.1 * std::sin (2 * kPi * 220.0 * (double) n / rate); };
+
+    Signal y, ref;
+    {
+        auto pre = makePre (to); auto pa = makePa();
+        for (long long n = 0; n < pre2 + len; ++n)
+        {
+            if (n == pre1) pre->setMode (from);
+            if (n == sw) pre->setMode (to);
+            const double v = vamp::processAmp5150 (*pre, *pa, in (n), 1.0);
+            if (n >= pre2) y.push_back (v * vamp::kSpeakerToDigital);
+        }
+    }
+    {
+        auto a = makePre (from), b = makePre (to); auto pa = makePa();
+        const double fade = fadeMs * 1e-3 * rate;
+        for (long long n = 0; n < pre2 + len; ++n)
+        {
+            const double t = (double) (n - sw) / std::max (fade, 1.0), w = t <= 0.0 ? 0.0 : t >= 1.0 ? 1.0 : 0.5 - 0.5 * std::cos (kPi * t);
+            for (auto* p : { a.get(), b.get() }) p->setRails (pa->getRailV1(), pa->getRailV2());
+            const double x = (1.0 - w) * a->process (in (n)) + w * b->process (in (n));
+            double i1a, i2a, i1b, i2b;
+            a->railCurrents (i1a, i2a); b->railCurrents (i1b, i2b);
+            pa->setPreampLoad ((1.0 - w) * i1a + w * i1b, (1.0 - w) * i2a + w * i2b);
+            const double v = pa->process (x);
+            if (n >= pre2) ref.push_back (v * vamp::kSpeakerToDigital);
+        }
+    }
+    y = decimate (y, os);
+    ref = decimate (ref, os);
+    auto lowDb = [] (const Signal& x)
+    {
+        const auto p = spectrum (x);
+        const double binHz = fs / (2.0 * (double) p.size());
+        double tot = 0, low = 0;
+        for (size_t k = 1; k < p.size(); ++k) { tot += p[k]; if (k * binHz < 40.0) low += p[k]; }
+        return 10.0 * std::log10 (std::max (low, 1e-30) / tot);
+    };
+    return { inharmonicDb (y, 220.0, 20.0), lowDb (y), inharmonicDb (ref, 220.0, 20.0), lowDb (ref) };
+}
+
+void switchTests()
+{
+    std::printf ("\n== channel switch: 220 Hz 0.1 V; dB re total (lower is cleaner) ==\n");
+    std::printf ("(ideal: two always-running preamps crossfaded over the same time into one power amp)\n");
+    const char* name[] = { "CLEAN", "BLUE", "RED" };
+    for (double fadeMs : { 0.0, 20.0 }) // 0: a hard switch (one sample), for comparison
+    {
+        std::printf ("%-11s %4.0f ms | %10s %10s | %10s %10s\n", "switch, fade", fadeMs, "clicks", "thump", "ideal clk", "ideal thp");
+        for (const auto& p : { std::pair { 2, 1 }, std::pair { 1, 2 }, std::pair { 2, 0 }, std::pair { 0, 2 }, std::pair { 1, 0 }, std::pair { 0, 1 } })
+        {
+            const auto r = switchTest (p.first, p.second, fadeMs);
+            std::printf ("%-6s -> %-11s | %+10.1f %+10.1f | %+10.1f %+10.1f\n", name[p.first], name[p.second], r.click, r.thump, r.refClick, r.refThump);
+        }
+    }
+}
 } // namespace
 
 int main (int argc, char** argv)
 {
     if (argc > 1 && std::string (argv[1]) == "knobs") { zipperTests(); return 0; }
+    if (argc > 1 && std::string (argv[1]) == "switch") { switchTests(); return 0; }
+    if (argc > 1 && std::string (argv[1]) == "prepare")
+    {
+        std::printf ("\n== AmpSim::prepare() time (the host waits for it on load and on sample-rate / buffer changes) ==\n");
+        for (double rate : { 44100.0, 48000.0, 96000.0, 192000.0 })
+        {
+            vamp::AmpSim amp;
+            const auto t0 = std::chrono::high_resolution_clock::now();
+            amp.prepare (rate, 512);
+            const double ms = std::chrono::duration<double, std::milli> (std::chrono::high_resolution_clock::now() - t0).count();
+            std::printf ("  %6.0f Hz: %7.0f ms\n", rate, ms);
+        }
+        return 0;
+    }
     namcmp::NamWaveNet nam;
     const bool haveNam = argc > 1 && nam.load (argv[1]);
     if (argc > 2) voltsPerFS = 0.7746 * std::pow (10.0, std::atof (argv[2]) / 20.0) * std::sqrt (2.0);

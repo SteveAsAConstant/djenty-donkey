@@ -166,15 +166,17 @@ struct Rig
     Settings s;
     double voltsPerFS = 4.12, rateNam = 48000.0, rateOurs = 192000.0;
     bool frozenSupply = false; // --frozen-supply: rails held at their DC point (no sag), to separate DC from dynamics
+    double r18 = -1.0;         // --r18 ohms: V1B cathode R18 in the lead preamp (default: FullPreamp5150::r18)
 
     std::vector<double> ours (const std::vector<double>& v, double preKnob, double drive) const
     {
         vamp::Preamp5150 pre;
+        if (r18 >= 0.0) pre.lead.r18 = r18;
         pre.prepare (rateOurs); pre.setMode (s.mode);
         pre.setControls (preKnob, s.bass, s.mid, s.treble, vamp::masterKnobForDrive (drive));
         vamp::PowerAmp5150 pa; pa.setControls (s.presence, s.resonance); pa.prepare (rateOurs);
         if (frozenSupply) pa.beginSupplySettle();
-        const double post = s.mode == 0 ? 25.0 : 1.0; // AmpSim kChannelPost
+        const double post = s.mode == 0 ? 54.0 : 1.0; // AmpSim kChannelPost
         std::vector<double> y (v.size());
         for (size_t i = 0; i < v.size(); ++i) y[i] = vamp::processAmp5150 (pre, pa, v[i], post);
         return y;
@@ -308,6 +310,7 @@ int main (int argc, char** argv)
         else if (a == "--residual") residual = true;
         else if (a == "--sweep") sweep = true;
         else if (a == "--frozen-supply") rig.frozenSupply = true;
+        else if (a == "--r18" && i + 1 < argc) rig.r18 = std::atof (argv[++i]);
         else if (a == "--fit-drive") fitDrive = true;
     }
     rig.s = parseSettings (rig.nam.getName());

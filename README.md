@@ -28,8 +28,8 @@ Input ─ Gate ─ Transpose ─ Compressor ─┬─ [8x oversampled] ───
 
 | Block | What it is |
 |---|---|
-| **Preamp** | Each 12AX7 stage is solved per sample (Koren triode model + Newton–Raphson): coupling caps, cathode bypass caps, grid current and Miller capacitance are real circuit elements, so cold-clipper bias shift ("blocking distortion") happens naturally. In the lead channel the whole preamp (V1A → V5A with every network between them) is solved as one circuit, so each stage loads the ones next to it: that sets the even harmonics at the edge of breakup and the cold clipper's bias shift (matches LTspice within ~0.5 dB at every plate). Knob moves are smoothed (~20 ms): zipper noise 15–22 dB lower, the same at any buffer size. |
-| **Channels** | **RED** = 5150 lead (V1A→V1B→V2A→V2B→V5B→V5A). **BLUE** = rhythm with crunch. **CLEAN** = 6505 rhythm, *optimized*: bypasses V2A–V5A for headroom (not in the original amp). |
+| **Preamp** | Each 12AX7 stage is solved per sample (Koren triode model + Newton–Raphson): coupling caps, cathode bypass caps, grid current and Miller capacitance are real circuit elements, so cold-clipper bias shift ("blocking distortion") happens naturally. In every channel the whole preamp (V1A → V5A with every network between them) is solved as one circuit, so each stage loads the ones next to it: that sets the even harmonics at the edge of breakup and the cold clipper's bias shift (matches LTspice within 0.1 % and ~0.5 dB H2 at every plate). Knob moves ramp across each host block and are smoothed (~20 ms): no zipper noise at any buffer size. |
+| **Channels** | Relay positions read off the factory schematic. **RED** = 5150 lead (V1A→V1B→V2A→V2B→V5B→V5A, C26 through R18 for a tight low end). **BLUE** = rhythm with crunch (R43 ‖ C13 gain network, R20 at V2A). **CLEAN** = 6505 rhythm, *optimized*: bypasses V2A–V5A for headroom (not in the original amp). Channel switches carry the shared tubes' and capacitors' state over (as the relays do) and crossfade the rewired part over 20 ms: no clicks or thumps. |
 | **Tone stack** | The factory network as drawn, including its feed (R89 470k into R24 33k and C59/R94), the 570 pF treble cap, the mid pot wired as a divider and the 500k Post-pot load; solved by nodal analysis, matches LTspice within 0.01 dB. |
 | **Precision Drive** | Op-amp + 1N4148 clipper solved per sample; 8-position *Attack* cap switch (33n–470n) for tightness. Based on the public PedalPCB "Dwarven Hammer" build doc. |
 | **Power amp** | V3A recovery + long-tail-pair phase inverter + 2×2 6L6GC push-pull + output transformer + 4×12 speaker impedance, solved simultaneously with a nodal DK solver. Presence and Resonance are the real NFB-loop parts (VR9/C8, VR8/C12). Flyback diodes, grid current. Matches LTspice within 0.05 dB small-signal and 0.2 % at clipping. |
@@ -69,11 +69,10 @@ Outputs go to `%USERPROFILE%\vab-build\DjentyDonkey_artefacts\Release\` (short p
 ```
 Source/
   dsp/TriodeStage.h     12AX7 stage, Koren model, Newton solver
-  dsp/LinearNetwork.h   small MNA solver for R/C networks (tone stack, gain networks)
+  dsp/LinearNetwork.h   small MNA solver for R/C networks (tone stack)
   dsp/Preamp5150.h      5150 / 6505 preamp assembled from the schematic
   dsp/TriodeNetwork.h   N triodes + their circuit solved together (DK method, Newton)
-  dsp/LeadPreamp5150.h  the whole lead preamp as one circuit
-  dsp/LateStages5150.h  V2B -> V5B -> V5A solved together (BLUE channel)
+  dsp/FullPreamp5150.h  the whole preamp of each channel as one circuit (relay positions), CLEAN's V1A + V1B
   dsp/DKCircuit.h       nodal DK solver (power amp, coupled preamp stages)
   dsp/PowerAmp5150.h    phase inverter + 6L6 power amp + NFB
   dsp/PrecisionDrive.h  drive pedal
@@ -99,6 +98,7 @@ installer/              Inno Setup script + packaging
 - [x] Lead channel: whole preamp solved as one circuit; knob smoothing
 - [x] Tone-stack feed network and V5A load as on the factory schematic; preamp B+ supply chain and sag
 - [x] V3A recovery stage inside the power-amp circuit, with the 12AX7 interelectrode capacitances (LTspice within 0.05 dB)
+- [x] Rhythm / crunch network and relay logic from the factory schematic, BLUE solved as one circuit; click-free channel switching
 - [ ] CPU: "eco" mode / hardware port (Raspberry Pi class)
 - [ ] Preset browser
 

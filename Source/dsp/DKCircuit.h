@@ -94,7 +94,7 @@ public:
         m = (int) ports.size();
         numS = (int) (caps.size() + inds.size());
         numU = (int) sources.size();
-        assert (numS <= kMaxStates);
+        assert (numS <= kMaxStates && (int) outputs.size() <= kMaxStates); // finish() keeps both on the stack
         x.assign ((size_t) N, 0.0);
         z.assign ((size_t) (numS + numU + m), 0.0);
         p0.assign ((size_t) m, 0.0);
@@ -122,6 +122,11 @@ public:
     // the trapezoidal companion: ieq = gc v). Call after prepare().
     void setCapVoltage (int idx, double v) { z[(size_t) idx] = caps[(size_t) idx].gc * v; }
 
+    // Reactive state (trapezoidal companion source) of capacitor idx: copied to an identical capacitor of another
+    // circuit prepared at the same rate, it carries over the charge and the current (channel switches)
+    double getCapState (int idx) const { return z[(size_t) idx]; }
+    void setCapState (int idx, double s) { z[(size_t) idx] = s; }
+
     // Remember / go back to a state (reactive states and output nodes), e.g. the settled idle point.
     // saveState() allocates (call it from prepare); restoreState() does not.
     void saveState() { zSaved = z; xSaved = x; }
@@ -138,14 +143,7 @@ public:
         if (dirty) rebuild();
 
         std::copy (u, u + numU, z.begin() + numS);
-        const int nz = numS + numU;
-        for (int r = 0; r < m; ++r)
-        {
-            const double* row = &P[(size_t) r * nz];
-            double s = 0.0;
-            for (int j = 0; j < nz; ++j) s += row[j] * z[(size_t) j];
-            p0[(size_t) r] = s;
-        }
+        matVec (P.data(), m, numS + numU, z.data(), p0.data());
         return p0;
     }
 
@@ -159,23 +157,13 @@ public:
         std::copy (iPorts, iPorts + m, z.begin() + numS + numU);
         const int nz = numS + numU + m;
 
-        for (size_t o = 0; o < outputs.size(); ++o)
-        {
-            const double* row = &O[o * (size_t) nz];
-            double s = 0.0;
-            for (int j = 0; j < nz; ++j) s += row[j] * z[(size_t) j];
-            x[(size_t) outputs[o]] = s;
-        }
+        double buf[kMaxStates];
+        const int numO = (int) outputs.size();
+        matVec (O.data(), numO, nz, z.data(), buf);
+        for (int o = 0; o < numO; ++o) x[(size_t) outputs[(size_t) o]] = buf[o];
 
-        double sNew[kMaxStates];
-        for (int r = 0; r < numS; ++r)
-        {
-            const double* row = &M[(size_t) r * nz];
-            double s = 0.0;
-            for (int j = 0; j < nz; ++j) s += row[j] * z[(size_t) j];
-            sNew[r] = s;
-        }
-        std::copy (sNew, sNew + numS, z.begin());
+        matVec (M.data(), numS, nz, z.data(), buf);
+        std::copy (buf, buf + numS, z.begin());
     }
 
     // Only nodes marked as outputs are computed in finish(); nodeV() of any other node is 0.
@@ -191,6 +179,37 @@ private:
     struct Src { int node; double g; };
     struct Port { int a, b; };
 
+public:
+    // out = A v (A rows x cols, row-major). Four rows at a time: four independent accumulation chains instead of
+    // one, so the adds overlap instead of waiting on each other. Each row is still summed in index order, so the
+    // result is bit-identical to the plain loop.
+    static void matVec (const double* A, int rows, int cols, const double* v, double* out)
+    {
+        int r = 0;
+        for (; r + 4 <= rows; r += 4)
+        {
+            const double* a0 = A + (size_t) r * cols;
+            const double* a1 = a0 + cols;
+            const double* a2 = a1 + cols;
+            const double* a3 = a2 + cols;
+            double s0 = 0.0, s1 = 0.0, s2 = 0.0, s3 = 0.0;
+            for (int j = 0; j < cols; ++j)
+            {
+                const double vj = v[j];
+                s0 += a0[j] * vj; s1 += a1[j] * vj; s2 += a2[j] * vj; s3 += a3[j] * vj;
+            }
+            out[r] = s0; out[r + 1] = s1; out[r + 2] = s2; out[r + 3] = s3;
+        }
+        for (; r < rows; ++r)
+        {
+            const double* a = A + (size_t) r * cols;
+            double s = 0.0;
+            for (int j = 0; j < cols; ++j) s += a[j] * v[j];
+            out[r] = s;
+        }
+    }
+
+private:
     static void stamp (std::vector<double>& A, int n, int a, int b, double g)
     {
         if (a >= 0) A[(size_t) a * n + a] += g;
@@ -351,7 +370,7 @@ private:
 
     }
 
-    static constexpr int kMaxStates = 64; // capacitors + inductors (finish() keeps s' on the stack)
+    static constexpr int kMaxStates = 64; // capacitors + inductors, and output nodes (finish() keeps them on the stack)
 
     double T = 1.0 / 192000.0;
     int numNodes = 0, numAux = 0, N = 0, m = 0, numS = 0, numU = 0;

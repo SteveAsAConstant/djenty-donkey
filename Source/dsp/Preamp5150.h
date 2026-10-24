@@ -2,8 +2,7 @@
 #include <algorithm>
 #include <cmath>
 #include "LinearNetwork.h"
-#include "LateStages5150.h"
-#include "LeadPreamp5150.h"
+#include "FullPreamp5150.h"
 #include "TriodeStage.h"
 
 namespace vamp
@@ -26,16 +25,18 @@ inline double taperPotInverse (double f) { return std::log10 (1.0 + f * (std::po
 inline double masterTaper (double x) { return x <= 0.0 ? 0.0 : taperPot (x); }
 inline double masterKnobForDrive (double drive) { return taperPotInverse (std::clamp (drive, 0.0, 1.0)); }
 
-// Lead pre-gain: taperPot lifted below dial 5. Pre-gain fits (power-amp drive fixed at the Master calibration,
-// nam_compare --fit-pre) to all 14 captures want +5.5 / +2.7 / +3.4 dB re taperPot at dials 2 / 3 / 4 and none at
-// 5 (means of 4 / 5 / 3 / 2 captures, spread +-0.4..0.6 dB; +-1.2 at 5); interpolated linearly in dB between
-// them, held below 2 (still monotonic: between 3 and 4 the lift grows 0.7 dB, taperPot 6 dB). The v0.4 curve was
-// fitted to dials 3..5 with the stages solved one after another, which overstated V5B's swing. Nothing above 5
-// was captured, so from dial 5 up the curve is unchanged. Lead only: the captures are lead.
+// Lead pre-gain: taperPot lifted. Pre-gain fits (power-amp drive fixed at the Master calibration,
+// nam_compare --fit-pre) to all 14 captures want +8.7 / +6.2 / +6.7 / +3.3 dB re taperPot at dials 2 / 3 / 4 / 5
+// (means of 4 / 5 / 3 / 2 captures, spread +-0.4..0.6 dB; +-1.2 at 5); interpolated linearly in dB between them,
+// held below 2. v0.5.0-beta's curve was 3.3-3.6 dB lower at every dial: it was fitted with C26 straight to ground
+// in LEAD; with R18 in series (factory schematic, FullPreamp5150::r18) the preamp has that much less gain at the
+// 110 Hz of the fits, a uniform offset (harmonics and compression match as before). Nothing above 5 was captured:
+// the lift falls linearly to 0 at dial 10, so dial 10 is still the pot fully open (and the curve stays monotonic:
+// taperPot grows ~6 dB per dial step there). Lead only: the captures are lead.
 inline double leadPreLiftDb (double x)
 {
-    constexpr double at[4] = { 5.47, 2.74, 3.43, 0.0 }; // dials 2, 3, 4, 5
-    if (x >= 0.5) return 0.0;
+    constexpr double at[4] = { 8.72, 6.16, 6.71, 3.31 }; // dials 2, 3, 4, 5
+    if (x >= 0.5) return at[3] * std::max (0.0, (1.0 - x) / 0.5);
     if (x <= 0.2) return at[0];
     const double f = (x - 0.2) * 10.0;
     const int i = std::min (2, (int) f);
@@ -58,13 +59,13 @@ inline double gainKnobFromV03 (double x, bool lead) { return lead ? leadPreTaper
 // (v0.3 -> v0.4 knob positions, which v0.5 keeps)
 inline double masterKnobFromV03 (double x) { return taperPotInverse (std::clamp (masterTaperV03 (x) / kPostTrimV04, 0.0, 1.0)); }
 
-// Component-level model of the EVH 5150 / 6505 preamp + tone stack.
-// Designators refer to docs/5150_schematic_notes.md.
-//
-//  RED   (5150 lead):     V1A -> lead pre-gain net -> V1B -> V2A -> V2B -> V5B -> V5A -> tone stack
-//  BLUE  (6505 crunch):   V1A -> rhythm net (crunch) -> V1B (rhythm cathode) -> V2A (R20 shunt) -> ... -> tone stack
-//  CLEAN (6505 rhythm, optimized): V1A -> rhythm net (clean shunt) -> V1B -> tone stack
+// Component-level model of the EVH 5150 / 6505 preamp + tone stack. Each channel is its circuit with the
+// channel's relay positions (factory schematic sheet 1; docs/5150_schematic_notes.md), solved as one circuit:
+//  RED   (5150 lead):     FullPreamp5150 (Lead):   V1A -> both gain nets, VR2 -> V1B (R18) -> V2A -> V2B -> V5B -> V5A
+//  BLUE  (6505 crunch):   FullPreamp5150 (Crunch): V1A -> both gain nets, VR1 -> V1B -> V2A (R20) -> ... -> V5A
+//  CLEAN (6505 rhythm, optimized): CleanPreamp5150: V1A -> both gain nets, VR1 -> V1B
 //         "optimized" = V2A..V5A bypassed for headroom (not in the original amp)
+// then the tone stack.
 class Preamp5150
 {
 public:
@@ -74,24 +75,14 @@ public:
     // the model's tube currents. With the supply connected (setRails) they follow the sagging rails per sample.
     double vb1 = 305.7, vb2 = 322.1;
 
-    TriodeStage v1a, v1b, v2a; // CLEAN and BLUE
-    LateStages5150 late;       // BLUE: V2B -> V5B -> V5A, solved together
-    LeadPreamp5150 lead;       // RED: the whole preamp (V1A .. V5A with all networks) solved as one circuit
+    FullPreamp5150 lead;   // RED
+    FullPreamp5150 blue;   // BLUE
+    CleanPreamp5150 clean; // CLEAN
 
-    // diagnostics: the lead preamp also computes every cathode and plate voltage (lead.getVk / getVp, tests)
-    explicit Preamp5150 (bool diagnostics = false) : lead (diagnostics)
+    // diagnostics: RED and BLUE also compute every cathode and plate voltage (getVk / getVp, tests)
+    explicit Preamp5150 (bool diagnostics = false)
+        : lead (channel5150::Lead, diagnostics), blue (channel5150::Crunch, diagnostics)
     {
-        // ---- rhythm pre-gain network: C6 -> R19||C51 -> [R23+C53 clean shunt] -> VR1 (+C27) ----
-        rhythmNet.addR (SRC, 4, kRoutV1A); // V1A plate output impedance
-        rhythmNet.addC (4, 0, 22e-9);      // C6
-        rhythmNet.addR (0, 1, 470e3);      // R19
-        rhythmNet.addC (0, 1, 270e-12);    // C51
-        rhyShunt = rhythmNet.addR (1, 3, 39e3); // R23 (switched out for crunch)
-        rhythmNet.addC (3, GND, 0.1e-6);   // C53
-        rhyTop = rhythmNet.addR (1, 2, 5e5); // VR1 upper
-        rhyBot = rhythmNet.addR (2, GND, 5e5); // VR1 lower
-        rhythmNet.addC (1, 2, 180e-12);    // C27 bright
-
         // ---- tone stack and its feed as on the schematic (factory sheet 1 and the redraw agree):
         // nodes 0 trebTop, 1 out, 2 trebBot / bassTop, 3 x, 4 bassBot / midTop, 5 C59-R94, 6 in, 7 mid wiper.
         // The driving plate feeds the stack through R89 470k into R24 33k and C59 + R94 to ground (~-24 dB).
@@ -115,26 +106,67 @@ public:
     void prepare (double sampleRate)
     {
         fs = sampleRate;
-        rhythmNet.prepare (fs);
         toneStack.prepare (fs);
-        configureStages();
-        late.configure (vb2, kRoutV2A, fs); // these do not depend on the channel: not reconfigured on a switch
         lead.configure (vb1, vb2, fs);
+        blue.configure (vb1, vb2, fs);
+        clean.configure (vb1, fs);
         // idle draw of the stages CLEAN bypasses: in the real amp every tube is lit and draws from its rail
         idleI1V2A = dcPlateCurrent (vb1, 100e3, 39e3);
         idleI2Late = dcPlateCurrent (vb2, 220e3, 1.82e3) + dcPlateCurrent (vb2, 220e3, 2.2e3) + dcPlateCurrent (vb2, 100e3, 2.2e3);
+        fadeLen = std::max (1, (int) (switchFadeMs * 1e-3 * fs));
+        fadePos = fadeLen; // no switch in progress
+        fadeW = 1.0;
+        prevMode = mode;
+        toneStack.setR (tsSrc, sourceR (mode));
 
         // let coupling / cathode caps settle
         for (int i = 0; i < (int) (fs * 0.3); ++i)
             process (0.0);
+        fresh = true;
     }
 
+    // Channel switch. The channels are separate circuits here; in the amp, relays rewire one set of tubes and every
+    // capacitor keeps its charge. So the new channel's circuit takes over the old one's state wherever the part is
+    // the same (warmFrom: tubes, coupling and cathode capacitors; started from idle instead, a high-gain channel
+    // first has to build up its bias, a transient). The rewired networks themselves still change at once, and the
+    // tone stack's source with them, so for switchFadeMs both channels run and are crossfaded (each with its channel
+    // trim) before the tone stack, whose source impedance follows.
     void setMode (int newMode)
     {
         if (newMode == mode) return;
+        if (fresh) { setModeNow (newMode); return; } // no audio since prepare(): nothing to fade from
+        if (fadePos < fadeLen && newMode == prevMode)
+        {
+            // switched back mid-fade: reverse it (the weights continue smoothly, nothing restarts)
+            std::swap (mode, prevMode);
+            fadePos = fadeLen - fadePos;
+            return;
+        }
+        if (fadePos < fadeLen && fadeW > 0.5) prevMode = mode; // a third channel mid-fade: the louder one fades out
+        else if (fadePos >= fadeLen) prevMode = mode;
         mode = newMode;
-        configureStages();
+        enterPath (mode, prevMode);
+        fadePos = 0;
     }
+
+    // Immediate switch without a crossfade, the channel's circuits from their idle point: for when nothing is
+    // audible yet (the first block after prepare)
+    void setModeNow (int newMode)
+    {
+        if (newMode == mode && fadePos >= fadeLen) return;
+        mode = prevMode = newMode;
+        resetPath (mode);
+        fadePos = fadeLen;
+        fadeW = 1.0;
+        toneStack.setR (tsSrc, sourceR (mode));
+    }
+
+    // per-channel gain at the preamp output (AmpSim's Post trim): inside the crossfade, so a switch between
+    // channels of very different trim (CLEAN 25x) does not swell the old channel mid-fade
+    void setChannelTrims (double cleanTrim, double blueTrim, double redTrim) { trim[Clean] = cleanTrim; trim[Blue] = blueTrim; trim[Red] = redTrim; }
+
+    // channel-switch crossfade length (takes effect at the next prepare)
+    double switchFadeMs = 20.0;
 
     // all 0..1 knob positions
     void setControls (double preGain, double bass, double mid, double treble, double post)
@@ -162,27 +194,31 @@ public:
     // raw pot fraction (wiper position from ground), used by the tests
     void setPreGainPot (double f) { setPreGainPots (f, f); }
 
-    // lead (VR2 Ultra Pre) and rhythm (VR1 Clean Pre) wiper fractions
+    // lead (VR2 Ultra Pre) and rhythm (VR1 Clean Pre) wiper fractions: both pots are in every channel's circuit
     void setPreGainPots (double leadPot, double rhythm)
     {
-        rhythm = std::clamp (rhythm, 0.0, 1.0);
-        lead.setGainPot (leadPot); // clamps
-        rhythmNet.setR (rhyTop, (1.0 - rhythm) * 1e6);
-        rhythmNet.setR (rhyBot, rhythm * 1e6);
+        lead.setGainPots (leadPot, rhythm);
+        blue.setGainPots (leadPot, rhythm);
+        clean.setGainPots (leadPot, rhythm);
     }
 
-    // input: guitar voltage. output: volts after tone stack and post-gain pot
+    // input: guitar voltage. output: volts after tone stack and post-gain pot (channel trim included)
     double process (double vin)
     {
+        fresh = false;
         double x;
-        if (mode == Red)
-            x = lead.process (vin);
-        else
+        if (fadePos < fadeLen)
         {
-            x = v1b.process (rhythmNet.process (v1a.process (vin), 2));
-            if (mode == Blue)
-                x = late.process (v2a.process (x));
+            ++fadePos;
+            fadeW = 0.5 - 0.5 * std::cos (kPi * (double) fadePos / (double) fadeLen); // 0 -> 1
+            if (fadePos % 32 == 1 || fadePos == fadeLen) // the tone stack's source impedance slides with the fade
+                toneStack.setR (tsSrc, sourceR (prevMode) + fadeW * (sourceR (mode) - sourceR (prevMode)));
+            const double xOld = runPath (prevMode, vin) * trim[prevMode];
+            const double xNew = runPath (mode, vin) * trim[mode];
+            x = (1.0 - fadeW) * xOld + fadeW * xNew;
         }
+        else
+            x = runPath (mode, vin) * trim[mode];
 
         // Tone stack through R89 / R24 as on the schematic. Against the NAM captures it is ~3 dB brighter above
         // 5 kHz and ~2.5 dB lower in the mids than v0.4's fitted stand-in (a 60 pF low-pass, no R24 network); no
@@ -195,37 +231,78 @@ public:
     // tone-regression reference renders (see TriodeStage::setReferencePrecision)
     void setReferencePrecision (bool on)
     {
-        for (auto* s : { &v1a, &v1b, &v2a })
-            s->setReferencePrecision (on);
-        late.setReferencePrecision (on);
         lead.setReferencePrecision (on);
+        blue.setReferencePrecision (on);
+        clean.setReferencePrecision (on);
     }
 
     // Supply rails V1+ / V2+ for the next sample (from PowerAmp5150's supply chain)
     void setRails (double v1, double v2)
     {
         lead.setRails (v1, v2);
-        v1a.setSupply (v1); v1b.setSupply (v1); v2a.setSupply (v1);
-        late.setSupply (v2);
+        blue.setRails (v1, v2);
+        clean.setRails (v1);
     }
 
-    // current drawn from V1+ / V2+ at the last sample, by the channel's active stages (the bypassed ones idle)
+    // current drawn from V1+ / V2+ at the last sample, by the channel's active stages (the bypassed ones idle);
+    // during a switch the two channels' draws are blended with the crossfade
     void railCurrents (double& i1, double& i2) const
     {
-        if (mode == Red)
+        pathCurrents (mode, i1, i2);
+        if (fadePos < fadeLen)
         {
-            i1 = lead.railCurrent1();
-            i2 = lead.railCurrent2();
-            return;
+            double o1, o2;
+            pathCurrents (prevMode, o1, o2);
+            i1 = (1.0 - fadeW) * o1 + fadeW * i1;
+            i2 = (1.0 - fadeW) * o2 + fadeW * i2;
         }
-        i1 = v1a.getPlateCurrent() + v1b.getPlateCurrent() + (mode == Blue ? v2a.getPlateCurrent() : idleI1V2A);
-        i2 = mode == Blue ? late.railCurrent() : idleI2Late;
     }
 
     double getLastPreampOut() const { return lastPreampOut; }
     int getMode() const { return mode; }
 
 private:
+    static constexpr double kPi = 3.14159265358979323846;
+
+    // one sample of a channel's preamp up to the tone stack input
+    double runPath (int m, double vin)
+    {
+        return m == Red ? lead.process (vin) : m == Blue ? blue.process (vin) : clean.process (vin);
+    }
+
+    // a channel's circuit back to its idle point
+    void resetPath (int m)
+    {
+        if (m == Red) lead.reset();
+        else if (m == Blue) blue.reset();
+        else clean.reset();
+    }
+
+    // channel m comes in: its circuit takes over the state of channel `from`'s (see setMode)
+    void enterPath (int m, int from)
+    {
+        if (m == Clean) { clean.warmFrom (from == Red ? lead : blue); return; }
+        auto& p = m == Red ? lead : blue;
+        if (from == Clean) p.warmFrom (clean);
+        else p.warmFrom (from == Red ? lead : blue);
+    }
+
+    void pathCurrents (int m, double& i1, double& i2) const
+    {
+        if (m != Clean)
+        {
+            const auto& p = m == Red ? lead : blue;
+            i1 = p.railCurrent1();
+            i2 = p.railCurrent2();
+            return;
+        }
+        i1 = clean.railCurrent1() + idleI1V2A;
+        i2 = idleI2Late;
+    }
+
+    // R89 + the output impedance of the plate that drives it in channel m
+    static double sourceR (int m) { return kR89 + (m == Clean ? kRoutV1B : kRoutV5Afb); }
+
     // idle (grid at 0 V) plate current of a cathode-biased stage
     static double dcPlateCurrent (double vb, double rp, double rk)
     {
@@ -234,36 +311,8 @@ private:
         return s.getPlateCurrent();
     }
 
-    void configureStages()
-    {
-        const bool leadMode = mode == Red; // these stages serve CLEAN / BLUE; RED runs `lead` instead
-
-        rhythmNet.setR (rhyShunt, mode == Clean ? 39e3 : 1e12); // crunch removes the R23/C53 shunt
-        toneStack.setR (tsSrc, kR89 + (mode == Clean ? kRoutV1B : kRoutV5Afb)); // which plate drives R89
-
-        TriodeConfig c;
-
-        // V1A: input jack R27 22k -> C15 0.1u -> R25 1M -> R22 68k
-        c = {}; c.vb = vb1; c.rsrc = 22e3; c.cc = 0.1e-6; c.ra = 1e6; c.rs = 68e3;
-        c.rp = 220e3; c.rk = 1.82e3; c.ck = 1e-6;
-        v1a.configure (c, fs);
-
-        // V1B: R82 470k grid feed; C26 22u fully (lead) or via R18 47k (rhythm)
-        c = {}; c.vb = vb1; c.rsrc = 470e3; c.rs = 1e3;
-        c.rp = 100e3; c.rk = 1.82e3; c.ck = 1e-6; c.ck2 = 22e-6; c.rk2 = leadMode ? 1.0 : 47e3;
-        v1b.configure (c, fs);
-
-        // V2A: C2 22n -> R6 470k -> grid, R9 1M (|| R20 220k in rhythm); 39k cold cathode
-        c = {}; c.vb = vb1; c.rsrc = kRoutV1B; c.cc = 22e-9; c.rs = 470e3; c.rb = leadMode ? 1e6 : (1e6 * 220e3) / (1e6 + 220e3);
-        c.rp = 100e3; c.rk = 39e3;
-        v2a.configure (c, fs);
-        // V2B, V5B, V5A: LateStages5150 (configured in prepare)
-    }
-
     // Thevenin output impedance of each driving plate: Rp || (rp + (mu+1) Rk_unbypassed), rp ~ 62k
-    static constexpr double kRoutV1A = 220e3 * 62e3 / (220e3 + 62e3);
     static constexpr double kRoutV1B = 100e3 * 62e3 / (100e3 + 62e3);
-    static constexpr double kRoutV2A = 100e3 * (62e3 + 101 * 39e3) / (100e3 + 62e3 + 101 * 39e3);
     static constexpr double kRoutV5A = 100e3 * (62e3 + 101 * 2.2e3) / (100e3 + 62e3 + 101 * 2.2e3);
     static constexpr double kR89 = 470e3;
     // V5A with R88 shunt feedback: output impedance ~ kRoutV5A / (1 + loop gain ~9) ~ 7 kOhm (open-loop gain
@@ -271,13 +320,15 @@ private:
     static constexpr double kRoutV5Afb = kRoutV5A / (1.0 + 26.0 * 0.346);
 
     double fs = 192000.0;
-    int mode = Red;
+    int mode = Red, prevMode = Red;
+    int fadeLen = 1, fadePos = 1; // channel-switch crossfade (fadePos >= fadeLen: none in progress)
+    double fadeW = 1.0;           // weight of `mode` (prevMode has 1 - fadeW)
+    bool fresh = false;           // prepared, no audio yet: setMode() switches at once
+    double trim[3] { 1.0, 1.0, 1.0 };
     double postGain = 0.1;
     double lastPreampOut = 0.0;
     double idleI1V2A = 0.0, idleI2Late = 0.0; // CLEAN: rail draw of the bypassed stages
 
-    LinearNetwork<5> rhythmNet;
-    int rhyTop = 0, rhyBot = 0, rhyShunt = 0;
     LinearNetwork<8> toneStack;
     int tsSrc = 0, tsTrebUp = 0, tsTrebLo = 0, tsBass = 0, tsMidUp = 0, tsMidLo = 0;
 };

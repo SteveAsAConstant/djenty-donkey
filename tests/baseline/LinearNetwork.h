@@ -1,5 +1,7 @@
 #pragma once
+#include <algorithm>
 #include <array>
+#include <cassert>
 #include <cmath>
 #include <vector>
 
@@ -12,6 +14,9 @@ constexpr int SRC = -2; // ideal input voltage source node
 // Capacitors use trapezoidal companion models, so the network is exactly the
 // bilinear-transform discretisation of the analog circuit.
 // N = number of unknown nodes (0..N-1). Rebuild is cheap, so pots can change per block.
+//
+// Per sample it runs in state-space form over z = [s; input] (s = capacitor companion currents):
+// the output node is one row times z and the states are s' = M z, both precomputed at build.
 template <int N>
 class LinearNetwork
 {
@@ -35,7 +40,7 @@ public:
 
     int addC (int a, int b, double c)
     {
-        caps.push_back ({ a, b, c, 0.0, 0.0 });
+        caps.push_back ({ a, b, c, 0.0 });
         dirty = true;
         return (int) caps.size() - 1;
     }
@@ -49,57 +54,38 @@ public:
         reset();
     }
 
-    void reset()
-    {
-        for (auto& c : caps) c.ieq = 0.0;
-        v.fill (0.0);
-    }
+    void reset() { z.fill (0.0); }
 
     double process (double input, int outNode)
     {
         if (dirty)
             build();
 
-        std::array<double, N> rhs {};
-        for (int i = 0; i < N; ++i)
-            rhs[(size_t) i] = srcCoef[(size_t) i] * input;
+        const int nz = numS + 1;
+        z[(size_t) numS] = input;
 
-        for (auto& c : caps)
-        {
-            if (c.a >= 0) rhs[(size_t) c.a] += c.ieq;
-            if (c.b >= 0) rhs[(size_t) c.b] -= c.ieq;
-        }
+        const double* r = rows[(size_t) outNode].data();
+        double y = 0.0;
+        for (int j = 0; j < nz; ++j) y += r[j] * z[(size_t) j];
 
-        for (int i = 0; i < N; ++i)
+        std::array<double, kMaxCaps> sNew;
+        for (int c = 0; c < numS; ++c)
         {
+            const double* m = M[(size_t) c].data();
             double s = 0.0;
-            for (int j = 0; j < N; ++j)
-                s += inv[(size_t) i][(size_t) j] * rhs[(size_t) j];
-            v[(size_t) i] = s;
+            for (int j = 0; j < nz; ++j) s += m[j] * z[(size_t) j];
+            sNew[(size_t) c] = s;
         }
+        std::copy (sNew.begin(), sNew.begin() + numS, z.begin());
 
-        for (auto& c : caps)
-        {
-            const double vab = nodeV (c.a, input) - nodeV (c.b, input);
-            const double i = c.gc * vab - c.ieq;
-            c.ieq = c.gc * vab + i;
-        }
-
-        return v[(size_t) outNode];
+        return y;
     }
-
-    double getNodeVoltage (int node) const { return v[(size_t) node]; }
 
 private:
-    struct Res { int a, b; double g; };
-    struct Cap { int a, b; double c, gc, ieq; };
+    static constexpr int kMaxCaps = 8;
 
-    double nodeV (int n, double input) const
-    {
-        if (n == GND) return 0.0;
-        if (n == SRC) return input;
-        return v[(size_t) n];
-    }
+    struct Res { int a, b; double g; };
+    struct Cap { int a, b; double c, gc; };
 
     void stamp (std::array<std::array<double, N>, N>& G, int a, int b, double g)
     {
@@ -151,15 +137,48 @@ private:
             }
         }
 
-        inv = I;
+        // Node voltages v = I (srcCoef input + B s), where a capacitor's companion current enters
+        // node a and leaves node b: one row per node over z = [s; input]
+        assert ((int) caps.size() <= kMaxCaps);
+        numS = std::min ((int) caps.size(), kMaxCaps);
+        const int nz = numS + 1;
+        for (int n = 0; n < N; ++n)
+        {
+            auto& row = rows[(size_t) n];
+            row.fill (0.0);
+            for (int c = 0; c < numS; ++c)
+            {
+                if (caps[(size_t) c].a >= 0) row[(size_t) c] += I[(size_t) n][(size_t) caps[(size_t) c].a];
+                if (caps[(size_t) c].b >= 0) row[(size_t) c] -= I[(size_t) n][(size_t) caps[(size_t) c].b];
+            }
+            for (int j = 0; j < N; ++j)
+                row[(size_t) numS] += I[(size_t) n][(size_t) j] * srcCoef[(size_t) j];
+        }
+        auto nodeRow = [&] (int n, int j)
+        {
+            if (n == GND) return 0.0;
+            if (n == SRC) return j == numS ? 1.0 : 0.0;
+            return rows[(size_t) n][(size_t) j];
+        };
+
+        // trapezoidal companion:  ieq' = 2 gc (v(a) - v(b)) - ieq
+        for (int c = 0; c < numS; ++c)
+        {
+            const auto& cap = caps[(size_t) c];
+            for (int j = 0; j < nz; ++j)
+                M[(size_t) c][(size_t) j] = 2.0 * cap.gc * (nodeRow (cap.a, j) - nodeRow (cap.b, j));
+            M[(size_t) c][(size_t) c] -= 1.0;
+        }
         dirty = false;
     }
 
     std::vector<Res> resistors;
     std::vector<Cap> caps;
-    std::array<std::array<double, N>, N> inv {};
     std::array<double, N> srcCoef {};
-    std::array<double, N> v {};
+    int numS = 0;
+    std::array<std::array<double, kMaxCaps + 1>, N> rows {};
+    std::array<std::array<double, kMaxCaps + 1>, kMaxCaps> M {};
+    std::array<double, kMaxCaps + 1> z {}; // [s; input]
     bool dirty = true;
 };
 

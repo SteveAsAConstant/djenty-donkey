@@ -3,7 +3,7 @@
 #include <cmath>
 #include "TriodeNetwork.h"
 
-namespace vamp
+namespace vamp_baseline
 {
 // The whole 5150 lead preamp (schematic pages 1-2), input jack to C58, solved as one circuit (TriodeNetwork, 6
 // triodes, 12 ports). Every stage loads the ones next to it: grid current through the 470k / 1M feeds and the
@@ -152,6 +152,9 @@ public:
         return out;
     }
 
+    // back to the DC operating point of configure() (channel switches; no allocation)
+    void reset() { net.resetToIdle(); lastIn = 0.0; out = 0.0; }
+
     // supply rails per sample (V1+: V1A V1B V2A, V2+: V2B V5B V5A): they are source inputs, no rebuild
     void setRails (double v1, double v2)
     {
@@ -191,4 +194,4 @@ private:
     double lastIn = 0.0, out = 0.0;
 };
 
-} // namespace vamp
+} // namespace vamp_baseline

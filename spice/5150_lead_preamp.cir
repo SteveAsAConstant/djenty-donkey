@@ -1,6 +1,7 @@
 * EVH 5150 LEAD preamp: input -> V1A -> lead gain -> V1B -> V2A -> V2B -> V5B -> V5A -> (to tone stack)
 * Reference for the C++ component-level model. Values from docs/5150_schematic_notes.md
 * Rails: the factory supply chain at idle (Supply5150: V1+ 305.7 V, V2+ 322.1 V); V5A loaded by the tone-stack feed.
+* Relays in their LEAD positions (factory schematic sheet 1): R18 in series with C26, the rhythm network loading C6.
 .include 12AX7.inc
 .param gain=0.5
 .param amp=0.01
@@ -32,13 +33,26 @@ RVR2b w 0 {1Meg*gain+10}
 C19 n2 w 1n
 R40 n2 w 1Meg
 
-* ---- V1B ----
+* ---- rhythm pre-gain network: not selected in LEAD, but on C6 all the same (crunch off: K4 at rest) ----
+R19 n1 na 470k
+C51 n1 na 270p
+R21 na nb 1Meg
+C10 na nc10 470p
+R75 nc10 nb 2.2Meg
+RVR1a nb rw {1Meg*(1-gain)+10}
+RVR1b rw 0 {1Meg*gain+10}
+C27 nb rw 180p
+R23 nb nc63 39k
+C63 nc63 0 0.1u
+
+* ---- V1B (K1A open in LEAD: C26 through R18) ----
 R82 w g1b 470k
 X1B p1b g1b k1b 12AX7
 R3  vb1 p1b 100k
 R17 k1b 0 1.82k
 C4  k1b 0 1u
-C26 k1b 0 22u
+C26 k1b nc26 22u
+R18 nc26 0 47k
 C2  p1b n3 22n
 R6  n3 g2a 470k
 R9  g2a 0 1Meg

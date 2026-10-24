@@ -1,0 +1,114 @@
+* Whole 5150 preamp (factory schematic sheet 1), fully coupled, LEAD (lead=1) or rhythm with crunch (lead=0), 110 Hz
+* input sweep: harmonics of all six plates. Reference for Source/dsp/FullPreamp5150.h: the 12AX7 here uses exactly
+* the C++ device equations (12AX7_cpp.inc), so differences come from the circuit solution only.
+* Relay contacts are resistors: closed 1m, open 1T. K1 / K2 energized in LEAD, K4 (and the S1C section of the
+* crunch switch) with crunch; in LEAD the crunch switch is taken as off. gl / gr: VR2 (lead) / VR1 (rhythm) wiper
+* fractions from ground. Rails: the factory supply chain at idle. See docs/spice_reference_lead.md.
+.include 12AX7_cpp.inc
+.param lead=1
+.param gl=0.0132
+.param gr=0.3
+.param amp=0.01
+.param ON=1m OFF=1T
+.param kL={if(lead,ON,OFF)} kR={if(lead,OFF,ON)}
+
+VB1 vb1 0 305.7
+VB2 vb2 0 322.1
+VIN src 0 SINE(0 {amp} 110)
+
+* ---- input ----
+R27 src nin 22k
+C20 nin 0 39p
+C15 nin ng1 0.1u
+R25 ng1 0 1Meg
+R22 ng1 g1a 68k
+
+* ---- V1A ----
+X1A p1a g1a k1a 12AX7C
+R2  vb1 p1a 220k
+R12 k1a 0 1.82k
+C3  k1a 0 1u
+C6  p1a n1 22n
+
+* ---- lead pre-gain network (always on C6) ----
+R29 n1 n2 470k
+C17 n1 n2 2.2n
+R41 n2 0 1Meg
+RVR2a n2 lw {1Meg*(1-gl)+10}
+RVR2b lw 0 {1Meg*gl+10}
+C19 n2 lw 1n
+R40 n2 lw 1Meg
+
+* ---- rhythm pre-gain network (always on C6); K4A, S1C, K4B: crunch = not lead here ----
+RK4r n1 k4r {kL}
+R19 k4r na 470k
+C51 k4r na 270p
+RK4c n1 k4c {kR}
+R43 k4c na 2.2Meg
+C13 k4c na 470p
+R21 na nb 1Meg
+C10 na nc10 470p
+R75 nc10 nb {if(lead,2.2Meg,1m)}
+RVR1a nb rw {1Meg*(1-gr)+10}
+RVR1b rw 0 {1Meg*gr+10}
+C27 nb rw 180p
+RK4B nb nk4b {kL}
+R23 nk4b nc63 39k
+C63 nc63 0 0.1u
+
+* ---- K2A -> R82 -> V1B; K1A: R18 ----
+R82a lw g1b {if(lead,470k,1T)}
+R82b rw g1b {if(lead,1T,470k)}
+X1B p1b g1b k1b 12AX7C
+R3  vb1 p1b 100k
+R17 k1b 0 1.82k
+C4  k1b 0 1u
+C26 k1b nc26 22u
+R18 nc26 0 {if(lead,47k,1m)}
+C2  p1b n3 22n
+R6  n3 g2a 470k
+R9  g2a 0 1Meg
+R20 g2a 0 {if(lead,1T,220k)}
+
+* ---- V2A (cold clipper, 39k unbypassed) ----
+X2A p2a g2a k2a 12AX7C
+R1  vb1 p2a 100k
+R15 k2a 0 39k
+C1  p2a n4 22n
+C48 n4 0 1n
+R11 n4 0 330k
+R7  n4 g2b 220k
+
+* ---- V2B ----
+X2B p2b g2b k2b 12AX7C
+R4  vb2 p2b 220k
+R13 k2b 0 1.82k
+C5  k2b 0 1u
+R32 p2b n5 1Meg
+C57 n5 g5b 22n
+R101 g5b 0 100k
+
+* ---- V5B ----
+X5B p5b g5b k5b 12AX7C
+R96 vb2 p5b 220k
+R102 k5b 0 2.2k
+R87 p5b n6 1Meg
+C56 n6 g5a 22n
+R91 g5a 0 1Meg
+
+* ---- V5A (shunt feedback stage), load R89 -> R24 33k || (C59 10n + R94 47k) ----
+X5A p5a g5a k5a 12AX7C
+R86 vb2 p5a 100k
+R93 k5a 0 2.2k
+C58 p5a out 22n
+R88 g5a out 1Meg
+R89 out ts 470k
+R24 ts 0 33k
+C59 ts c59 10n
+R94 c59 0 47k
+
+.options plotwinsize=0 numdgt=15 maxstep=2u
+.tran 0 1.5 1.3 2u
+.step param amp list 0.001 0.004 0.016 0.0632 0.25 1.0
+.four 110 6 20 V(p1a) V(p1b) V(p2a) V(p2b) V(p5b) V(p5a)
+.end

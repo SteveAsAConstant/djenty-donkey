@@ -12,8 +12,9 @@ constexpr double kInputVolts = 1.0;          // 0 dBFS input = 1 V peak at the g
 constexpr double kSpeakerToDigital = 1.0 / 100.0; // speaker volts -> digital (max ~56 V -> ~0.56)
 
 // Per-channel calibration of the post-gain pot (the real amp has separate Clean / Lead Post pots).
-// Measured with tests/dsp_test ("chain"): CLEAN needs far more post gain than BLUE/RED.
-constexpr double kChannelPost[3] = { 25.0, 1.0, 1.0 };
+// Measured with tests/dsp_test ("chain"): CLEAN needs far more post gain than BLUE/RED. 54 since the factory rhythm
+// network (R21 1M ahead of the R23 / C63 shunt), 6.7 dB more attenuation than before: CLEAN as loud as in v0.5.0-beta.
+constexpr double kChannelPost[3] = { 54.0, 1.0, 1.0 };
 
 class AmpSim
 {
@@ -43,6 +44,7 @@ public:
         osRate = sampleRate * (1 << stages);
 
         drive.prepare (osRate);
+        preamp.setChannelTrims (kChannelPost[0], kChannelPost[1], kChannelPost[2]); // applied inside the switch crossfade
         preamp.prepare (osRate);
         power.prepare (osRate);
         // settle preamp and power amp together on the shared supply, so the rails start at the loaded DC point
@@ -62,10 +64,11 @@ public:
         dcBlock.reset();
         oversampler->reset();
         knobsSet = false;
+        firstBlock = true;
         knobCoef = 1.0 - std::exp (-kControlInterval / (kKnobSmoothMs * 1e-3 * osRate));
     }
 
-    // Knob smoothing time constant (ms); 0 = apply each block's values at once (the pre-v0.5 behaviour, tests)
+    // Knob smoothing time constant (ms); 0 = no one-pole, each knob only ramps linearly across the host block (tests)
     void setKnobSmoothing (double ms)
     {
         knobCoef = ms <= 0.0 ? 1.0 : 1.0 - std::exp (-kControlInterval / (ms * 1e-3 * osRate));
@@ -79,23 +82,27 @@ public:
     void process (float* data, int numSamples, const Settings& s)
     {
         const int channel = juce::jlimit (0, 2, s.channel);
-        preamp.setMode (channel);
+        if (firstBlock) preamp.setModeNow (channel); // nothing audible yet: no switch crossfade
+        else preamp.setMode (channel);
+        firstBlock = false;
         if (s.boostOn && (! lastBoostOn || s.boostAttack != boostAttack)) // switches: no smoothing
             drive.setControls (knob[7], knob[8], s.boostAttack, knob[9]);
         lastBoostOn = s.boostOn;
         boostAttack = s.boostAttack;
         const double target[kKnobs] = { s.gain, s.bass, s.mid, s.treble, s.master, s.presence, s.resonance,
                                         s.boostDrive, s.boostBright, s.boostLevel };
+        std::copy (knobTarget, knobTarget + kKnobs, knobFrom); // the last block's values: the target ramps from there
         std::copy (target, target + kKnobs, knobTarget);
         if (! knobsSet)
         {
             std::copy (target, target + kKnobs, knob);
+            std::copy (target, target + kKnobs, knobFrom);
             knobsSet = true;
             applyKnobs (true);
         }
         dcBlock.set (10.0, osRate);
 
-        const double post = kChannelPost[channel];
+
         volume.setTargetValue (std::pow (10.0, s.volumeDb / 20.0) * kSpeakerToDigital);
 
         float* chans[] = { data };
@@ -109,14 +116,14 @@ public:
             if (++controlPhase >= kControlInterval)
             {
                 controlPhase = 0;
-                stepKnobs (s.boostOn);
+                stepKnobs (s.boostOn, (double) (i + 1) / (double) n);
             }
             double v = (double) x[i] * kInputVolts;
 
             if (s.boostOn)
                 v = drive.process (v);
 
-            v = processAmp5150 (preamp, power, v, post); // volts across the speaker (preamp on the power amp's rails)
+            v = processAmp5150 (preamp, power, v, 1.0); // volts across the speaker (preamp on the power amp's rails; channel trim in the preamp)
             x[i] = dcBlock.process ((float) (v * volume.getNextValue()));
         }
 
@@ -127,21 +134,25 @@ private:
     // Knob smoothing. The knobs reach process() once per host block; applied as one jump, every block boundary
     // is a step in the circuit (zipper noise / clicks while a knob moves, coarser with larger buffers). Each knob
     // follows its target with a one-pole (kKnobSmoothMs) instead, and the circuit is updated every
-    // kControlInterval oversampled samples (~0.1 ms) while one is still moving. Gain and Presence / Resonance sit
-    // inside DK circuits (lead preamp, power amp): their matrices are rebuilt then (DKCircuit: allocation-free), so
-    // they follow every kHeavyEvery-th step only (~0.36 ms: still ~55 steps per 20 ms ramp, a quarter of the CPU).
+    // kControlInterval oversampled samples (~0.1 ms) while one is still moving. The target itself ramps linearly
+    // across the block from the last block's value: a one-pole on the raw per-block staircase still moves in
+    // block-rate jerks (Resonance swept with 512-sample blocks: -47 dB of sidebands vs -59 dB with a smooth target).
+    // Gain and Presence / Resonance sit inside DK circuits (lead preamp, power amp): their matrices are rebuilt then
+    // (DKCircuit: allocation-free), so they follow every kHeavyEvery-th step only (~0.36 ms: still ~55 steps per
+    // 20 ms ramp, a quarter of the CPU).
     static constexpr int kKnobs = 10, kControlInterval = 32, kHeavyEvery = 4;
     static constexpr double kKnobSmoothMs = 20.0;
     static constexpr int kHeavy[3] = { 0, 5, 6 }; // Gain, Presence, Resonance
 
-    void stepKnobs (bool boostOn)
+    // frac: position in the current host block (0..1], where the target is between knobFrom and knobTarget
+    void stepKnobs (bool boostOn, double frac)
     {
         bool moving = false;
         for (int k = 0; k < kKnobs; ++k)
         {
-            const double d = knobTarget[k] - knob[k];
+            const double t = knobFrom[k] + frac * (knobTarget[k] - knobFrom[k]), d = t - knob[k];
             if (d == 0.0) continue;
-            knob[k] = std::abs (d) < 1e-5 ? knobTarget[k] : knob[k] + knobCoef * d;
+            knob[k] = std::abs (d) < 1e-5 ? t : knob[k] + knobCoef * d;
             moving = true;
         }
         const bool heavyStep = ++heavyPhase >= kHeavyEvery;
@@ -162,10 +173,10 @@ private:
             drive.setControls (knob[7], knob[8], boostAttack, knob[9]);
     }
 
-    double knob[kKnobs] {}, knobTarget[kKnobs] {}, knobCoef = 1.0;
+    double knob[kKnobs] {}, knobTarget[kKnobs] {}, knobFrom[kKnobs] {}, knobCoef = 1.0;
     double heavyApplied[3] {}; // Gain, Presence, Resonance as last applied
     int heavyPhase = 0;
-    bool knobsSet = false, lastBoostOn = false;
+    bool knobsSet = false, lastBoostOn = false, firstBlock = true;
     int controlPhase = 0, boostAttack = 3;
 
     static constexpr double kMinOsRate = 352800.0; // 8 x 44.1 kHz

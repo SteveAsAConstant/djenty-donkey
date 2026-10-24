@@ -307,6 +307,9 @@ public:
     void setSupply (double vb) { cfg.vb = vb; }
     double getPlateCurrent() const { return (cfg.vb - vP) / cfg.rp; } // drawn from the rail (through the plate resistor)
 
+    // back to the quiescent point at the present B+ (channel switches; no allocation)
+    void reset() { initDC(); }
+
     double getVk() const { return vK; }
     double getVp() const { return vP; }
     double getVpDC() const { return vPdc; }
