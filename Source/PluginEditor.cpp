@@ -239,10 +239,22 @@ VibeAmpEditor::VibeAmpEditor (VibeAmpProcessor& p) : AudioProcessorEditor (&p), 
     compSec->add<Knob> (s, ids::compMakeup, "Makeup", colours::yellow);
 
     boostSec = std::make_unique<Section> ("PRECISION DRIVE", colours::clean, &s, ids::boostOn);
-    boostSec->add<Knob> (s, ids::boostLevel, "Volume", colours::clean);
+    auto* boostModelSel = boostSec->add<ChoiceButtons> (s, ids::boostModel, "Model", juce::StringArray { "PRECISION", "TS9" }, colours::clean);
+    boostModelSel->setTooltip ("PRECISION: Horizon Devices Precision Drive (tight, Attack sets the low end).  "
+                               "TS9: Ibanez Tube Screamer (mid hump, smoother).");
+    auto* boostLevelKnob = boostSec->add<Knob> (s, ids::boostLevel, "Volume", colours::clean);
     boostSec->add<Knob> (s, ids::boostDrive, "Drive", colours::clean);
-    boostSec->add<Knob> (s, ids::boostTone, "Bright", colours::clean);
-    boostSec->add<Knob> (s, ids::boostAttack, "Attack", colours::clean);
+    auto* boostToneKnob = boostSec->add<Knob> (s, ids::boostTone, "Bright", colours::clean);
+    auto* boostAttackKnob = boostSec->add<Knob> (s, ids::boostAttack, "Attack", colours::clean);
+    // the two pedals share the knobs: the names follow the selected one, the TS9 has no Attack
+    boostModelSel->setOnChange ([this, boostLevelKnob, boostToneKnob, boostAttackKnob] (int model)
+    {
+        const bool ts9 = model == 1;
+        boostSec->setTitle (ts9 ? "TS9 TUBE SCREAMER" : "PRECISION DRIVE");
+        boostLevelKnob->setLabel (ts9 ? "Level" : "Volume");
+        boostToneKnob->setLabel (ts9 ? "Tone" : "Bright");
+        boostAttackKnob->setActive (! ts9);
+    });
 
     // ---- row 2: amp ----
     ampSec = std::make_unique<Section> ("DONKEY HEAD  //  515 HIGH GAIN", colours::red);
@@ -361,7 +373,7 @@ void VibeAmpEditor::resized()
 
     layoutRow (row1, { { inSec.get(), 2.0f }, { inGateSec.get(), 2.0f }, { gateSec.get(), 6.0f },
                        { pitchSec.get(), 2.2f }, { compSec.get(), 5.0f } });
-    layoutRow (row2, { { boostSec.get(), 4.0f }, { ampSec.get(), 8.5f } });
+    layoutRow (row2, { { boostSec.get(), 5.0f }, { ampSec.get(), 8.5f } });
     layoutRow (row3, { { cabSec.get(), 3.0f }, { eqSec.get(), 7.0f } });
     layoutRow (row4, { { phaserSec.get(), 4.0f }, { delaySec.get(), 4.0f },
                        { reverbSec.get(), 4.0f }, { outSec.get(), 2.0f } });

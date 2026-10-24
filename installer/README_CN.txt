@@ -41,8 +41,12 @@ TRANSPOSE    移调 ±12 半音（降调弹奏用）
              LIVE：低延迟（约 6~15ms），现场弹奏用
              HQ：和弦最干净，约 43ms 延迟（DAW 会自动补偿），录音用
 COMPRESSOR   压缩
-PRECISION DRIVE  前级 Drive（基于 Precision Drive 电路）
-             经典用法：Drive 0、Volume 8~10、Attack 2~3 → 收紧低频
+DRIVE        前级过载踏板，Model 按钮二选一：
+             PRECISION：基于 Precision Drive 电路，更紧、增益更高，Attack 选低频松紧
+               经典用法：Drive 0、Volume 8~10、Attack 2~3 → 收紧低频
+             TS9：基于 Ibanez TS9 Tube Screamer 电路，中频凸起、更圆润（没有 Attack）
+               经典用法：Drive 0~2、Level 8~10、Tone 5~6
+             两个都按原机电路逐个元件模拟，切换时无爆音
 DONKEY HEAD  箱头：CLEAN / BLUE / RED 三通道（5150 / 6505 元件级模拟，含功放）
              Gain / Master 的刻度按真实 6505 校准过（v0.4），和真机旋钮读数一致
              Master 推功放：3 以下功放基本干净，3~5 逐渐压缩，7 以上完全饱和

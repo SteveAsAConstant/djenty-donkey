@@ -28,6 +28,7 @@ public:
         bool boostOn = false;
         float boostDrive = 0.0f, boostBright = 0.5f, boostLevel = 0.7f;
         int boostAttack = 3; // 0..7
+        int boostModel = 0;  // 0 Precision Drive, 1 TS9
     };
 
     void prepare (double sampleRate, int maxBlock)
@@ -44,6 +45,8 @@ public:
         osRate = sampleRate * (1 << stages);
 
         drive.prepare (osRate);
+        ts9.prepare (osRate);
+        modelStep = 1.0 / (0.02 * osRate); // drive model switch: 20 ms crossfade
         preamp.setChannelTrims (kChannelPost[0], kChannelPost[1], kChannelPost[2]); // applied inside the switch crossfade
         preamp.prepare (osRate);
         power.prepare (osRate);
@@ -65,6 +68,7 @@ public:
         oversampler->reset();
         knobsSet = false;
         firstBlock = true;
+        firstModel = true;
         knobCoef = 1.0 - std::exp (-kControlInterval / (kKnobSmoothMs * 1e-3 * osRate));
     }
 
@@ -86,7 +90,12 @@ public:
         else preamp.setMode (channel);
         firstBlock = false;
         if (s.boostOn && (! lastBoostOn || s.boostAttack != boostAttack)) // switches: no smoothing
+        {
             drive.setControls (knob[7], knob[8], s.boostAttack, knob[9]);
+            ts9.setControls (knob[7], knob[8], knob[9]);
+        }
+        modelTarget = s.boostModel == 1 ? 1.0 : 0.0;
+        if (firstModel) { modelMix = modelTarget; firstModel = false; }
         lastBoostOn = s.boostOn;
         boostAttack = s.boostAttack;
         const double target[kKnobs] = { s.gain, s.bass, s.mid, s.treble, s.master, s.presence, s.resonance,
@@ -120,8 +129,13 @@ public:
             }
             double v = (double) x[i] * kInputVolts;
 
-            if (s.boostOn)
-                v = drive.process (v);
+            if (s.boostOn) // both pedals run, so switching between them is a crossfade, not a restart
+            {
+                if (modelMix != modelTarget)
+                    modelMix = modelTarget > modelMix ? std::min (modelTarget, modelMix + modelStep) : std::max (modelTarget, modelMix - modelStep);
+                const double w = 0.5 - 0.5 * std::cos (kPi * modelMix);
+                v = (1.0 - w) * drive.process (v) + w * ts9.process (v);
+            }
 
             v = processAmp5150 (preamp, power, v, 1.0); // volts across the speaker (preamp on the power amp's rails; channel trim in the preamp)
             x[i] = dcBlock.process ((float) (v * volume.getNextValue()));
@@ -170,13 +184,17 @@ private:
         preamp.setControls (heavyApplied[0], knob[1], knob[2], knob[3], knob[4]);
         power.setControls (heavyApplied[1], heavyApplied[2]);
         if (boostOn)
+        {
             drive.setControls (knob[7], knob[8], boostAttack, knob[9]);
+            ts9.setControls (knob[7], knob[8], knob[9]);
+        }
     }
 
     double knob[kKnobs] {}, knobTarget[kKnobs] {}, knobFrom[kKnobs] {}, knobCoef = 1.0;
     double heavyApplied[3] {}; // Gain, Presence, Resonance as last applied
     int heavyPhase = 0;
-    bool knobsSet = false, lastBoostOn = false, firstBlock = true;
+    bool knobsSet = false, lastBoostOn = false, firstBlock = true, firstModel = true;
+    double modelMix = 0.0, modelTarget = 0.0, modelStep = 1e-4; // drive model crossfade, 0 = Precision Drive
     int controlPhase = 0, boostAttack = 3;
 
     static constexpr double kMinOsRate = 352800.0; // 8 x 44.1 kHz
@@ -184,6 +202,7 @@ private:
     double osRate = 176400.0;
 
     PrecisionDrive drive;
+    TubeScreamer9 ts9;
     Preamp5150 preamp;
     PowerAmp5150 power;
     OnePoleHP dcBlock;

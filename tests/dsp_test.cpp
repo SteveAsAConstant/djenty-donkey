@@ -98,6 +98,22 @@ static void driveSanity()
             }
             std::printf ("drive %.1f attack %d -> out %.3f Vpp\n", drv, atk + 1, o.pp());
         }
+
+    std::printf ("\n== TS9: 0.2 V peak 1 kHz in, level 10 ==\n");
+    for (double drv : { 0.0, 0.5, 1.0 })
+        for (double tone : { 0.0, 1.0 })
+        {
+            TubeScreamer9 ts;
+            ts.prepare (fs);
+            ts.setControls (drv, tone, 1.0);
+            Stat o;
+            for (int i = 0; i < (int) (fs * 0.1); ++i)
+            {
+                const double y = ts.process (0.2 * std::sin (2.0 * kPi * 1000.0 * i / fs));
+                if (i > (int) (fs * 0.05)) o.add (y);
+            }
+            std::printf ("drive %.1f tone %.0f -> out %.3f Vpp\n", drv, tone * 10.0, o.pp());
+        }
 }
 
 static void cpuBenchmark()
@@ -422,6 +438,11 @@ static void cpuModules()
         PrecisionDrive pd; pd.prepare (os); pd.setControls (0.5, 0.5, 3, 0.7);
         auto fn = [&] (int i) { return pd.process (diOs[(size_t) i]); };
         timeModule ("Precision Drive (4x)", os, 256, nOs, loop (fn));
+    }
+    {
+        TubeScreamer9 ts; ts.prepare (os); ts.setControls (0.5, 0.5, 0.7);
+        auto fn = [&] (int i) { return ts.process (diOs[(size_t) i]); };
+        timeModule ("TS9 (4x)", os, 256, nOs, loop (fn));
     }
 
     const char* names[] = { "Preamp CLEAN gain 0.7 (4x)", "Preamp BLUE  gain 0.7 (4x)", "Preamp RED   gain 0.7 (4x)" }; // Preamp5150::Mode order

@@ -15,9 +15,11 @@ included in the "source" folder of the distribution package.
 Circuit references (used for modelling only, no code taken):
 - Peavey EVH 5150 schematic (public service schematic)
 - PedalPCB "Dwarven Hammer" build document (Precision Drive circuit)
+- tonepad "El Griton 2.2" TS-808 / TS-9 layout (TS9 circuit)
 - Norman Koren, "Improved VT models for SPICE simulations" (12AX7 model)
 
-"5150", "6505", "Peavey", "Horizon Devices" and "Precision Drive" are
-trademarks of their respective owners. They are used only to describe the
-circuits that inspired this model; this program is not affiliated with or
+"5150", "6505", "Peavey", "Horizon Devices", "Precision Drive", "Ibanez",
+"TS9" and "Tube Screamer" are trademarks of their respective owners. They
+are used only to describe the circuits that inspired this model; this
+program is not affiliated with or
 endorsed by them.

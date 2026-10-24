@@ -1,0 +1,63 @@
+* Horizon Devices Precision Drive, from PedalPCB's "Dwarven Hammer" build document (rev 12.29.20, schematic page 3).
+* Reference for Source/dsp/PrecisionDrive.h. IC1 JRC4558: LTspice's universal op-amp (level 2) with datasheet values
+* (Avol 100 dB, GBW 3 MHz, slew 1 V/us, output to within ~1.5 V of the 9 V rails); ideal=1 makes it near ideal
+* (GBW 3 GHz, no slew limit, rail-to-rail) to separate the op-amp's part from the rest.
+* The including file sets .param ideal (0 or 1). Params: d = DRIVE rotation, catt = ATTACK cap, b = BRIGHT wiper fraction from the R7 / C7 node end, vol = VOLUME
+* rotation (A tapers as (10^(2x)-1)/99), amp / freq = the input sine.
+.lib UniversalOpAmp2.lib
+.param d=0.5 catt=100n vol=1
+.param td={(pow(10,2*d)-1)/99} tv={(pow(10,2*vol)-1)/99}
+.param gbw={if(ideal,3G,3Meg)} sr={if(ideal,1T,1Meg)} rl={if(ideal,0,1.5)}
+
+VCC vcc 0 9
+VREF vref 0 4.5
+VIN src 0 SINE(0 {amp} {freq}) AC 1
+
+* ---- input: R9 1M, C2 27n, R5 1k -> Q1 emitter follower (R1 510k bias, R10 10k) -> C3 1u, R2 10k ----
+R9 src 0 1Meg
+C2 src n2 27n
+R5 n2 b1 1k
+R1 vref b1 510k
+Q1 vcc b1 e1 2N3904
+R10 e1 0 10k
+C3 e1 inp 1u
+R2 vref inp 10k
+
+* ---- IC1.1 clipper: feedback D1 / D2 1N4148, C8 47p, R15 10k + DRIVE A500k; leg (ATTACK cap || C9 120p) + R16 1k ----
+XU1 inp nneg vcc 0 o1 level2 Avol=100k GBW={gbw} Slew={sr} Rail={rl}
+D1 nneg o1 1N4148
+D2 o1 nneg 1N4148
+C8 o1 nneg 47p
+R15 o1 nrf 10k
+RDRV nrf nneg {500k*td+1}
+CATT nneg nbus {catt}
+C9 nneg nbus 120p
+R16 nbus vref 1k
+
+* ---- R7 1k -> C7 220n to ground, R3 10k to Vref -> IC1.2 Bright stage (B5k, C5 220n + R12 220R, R8 3k9) ----
+R7 o1 nt 1k
+C7 nt 0 220n
+R3 vref nt 10k
+XU2 nt nm vcc 0 o2 level2 Avol=100k GBW={gbw} Slew={sr} Rail={rl}
+R8 o2 nm 3.9k
+RBa nt nw {5k*b+1}
+RBb nw nm {5k*(1-b)+1}
+C5 nw nc5 220n
+R12 nc5 0 220
+
+* ---- C1 1u, R4 1k -> VOLUME A100k (to Vref) -> C4 100n -> Q2 emitter follower -> R11 100R, C6 10u -> out (R14 10k) ----
+C1 o2 nc1 1u
+R4 nc1 nvt 1k
+RVa nvt nvw {100k*(1-tv)+1}
+RVb nvw vref {100k*tv+1}
+C4 nvw b2 100n
+R6 vref b2 510k
+Q2 vcc b2 e2 2N3904
+R13 e2 0 10k
+R11 e2 nc6 100
+C6 nc6 out 10u
+R14 out 0 10k
+
+.model 2N3904 NPN(IS=1E-14 VAF=100 Bf=300 IKF=0.4 XTB=1.5 BR=4 CJC=4E-12 CJE=8E-12 RB=20 RC=0.1 RE=0.1 TR=250E-9 TF=350E-12 ITF=1 VTF=2 XTF=3)
+.model 1N4148 D(Is=2.52n Rs=.568 N=1.752 Cjo=4p M=.4 tt=20n)
+.end

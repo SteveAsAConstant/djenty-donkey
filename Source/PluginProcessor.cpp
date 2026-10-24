@@ -25,7 +25,7 @@ VibeAmpProcessor::VibeAmpProcessor()
     pCompOn = get (ids::compOn); pCompThresh = get (ids::compThresh); pCompRatio = get (ids::compRatio);
     pCompAttack = get (ids::compAttack); pCompRelease = get (ids::compRelease); pCompMakeup = get (ids::compMakeup);
     pBoostOn = get (ids::boostOn); pBoostDrive = get (ids::boostDrive); pBoostTone = get (ids::boostTone);
-    pBoostLevel = get (ids::boostLevel); pBoostAttack = get (ids::boostAttack);
+    pBoostLevel = get (ids::boostLevel); pBoostAttack = get (ids::boostAttack); pBoostModel = get (ids::boostModel);
     pChannel = get (ids::channel); pAmpGain = get (ids::ampGain); pBass = get (ids::bass); pMid = get (ids::mid);
     pTreble = get (ids::treble); pPresence = get (ids::presence); pResonance = get (ids::resonance);
     pMaster = get (ids::master);
@@ -156,6 +156,7 @@ void VibeAmpProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Mid
     ampSettings.boostBright = pBoostTone->load() * 0.1f;
     ampSettings.boostLevel = pBoostLevel->load() * 0.1f;
     ampSettings.boostAttack = juce::roundToInt (pBoostAttack->load()) - 1;
+    ampSettings.boostModel = juce::roundToInt (pBoostModel->load());
 
     cabOn = pCabOn->load() > 0.5f;
 

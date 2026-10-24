@@ -115,6 +115,15 @@ public:
         repaint();
     }
 
+    void setLabel (const juce::String& name) { label.setText (name, juce::dontSendNotification); }
+
+    // greyed out and not editable (a control the current mode does not use)
+    void setActive (bool active)
+    {
+        slider.setEnabled (active);
+        setAlpha (active ? 1.0f : 0.35f);
+    }
+
     void resized() override
     {
         auto b = getLocalBounds();
@@ -388,6 +397,7 @@ public:
 
     juce::Colour getAccent() const { return accent; }
     int getNumItems() const { return items.size(); }
+    void setTitle (const juce::String& t) { title = t; repaint(); }
 
     void paint (juce::Graphics& g) override
     {
@@ -461,9 +471,19 @@ public:
             {
                 const int idx = juce::jlimit (0, buttons.size() - 1, juce::roundToInt (v));
                 buttons[idx]->setToggleState (true, juce::dontSendNotification);
+                current = idx;
+                if (onChange) onChange (idx);
             });
             attachment->sendInitialUpdate();
         }
+    }
+
+    // called on the message thread whenever the choice changes (UI, automation, preset); setOnChange calls it once
+    // with the current choice
+    void setOnChange (std::function<void (int)> f)
+    {
+        onChange = std::move (f);
+        if (onChange) onChange (current);
     }
 
     void resized() override
@@ -481,6 +501,8 @@ private:
     juce::Label label;
     juce::OwnedArray<juce::TextButton> buttons;
     std::unique_ptr<juce::ParameterAttachment> attachment;
+    std::function<void (int)> onChange;
+    int current = 0;
 };
 
 // ---------------------------------------------------------------------------

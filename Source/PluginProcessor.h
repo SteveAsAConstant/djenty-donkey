@@ -69,7 +69,7 @@ private:
     std::atomic<float>* pCompOn {}; std::atomic<float>* pCompThresh {}; std::atomic<float>* pCompRatio {};
     std::atomic<float>* pCompAttack {}; std::atomic<float>* pCompRelease {}; std::atomic<float>* pCompMakeup {};
     std::atomic<float>* pBoostOn {}; std::atomic<float>* pBoostDrive {}; std::atomic<float>* pBoostTone {};
-    std::atomic<float>* pBoostLevel {}; std::atomic<float>* pBoostAttack {};
+    std::atomic<float>* pBoostLevel {}; std::atomic<float>* pBoostAttack {}; std::atomic<float>* pBoostModel {};
     std::atomic<float>* pChannel {}; std::atomic<float>* pAmpGain {}; std::atomic<float>* pBass {};
     std::atomic<float>* pMid {}; std::atomic<float>* pTreble {}; std::atomic<float>* pPresence {};
     std::atomic<float>* pResonance {}; std::atomic<float>* pMaster {};

@@ -26,6 +26,7 @@ inline constexpr const char* boostDrive  = "boostDrive";
 inline constexpr const char* boostTone   = "boostTone";
 inline constexpr const char* boostLevel  = "boostLevel";
 inline constexpr const char* boostAttack = "boostAttack";
+inline constexpr const char* boostModel  = "boostModel";
 inline constexpr const char* channel     = "channel";
 inline constexpr const char* ampGain     = "ampGain";
 inline constexpr const char* bass        = "bass";
@@ -115,6 +116,8 @@ inline juce::AudioProcessorValueTreeState::ParameterLayout createParameterLayout
     layout.add (makeFloat (ids::boostTone, "Drive Bright", 0.0f, 10.0f, 5.0f));
     layout.add (makeFloat (ids::boostLevel, "Drive Volume", 0.0f, 10.0f, 7.0f));
     layout.add (std::make_unique<juce::AudioParameterInt> (juce::ParameterID { ids::boostAttack, 1 }, "Drive Attack", 1, 8, 3));
+    layout.add (std::make_unique<juce::AudioParameterChoice> (juce::ParameterID { ids::boostModel, 1 }, "Drive Model",
+                                                              juce::StringArray { "Precision Drive", "TS9" }, 0));
 
     layout.add (std::make_unique<juce::AudioParameterChoice> (juce::ParameterID { ids::channel, 1 }, "Channel",
                                                               juce::StringArray { "Clean", "Blue", "Red" }, 2));

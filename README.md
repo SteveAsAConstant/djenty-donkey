@@ -1,10 +1,10 @@
 # Djenty Donkey 🫏
 
-**A component-level high-gain guitar amp plugin** — 5150 / 6505-style preamp solved circuit-by-circuit, a Precision Drive–style pedal, IR loader and effects. VST3 + standalone for Windows.
+**A component-level high-gain guitar amp plugin** — 5150 / 6505-style preamp solved circuit-by-circuit, Precision Drive– and TS9-style pedals, IR loader and effects. VST3 + standalone for Windows.
 
 ![Djenty Donkey](docs/screenshot.png)
 
-> 5150, 6505, Peavey, EVH, Horizon Devices and Precision Drive are trademarks of their respective owners.
+> 5150, 6505, Peavey, EVH, Horizon Devices, Precision Drive, Ibanez and Tube Screamer are trademarks of their respective owners.
 > They are only used to describe the circuits that inspired this model. This project is not affiliated with or endorsed by them.
 
 ## Download
@@ -21,7 +21,7 @@ Windows SmartScreen may warn because the exe is not code-signed: click *More inf
 
 ```
 Input ─ Gate ─ Transpose ─ Compressor ─┬─ [8x oversampled] ───────────────────────────────┐
-                                       │  Precision Drive → 5150 preamp → tone stack → power │
+                                       │  Drive (PD / TS9) → 5150 preamp → tone stack → power│
                                        └──────────────────────────────────────────────────┘
       ─ Cabinet IR ─ 10-band EQ ─ Phaser ─ Delay ─ Reverb ─ Output
 ```
@@ -31,7 +31,7 @@ Input ─ Gate ─ Transpose ─ Compressor ─┬─ [8x oversampled] ───
 | **Preamp** | Each 12AX7 stage is solved per sample (Koren triode model + Newton–Raphson): coupling caps, cathode bypass caps, grid current and Miller capacitance are real circuit elements, so cold-clipper bias shift ("blocking distortion") happens naturally. In every channel the whole preamp (V1A → V5A with every network between them) is solved as one circuit, so each stage loads the ones next to it: that sets the even harmonics at the edge of breakup and the cold clipper's bias shift (matches LTspice within 0.1 % and ~0.5 dB H2 at every plate). Knob moves ramp across each host block and are smoothed (~20 ms): no zipper noise at any buffer size. |
 | **Channels** | Relay positions read off the factory schematic. **RED** = 5150 lead (V1A→V1B→V2A→V2B→V5B→V5A, C26 through R18 for a tight low end). **BLUE** = rhythm with crunch (R43 ‖ C13 gain network, R20 at V2A). **CLEAN** = 6505 rhythm, *optimized*: bypasses V2A–V5A for headroom (not in the original amp). Channel switches carry the shared tubes' and capacitors' state over (as the relays do) and crossfade the rewired part over 20 ms: no clicks or thumps. |
 | **Tone stack** | The factory network as drawn, including its feed (R89 470k into R24 33k and C59/R94), the 570 pF treble cap, the mid pot wired as a divider and the 500k Post-pot load; solved by nodal analysis, matches LTspice within 0.01 dB. |
-| **Precision Drive** | Op-amp + 1N4148 clipper solved per sample; 8-position *Attack* cap switch (33n–470n) for tightness. Based on the public PedalPCB "Dwarven Hammer" build doc. |
+| **Drive** | Two pedals to choose from, both solved per sample from their schematics (op-amp + diode clipper with a real JRC4558: 100 dB, 3 MHz): **Precision Drive** (8-position *Attack* cap switch, 33n–470n, for tightness; from the public PedalPCB "Dwarven Hammer" build doc) and **TS9** (the classic mid hump; tonepad "El Griton" TS-9 values). Both match LTspice within 0.3 dB small-signal; at clipping the fundamental within 0.1 dB and the odd harmonics within 0.6 dB. Switching models crossfades over 20 ms. |
 | **Power amp** | V3A recovery + long-tail-pair phase inverter + 2×2 6L6GC push-pull + output transformer + 4×12 speaker impedance, solved simultaneously with a nodal DK solver. Presence and Resonance are the real NFB-loop parts (VR9/C8, VR8/C12). Flyback diodes, grid current. Matches LTspice within 0.05 dB small-signal and 0.2 % at clipping. |
 | **Supply** | The factory high-voltage chain (reservoir → screen → phase inverter → preamp rails through R59 4k, R60 22k and R61 10k), every node sagging with the real current of the stages it feeds: the preamp sits at ~306 / 322 V and breathes with the power amp. Within 0.01 V of LTspice. |
 | **Cab** | Load any `.wav` IR (drag & drop, prev/next in folder) or use the built-in cab. |
@@ -40,7 +40,7 @@ Input ─ Gate ─ Transpose ─ Compressor ─┬─ [8x oversampled] ───
 
 Validation against a real amp: 14 lead and 22 rhythm / crunch [NAM](https://github.com/sdatkinson/neural-amp-modeler) captures of the same Peavey 6505 (various gain / EQ settings; both Gain knobs calibrated on them) — with the knobs at the capture's dial positions the odd harmonics match within ~2–3 dB and the knobs' effect on the spectrum within a fraction of a dB. The 1/3-octave spectra differ by ~2 dB on average, almost all of it one fixed, knob-independent curve (+3 dB highs, −2.5 dB mids) that looks like the capture chain's colouring. The model keeps the factory circuit rather than fitting it. See [docs/nam_calibration.md](docs/nam_calibration.md).
 
-Validation against LTspice: [docs/spice_reference_lead.md](docs/spice_reference_lead.md), [docs/power_amp.md](docs/power_amp.md).
+Validation against LTspice: [docs/spice_reference_lead.md](docs/spice_reference_lead.md), [docs/power_amp.md](docs/power_amp.md), [docs/precision_drive.md](docs/precision_drive.md).
 Circuit notes: [docs/5150_schematic_notes.md](docs/5150_schematic_notes.md), [docs/precision_drive.md](docs/precision_drive.md), [docs/gate_and_transpose.md](docs/gate_and_transpose.md).
 
 ## Setting the input level
@@ -75,7 +75,7 @@ Source/
   dsp/FullPreamp5150.h  the whole preamp of each channel as one circuit (relay positions), CLEAN's V1A + V1B
   dsp/DKCircuit.h       nodal DK solver (power amp, coupled preamp stages)
   dsp/PowerAmp5150.h    phase inverter + 6L6 power amp + NFB
-  dsp/PrecisionDrive.h  drive pedal
+  dsp/PrecisionDrive.h  drive pedals (Precision Drive, TS9)
   dsp/AmpSim.h          oversampling, power amp, channel trims
   PluginProcessor.*     signal chain, parameters, IR loading
   PluginEditor.*, UI/   interface
