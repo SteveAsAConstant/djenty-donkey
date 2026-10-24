@@ -167,10 +167,11 @@ struct Rig
     double voltsPerFS = 4.12, rateNam = 48000.0, rateOurs = 192000.0;
     bool frozenSupply = false; // --frozen-supply: rails held at their DC point (no sag), to separate DC from dynamics
     double r18 = -1.0;         // --r18 ohms: V1B cathode R18 in the lead preamp (default: FullPreamp5150::r18)
+    bool crunchOff = false;    // --crunch-off: Rhythm captures against the rhythm channel with crunch off (all five stages)
 
     std::vector<double> ours (const std::vector<double>& v, double preKnob, double drive) const
     {
-        vamp::Preamp5150 pre;
+        vamp::Preamp5150 pre (false, ! crunchOff);
         if (r18 >= 0.0) pre.lead.r18 = r18;
         pre.prepare (rateOurs); pre.setMode (s.mode);
         pre.setControls (preKnob, s.bass, s.mid, s.treble, vamp::masterKnobForDrive (drive));
@@ -311,6 +312,7 @@ int main (int argc, char** argv)
         else if (a == "--sweep") sweep = true;
         else if (a == "--frozen-supply") rig.frozenSupply = true;
         else if (a == "--r18" && i + 1 < argc) rig.r18 = std::atof (argv[++i]);
+        else if (a == "--crunch-off") rig.crunchOff = true;
         else if (a == "--fit-drive") fitDrive = true;
     }
     rig.s = parseSettings (rig.nam.getName());
@@ -419,15 +421,19 @@ int main (int argc, char** argv)
         const auto ref = makeReference (rig, tests);
         Cost best { 1e9, 0, 0, 0, 0 };
         double bestPre = rig.s.pre;
-        for (double p = std::max (0.02, rig.s.pre - 0.15); p <= std::min (1.0, rig.s.pre + 0.25); p += 0.01)
+        // the knob's pot curve: lead (VR2) or rhythm (VR1)
+        auto taper = [&] (double x) { return rig.s.mode == 2 ? vamp::leadPreTaper (x) : vamp::rhythmPreTaper (x); };
+        const double lo = std::max (0.02, rig.s.pre - (rig.s.mode == 2 ? 0.15 : 0.35));
+        const double hi = std::min (1.0, rig.s.pre + (rig.s.mode == 2 ? 0.25 : 0.35));
+        for (double p = lo; p <= hi + 1e-9; p += 0.01)
         {
             const auto c = evaluate (rig, ref, tests, p, driveCalibrated);
             if (c.total < best.total) { best = c; bestPre = p; }
         }
         const auto atNominal = evaluate (rig, ref, tests, rig.s.pre, driveCalibrated);
-        std::printf ("FITPRE pre_dial %.1f -> our_pre %.2f | pot %.2f dB, at dial %.2f dB -> %+.2f dB | cost %.2f (spec %.2f harm %.2f comp %.2f) | nominal cost %.2f (spec %.2f harm %.2f comp %.2f)\n",
-                     rig.s.pre * 10, bestPre, db (vamp::leadPreTaper (bestPre)), db (vamp::leadPreTaper (rig.s.pre)),
-                     db (vamp::leadPreTaper (bestPre) / vamp::leadPreTaper (rig.s.pre)),
+        std::printf ("FITPRE pre_dial %.1f -> our_pre %.2f%s | pot %.2f dB, at dial %.2f dB -> %+.2f dB | cost %.2f (spec %.2f harm %.2f comp %.2f) | nominal cost %.2f (spec %.2f harm %.2f comp %.2f)\n",
+                     rig.s.pre * 10, bestPre, bestPre >= hi - 0.005 || bestPre <= lo + 0.005 ? " (search limit)" : "",
+                     db (taper (bestPre)), db (taper (rig.s.pre)), db (taper (bestPre) / taper (rig.s.pre)),
                      best.total, best.spectrum, best.harmonics, best.compression,
                      atNominal.total, atNominal.spectrum, atNominal.harmonics, atNominal.compression);
         return 0;

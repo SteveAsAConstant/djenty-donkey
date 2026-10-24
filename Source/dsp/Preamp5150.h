@@ -26,16 +26,17 @@ inline double masterTaper (double x) { return x <= 0.0 ? 0.0 : taperPot (x); }
 inline double masterKnobForDrive (double drive) { return taperPotInverse (std::clamp (drive, 0.0, 1.0)); }
 
 // Lead pre-gain: taperPot lifted. Pre-gain fits (power-amp drive fixed at the Master calibration,
-// nam_compare --fit-pre) to all 14 captures want +8.7 / +6.2 / +6.7 / +3.3 dB re taperPot at dials 2 / 3 / 4 / 5
-// (means of 4 / 5 / 3 / 2 captures, spread +-0.4..0.6 dB; +-1.2 at 5); interpolated linearly in dB between them,
-// held below 2. v0.5.0-beta's curve was 3.3-3.6 dB lower at every dial: it was fitted with C26 straight to ground
-// in LEAD; with R18 in series (factory schematic, FullPreamp5150::r18) the preamp has that much less gain at the
-// 110 Hz of the fits, a uniform offset (harmonics and compression match as before). Nothing above 5 was captured:
-// the lift falls linearly to 0 at dial 10, so dial 10 is still the pot fully open (and the curve stays monotonic:
-// taperPot grows ~6 dB per dial step there). Lead only: the captures are lead.
+// nam_compare --fit-pre) to all 14 captures want +9.3 / +6.8 / +7.2 / +4.0 dB re taperPot at dials 2 / 3 / 4 / 5
+// (means of 4 / 5 / 3 / 2 captures, spread +-0.5..0.8 dB; +-1.3 at 5); interpolated linearly in dB between them,
+// held below 2. v0.5.0-beta's curve was ~4 dB lower at every dial: it was fitted with C26 straight to ground
+// in LEAD and without the rhythm network on C6; with R18 in series (factory schematic, FullPreamp5150::r18,
+// -3.3 dB at the 110 Hz of the fits) and the rhythm network loading C6 (-0.6 dB) the preamp has that much less
+// gain, a uniform offset (harmonics and compression match as before). Nothing above 5 was captured: the lift falls
+// linearly to 0 at dial 10, so dial 10 is still the pot fully open (and the curve stays monotonic: taperPot grows
+// ~6 dB per dial step there). Lead only: these are the lead captures.
 inline double leadPreLiftDb (double x)
 {
-    constexpr double at[4] = { 8.72, 6.16, 6.71, 3.31 }; // dials 2, 3, 4, 5
+    constexpr double at[4] = { 9.32, 6.84, 7.20, 3.96 }; // dials 2, 3, 4, 5
     if (x >= 0.5) return at[3] * std::max (0.0, (1.0 - x) / 0.5);
     if (x <= 0.2) return at[0];
     const double f = (x - 0.2) * 10.0;
@@ -53,9 +54,35 @@ inline double leadPreTaperInverse (double f) // monotonic: bisection (not used o
     return 0.5 * (lo + hi);
 }
 
+// Rhythm pre-gain (VR1 Clean Pre; BLUE and CLEAN): taperPot lifted. Fits to the 22 straight-in Rhythm captures of
+// the same 6505 (all with crunch on: crunch off misses them by 16-19 dB of gain and 2.9 dB of compression) want
+// +3.0 / +7.1 / +7.8 dB re taperPot at dials 5 / 6 / 7 (4 / 6 / 5 captures, spread +-0.8..1.4 dB; one dial-6
+// capture at -2.7 left out); at dial 8 the cost is flat (fully saturated), so nothing is read from it. Held below 5
+// (not captured); above 7 the lift falls linearly to 0 at dial 10 (pot fully open), as the lead's. Monotonic:
+// taperPot grows 5.4-5.5 dB per dial step in this range.
+inline double rhythmPreLiftDb (double x)
+{
+    constexpr double at[3] = { 3.04, 7.10, 7.81 }; // dials 5, 6, 7
+    if (x >= 0.7) return at[2] * std::max (0.0, (1.0 - x) / 0.3);
+    if (x <= 0.5) return at[0];
+    const double f = (x - 0.5) * 10.0;
+    const int i = std::min (1, (int) f);
+    return at[i] + (f - i) * (at[i + 1] - at[i]);
+}
+inline double rhythmPreTaper (double x)
+{
+    return std::min (1.0, taperPot (x) * std::pow (10.0, rhythmPreLiftDb (x) / 20.0));
+}
+inline double rhythmPreTaperInverse (double f) // monotonic: bisection (not used on the audio thread)
+{
+    double lo = 0.0, hi = 1.0;
+    for (int i = 0; i < 60; ++i) { const double mid = 0.5 * (lo + hi); (rhythmPreTaper (mid) < f ? lo : hi) = mid; }
+    return 0.5 * (lo + hi);
+}
+
 // v0.3 knob curves (pre-gain taperA, Master 60 dB log), to convert old presets / sessions
 inline double masterTaperV03 (double x) { return x <= 0.0 ? 0.0 : std::pow (10.0, 3.0 * (x - 1.0)) * std::min (1.0, x * 20.0); }
-inline double gainKnobFromV03 (double x, bool lead) { return lead ? leadPreTaperInverse (taperA (x)) : taperPotInverse (taperA (x)); }
+inline double gainKnobFromV03 (double x, bool lead) { return lead ? leadPreTaperInverse (taperA (x)) : rhythmPreTaperInverse (taperA (x)); }
 // (v0.3 -> v0.4 knob positions, which v0.5 keeps)
 inline double masterKnobFromV03 (double x) { return taperPotInverse (std::clamp (masterTaperV03 (x) / kPostTrimV04, 0.0, 1.0)); }
 
@@ -79,9 +106,10 @@ public:
     FullPreamp5150 blue;   // BLUE
     CleanPreamp5150 clean; // CLEAN
 
-    // diagnostics: RED and BLUE also compute every cathode and plate voltage (getVk / getVp, tests)
-    explicit Preamp5150 (bool diagnostics = false)
-        : lead (channel5150::Lead, diagnostics), blue (channel5150::Crunch, diagnostics)
+    // diagnostics: RED and BLUE also compute every cathode and plate voltage (getVk / getVp, tests).
+    // blueCrunch false: BLUE is the rhythm channel with crunch off instead (the amp's, all five stages; comparisons)
+    explicit Preamp5150 (bool diagnostics = false, bool blueCrunch = true)
+        : lead (channel5150::Lead, diagnostics), blue (blueCrunch ? channel5150::Crunch : channel5150::Clean, diagnostics)
     {
         // ---- tone stack and its feed as on the schematic (factory sheet 1 and the redraw agree):
         // nodes 0 trebTop, 1 out, 2 trebBot / bassTop, 3 x, 4 bassBot / midTop, 5 C59-R94, 6 in, 7 mid wiper.
@@ -172,7 +200,7 @@ public:
     void setControls (double preGain, double bass, double mid, double treble, double post)
     {
         preGain = std::clamp (preGain, 0.0, 1.0);
-        setPreGainPots (leadPreTaper (preGain), taperPot (preGain));
+        setPreGainPots (leadPreTaper (preGain), rhythmPreTaper (preGain));
         setToneStackRaw (std::clamp (treble, 0.0, 1.0), std::clamp (mid, 0.0, 1.0),
                          taperA (std::clamp (bass, 0.0, 1.0)));
         post = std::clamp (post, 0.0, 1.0);

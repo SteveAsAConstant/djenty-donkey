@@ -19,6 +19,7 @@
 #include <vector>
 #include "dsp/AmpSim.h"
 #include "dsp/FFT.h"
+#include "dsp/MultibandGate.h"
 #include "NamWaveNet.h"
 
 namespace
@@ -301,6 +302,49 @@ SwitchResult switchTest (int from, int to, double fadeMs)
     return { inharmonicDb (y, 220.0, 20.0), lowDb (y), inharmonicDb (ref, 220.0, 20.0), lowDb (ref) };
 }
 
+// Sustain: a 110 Hz note (8 harmonics) picked at peakV and decaying at decayDbPerS, through the plugin amp path
+// (gate off and with the default 3-band gate keyed by the input) and the NAM capture. Output level (RMS over 100 ms)
+// every 0.5 s, dB re the level 0.2 s after the pick.
+void sustainTest (const namcmp::NamWaveNet* nam, double peakV, double decayDbPerS)
+{
+    const double secs = 8.0;
+    const Gen note = [peakV, decayDbPerS] (double t)
+    {
+        const double env = std::pow (10.0, -decayDbPerS * t / 20.0) * (1.0 - std::exp (-t / 0.002));
+        double v = 0;
+        for (int h = 1; h <= 8; ++h) v += std::sin (2 * kPi * 110.0 * h * t + h) / (h * h);
+        return peakV * env * v / 1.5;
+    };
+    const auto x = sample (note, fs, secs);
+    const auto amp = pluginPath (note, secs);
+    Signal gated = amp;
+    {
+        vamp::MultibandGate gate;
+        gate.prepare (fs);
+        std::vector<float> a (gated.begin(), gated.end()), k (x.begin(), x.end());
+        gate.process (a.data(), k.data(), (int) a.size(), vamp::MultibandGate::Settings {});
+        std::copy (a.begin(), a.end(), gated.begin());
+    }
+    Signal namOut;
+    if (nam) namOut = namPath (*nam, note, secs);
+
+    auto level = [] (const Signal& y, double t)
+    {
+        double e = 0; int n = 0;
+        for (size_t i = (size_t) (t * fs); i < (size_t) ((t + 0.1) * fs) && i < y.size(); ++i) { e += y[i] * y[i]; ++n; }
+        return 10.0 * std::log10 (std::max (e / std::max (n, 1), 1e-30));
+    };
+    std::printf ("\n== sustain: 110 Hz note, %.2f V peak, input decaying %.0f dB/s (output dB re 0.2 s after the pick) ==\n", peakV, decayDbPerS);
+    std::printf ("%6s %8s | %10s %10s %10s\n", "t (s)", "input", "amp", "amp+gate", nam ? "NAM 6505" : "");
+    const double x0 = level (x, 0.2), a0 = level (amp, 0.2), g0 = level (gated, 0.2), n0 = nam ? level (namOut, 0.2) : 0.0;
+    for (double t = 0.2; t < secs - 0.1; t += 0.5)
+    {
+        std::printf ("%6.1f %+8.1f | %+10.1f %+10.1f", t, level (x, t) - x0, level (amp, t) - a0, level (gated, t) - g0);
+        if (nam) std::printf (" %+10.1f", level (namOut, t) - n0);
+        std::printf ("\n");
+    }
+}
+
 void switchTests()
 {
     std::printf ("\n== channel switch: 220 Hz 0.1 V; dB re total (lower is cleaner) ==\n");
@@ -322,6 +366,13 @@ int main (int argc, char** argv)
 {
     if (argc > 1 && std::string (argv[1]) == "knobs") { zipperTests(); return 0; }
     if (argc > 1 && std::string (argv[1]) == "switch") { switchTests(); return 0; }
+    if (argc > 1 && std::string (argv[1]) == "sustain") // [model.nam]: the capture of settings() (Pr-5 B-6 M-4 T-6 Po-3 R-9 P-8)
+    {
+        namcmp::NamWaveNet nam;
+        const bool have = argc > 2 && nam.load (argv[2]);
+        for (double v : { 0.3, 0.1 }) sustainTest (have ? &nam : nullptr, v, 12.0);
+        return 0;
+    }
     if (argc > 1 && std::string (argv[1]) == "prepare")
     {
         std::printf ("\n== AmpSim::prepare() time (the host waits for it on load and on sample-rate / buffer changes) ==\n");
