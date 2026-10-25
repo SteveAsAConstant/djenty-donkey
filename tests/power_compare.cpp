@@ -234,7 +234,7 @@ int main (int argc, char** argv)
     if (! rig.nam.load (argv[1])) { std::printf ("cannot load %s\n", argv[1]); return 1; }
     double inDbu = 18.995;
     std::string wavDir;
-    bool fitSpk = false;
+    bool fitSpk = false, fitCoil = false;
     for (int i = 2; i < argc; ++i)
     {
         const std::string a = argv[i];
@@ -245,6 +245,7 @@ int main (int argc, char** argv)
         else if (a == "--spk" && i + 1 < argc) // peak,L,Rloss,cw,re
             std::sscanf (argv[++i], "%lf,%lf,%lf,%lf,%lf", &rig.spk[0], &rig.spk[1], &rig.spk[2], &rig.spk[3], &rig.spk[4]);
         else if (a == "--fitspk") fitSpk = true;
+        else if (a == "--fitcoil") fitSpk = fitCoil = true;
         else if (a == "--leak") rig.leak = next();
         else if (a == "--mot" && i + 1 < argc) std::sscanf (argv[++i], "%lf,%lf,%lf,%lf", &rig.mot[0], &rig.mot[1], &rig.mot[2], &rig.mot[3]);
         else if (a == "--zout")
@@ -294,10 +295,15 @@ int main (int argc, char** argv)
         const auto rn = gains (rig.namRun (sample (multitone (perTone), rig.rateNam(), 1.5)), rig.rateNam(), perTone);
         const auto f = multitoneFreqs();
         const double lk = vamp::PowerAmp5150::kLeakagePP; // more leakage only raised the highs (inside the loop)
-        for (double qmc : { 2.0, 2.5, 3.0, 4.0 })
-            for (double fc : { 80.0, 85.0, 90.0, 95.0 })
-                for (double l : { 0.5e-3, 0.7e-3, 1.0e-3 })
-                    for (double rl : { 10.0, 15.0, 20.0, 30.0 })
+        // --fitcoil: only the voice coil (its inductance and eddy-current loss), the box resonance as in the model
+        const std::vector<double> qmcs = fitCoil ? std::vector<double> { vamp::PowerAmp5150::kSpeakerQmc } : std::vector<double> { 2.0, 2.5, 3.0, 4.0 };
+        const std::vector<double> fcs = fitCoil ? std::vector<double> { vamp::PowerAmp5150::kSpeakerFc } : std::vector<double> { 80.0, 85.0, 90.0, 95.0 };
+        const std::vector<double> ls = fitCoil ? std::vector<double> { 0.35e-3, 0.5e-3, 0.7e-3, 1.0e-3, 1.4e-3, 2.0e-3 } : std::vector<double> { 0.5e-3, 0.7e-3, 1.0e-3 };
+        const std::vector<double> rls = fitCoil ? std::vector<double> { 3.0, 4.0, 5.0, 6.0, 8.0, 10.0, 12.0, 15.0 } : std::vector<double> { 10.0, 15.0, 20.0, 30.0 };
+        for (double qmc : qmcs)
+            for (double fc : fcs)
+                for (double l : ls)
+                    for (double rl : rls)
                     {
                         rig.spk[0] = 1.0; rig.spk[1] = l; rig.spk[2] = rl; rig.spk[3] = vamp::PowerAmp5150::kCwinding; rig.spk[4] = 7.3;
                         rig.mot[0] = 7.3; rig.mot[1] = fc; rig.mot[2] = 0.78 * fc / 75.0; /* Qec = Qes fc / Fs */ rig.mot[3] = qmc; rig.leak = lk;

@@ -113,10 +113,10 @@ L3 s 0 {Ls}
 K1 L1 L2 L3 1
 Cw o1 o2 2.5n
 
-* ---- 4x12 of Vintage 30s: Re 7.3, voice coil 0.7 mH || 15, motional Res || Lces || Cmes (fc 85 Hz, Qec 0.884, Qmc 2) ----
+* ---- 4x12 of Vintage 30s: Re 7.3, voice coil 0.7 mH || 6, motional Res || Lces || Cmes (fc 85 Hz, Qec 0.884, Qmc 2) ----
 Re s sp1 7.3
 Le sp1 sp2 0.7m
-Rle sp1 sp2 15
+Rle sp1 sp2 6
 Rm sp2 0 16.516
 Lm sp2 0 15.462m
 Cm sp2 0 226.74u

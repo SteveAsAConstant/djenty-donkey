@@ -158,11 +158,12 @@ public:
     // (a V30-type speaker, WGS Veteran 30); the closed cab stiffens the suspension (Vas ~19 L vs ~27-35 L of air per
     // driver): fc 80-105 Hz (owners measure 90-105 Hz), Qec = Qes fc / Fs. The total mechanical Q is far below a
     // single driver's (~12): box leaks and four drivers with spread resonances (R. Aiken). fc 85 Hz and Qmc 2 (a
-    // 24 ohm peak) and a 0.7 mH voice coil (a G12H-75 measures 0.7 mH) with a 15 ohm eddy-current loss: fitted within
-    // their physical ranges to power-amp-only captures of a real 6505 into three real cabinets (docs/power_amp.md;
-    // the fit would take the loss lower, driven by highs that no physical part here explains, so it stays at 15)
+    // 24 ohm peak) and a 0.7 mH voice coil (a G12H-75 measures 0.7 mH): fitted within their physical ranges to
+    // power-amp-only captures of a real 6505 into three real cabinets (docs/power_amp.md). The coil's eddy-current
+    // loss, 6 ohm, is an empirical fit to the same captures (Celestion publishes no impedance curve; ~13 ohm at
+    // 12.8 kHz), checked on full-amp captures the fit did not use (~1 dB better at 8-12.8 kHz on all five)
     static constexpr double kSpeakerRe = 7.3, kSpeakerFc = 85.0, kSpeakerQec = 0.78 * kSpeakerFc / 75.0, kSpeakerQmc = 2.0;
-    static constexpr double kVoiceCoilL = 0.7e-3, kVoiceCoilLossR = 15.0;
+    static constexpr double kVoiceCoilL = 0.7e-3, kVoiceCoilLossR = 6.0;
     // ---- from the schematic and datasheets ----
     static constexpr double kCgridFeed = 100e-12;  // C201 / C202: each side's grid feed to ground (factory power board)
     static constexpr double k6L6Cin = 10e-12, k6L6Cgp = 0.6e-12; // 6L6GC input and grid-to-plate capacitance
