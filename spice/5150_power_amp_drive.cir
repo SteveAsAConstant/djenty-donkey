@@ -93,10 +93,15 @@ Cin2 g2 0 20p
 Cgp2 g2 o2 1.2p
 
 * ---- 2 x 2 x 6L6GC ----
-X5 o1 g1 0 scr 6L6GC
-X7 o1 g1 0 scr 6L6GC
-X6 o2 g2 0 scr 6L6GC
-X8 o2 g2 0 scr 6L6GC
+X5 o1 g1 0 s5 6L6GC
+X7 o1 g1 0 s7 6L6GC
+X6 o2 g2 0 s6 6L6GC
+X8 o2 g2 0 s8 6L6GC
+* R207 / R209 / R203 / R205: each tube's 100 ohm screen resistor
+R207 scr s5 100
+R209 scr s7 100
+R203 scr s6 100
+R205 scr s8 100
 D200 0 o1 DF
 D201 0 o2 DF
 .model DF D(IS=1e-9 RS=1)

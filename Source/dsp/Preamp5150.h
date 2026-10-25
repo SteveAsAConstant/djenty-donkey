@@ -132,8 +132,7 @@ public:
         idleI2Late = dcPlateCurrent (vb2, 220e3, 1.82e3) + dcPlateCurrent (vb2, 220e3, 2.2e3) + dcPlateCurrent (vb2, 100e3, 2.2e3);
         fadeLen = std::max (1, (int) (switchFadeMs * 1e-3 * fs));
         fadePos = fadeLen; // no switch in progress
-        fadeW = 1.0;
-        prevMode = mode;
+        for (int c = 0; c < 3; ++c) w[c] = w0[c] = c == mode ? 1.0 : 0.0;
         toneStack.setR (tsSrc, sourceR (mode));
 
         // let coupling / cathode caps settle
@@ -148,21 +147,22 @@ public:
     // first has to build up its bias, a transient). The rewired networks themselves still change at once, and the
     // tone stack's source with them, so for switchFadeMs both channels run and are crossfaded (each with its channel
     // trim) before the tone stack, whose source impedance follows.
+    // Every channel has a weight (summing to 1): a switch starts from the weights of the moment, also mid-fade (back
+    // to the previous channel, or on to the third one), and moves them to the new channel over switchFadeMs, so no
+    // weight ever jumps. A channel runs while its weight is above 0; one coming in from silence takes over the
+    // state of the loudest running channel.
     void setMode (int newMode)
     {
         if (newMode == mode) return;
         if (fresh) { setModeNow (newMode); return; } // no audio since prepare(): nothing to fade from
-        if (fadePos < fadeLen && newMode == prevMode)
+        if (w[newMode] <= 0.0)
         {
-            // switched back mid-fade: reverse it (the weights continue smoothly, nothing restarts)
-            std::swap (mode, prevMode);
-            fadePos = fadeLen - fadePos;
-            return;
+            int from = mode;
+            for (int c = 0; c < 3; ++c) if (c != newMode && w[c] > w[from]) from = c;
+            enterPath (newMode, from);
         }
-        if (fadePos < fadeLen && fadeW > 0.5) prevMode = mode; // a third channel mid-fade: the louder one fades out
-        else if (fadePos >= fadeLen) prevMode = mode;
+        std::copy (std::begin (w), std::end (w), std::begin (w0));
         mode = newMode;
-        enterPath (mode, prevMode);
         fadePos = 0;
     }
 
@@ -171,10 +171,10 @@ public:
     void setModeNow (int newMode)
     {
         if (newMode == mode && fadePos >= fadeLen) return;
-        mode = prevMode = newMode;
+        mode = newMode;
         resetPath (mode);
         fadePos = fadeLen;
-        fadeW = 1.0;
+        for (int c = 0; c < 3; ++c) w[c] = w0[c] = c == mode ? 1.0 : 0.0;
         toneStack.setR (tsSrc, sourceR (mode));
     }
 
@@ -239,12 +239,18 @@ public:
         if (fadePos < fadeLen)
         {
             ++fadePos;
-            fadeW = 0.5 - 0.5 * std::cos (kPi * (double) fadePos / (double) fadeLen); // 0 -> 1
+            const double s = 0.5 - 0.5 * std::cos (kPi * (double) fadePos / (double) fadeLen); // 0 -> 1
+            x = 0.0;
+            double rs = 0.0;
+            for (int c = 0; c < 3; ++c)
+            {
+                const bool running = w[c] > 0.0 || c == mode;
+                w[c] = fadePos >= fadeLen ? (c == mode ? 1.0 : 0.0) : w0[c] * (1.0 - s) + (c == mode ? s : 0.0);
+                if (running) x += w[c] * runPath (c, vin) * trim[c]; // a fading-out channel runs to the end
+                rs += w[c] * sourceR (c);
+            }
             if (fadePos % 32 == 1 || fadePos == fadeLen) // the tone stack's source impedance slides with the fade
-                toneStack.setR (tsSrc, sourceR (prevMode) + fadeW * (sourceR (mode) - sourceR (prevMode)));
-            const double xOld = runPath (prevMode, vin) * trim[prevMode];
-            const double xNew = runPath (mode, vin) * trim[mode];
-            x = (1.0 - fadeW) * xOld + fadeW * xNew;
+                toneStack.setR (tsSrc, rs);
         }
         else
             x = runPath (mode, vin) * trim[mode];
@@ -280,10 +286,15 @@ public:
         pathCurrents (mode, i1, i2);
         if (fadePos < fadeLen)
         {
-            double o1, o2;
-            pathCurrents (prevMode, o1, o2);
-            i1 = (1.0 - fadeW) * o1 + fadeW * i1;
-            i2 = (1.0 - fadeW) * o2 + fadeW * i2;
+            i1 = i2 = 0.0;
+            for (int c = 0; c < 3; ++c)
+                if (w[c] > 0.0)
+                {
+                    double o1, o2;
+                    pathCurrents (c, o1, o2);
+                    i1 += w[c] * o1;
+                    i2 += w[c] * o2;
+                }
         }
     }
 
@@ -349,9 +360,9 @@ private:
     static constexpr double kRoutV5Afb = kRoutV5A / (1.0 + 26.0 * 0.346);
 
     double fs = 192000.0;
-    int mode = Red, prevMode = Red;
+    int mode = Red;
     int fadeLen = 1, fadePos = 1; // channel-switch crossfade (fadePos >= fadeLen: none in progress)
-    double fadeW = 1.0;           // weight of `mode` (prevMode has 1 - fadeW)
+    double w[3] { 0.0, 0.0, 1.0 }, w0[3] { 0.0, 0.0, 1.0 }; // channel weights now / at the start of the fade
     bool fresh = false;           // prepared, no audio yet: setMode() switches at once
     double trim[3] { 1.0, 1.0, 1.0 };
     double postGain = 0.1;

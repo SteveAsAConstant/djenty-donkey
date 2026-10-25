@@ -383,9 +383,34 @@ static void pentodeDatasheet()
         double ip, dvp, dvg;
         t.plate (p.vp, p.vg1, p.vg2, ip, dvp, dvg);
         std::printf ("%-55s ip %6.1f mA  gm %5.2f mA/V  rp %6.1f k  ig2 %5.2f mA", p.name, ip * 1e3, dvg * 1e3, 1e-3 / dvp,
-                     t.screen (p.vg1, p.vg2) * 1e3);
+                     t.screen (p.vp, p.vg1, p.vg2) * 1e3);
         if (p.gm > 0) std::printf ("   (gm %+.0f %%, rp %+.0f %%)", (dvg * 1e3 / p.gm - 1) * 100, (1.0 / dvp / (p.rp * 1e3) - 1) * 100);
         std::printf ("\n");
+    }
+    // push-pull class AB1 pair (450 V / 400 V / -37 V, 5600 ohm plate to plate, ideal transformer), zero and full
+    // signal (70 V peak grid to grid), averaged over a cycle: v1 = B+ - x, v2 = B+ + x, x = (i1 - i2) Raa / 4
+    for (double pk : { 0.0, 70.0 })
+    {
+        const double bp = 450.0, eg2 = 400.0, eg1 = -37.0, raa = 5600.0;
+        constexpr int n = 2000;
+        auto ipOf = [&] (double vp, double vg) { double i, a, b; t.plate (vp, vg, eg2, i, a, b); return i; };
+        double sIp = 0, sIg2 = 0, sP = 0;
+        for (int k = 0; k < n; ++k)
+        {
+            const double s = std::sin (2.0 * kPi * k / n), g1 = eg1 + 0.5 * pk * s, g2 = eg1 - 0.5 * pk * s;
+            double lo = -bp, hi = bp;
+            for (int it = 0; it < 60; ++it)
+            {
+                const double x = 0.5 * (lo + hi);
+                (x - raa / 4 * (ipOf (bp - x, g1) - ipOf (bp + x, g2)) > 0 ? hi : lo) = x;
+            }
+            const double x = 0.5 * (lo + hi);
+            sIp += ipOf (bp - x, g1) + ipOf (bp + x, g2);
+            sIg2 += t.screen (bp - x, g1, eg2) + t.screen (bp + x, g2, eg2);
+            sP += 4.0 * x * x / raa;
+        }
+        std::printf ("AB1 push-pull pair, %2.0f V peak grid to grid: ip %6.1f mA  ig2 %5.2f mA  %4.1f W   (ds %s)\n", pk,
+                     sIp / n * 1e3, sIg2 / n * 1e3, sP / n, pk > 0.0 ? "210 mA, 22 mA, 55 W" : "116 mA, 5.6 mA");
     }
     PowerAmp5150 pa; pa.setControls (0.5, 0.5); pa.prepare (fs);
     double ip, dvp, dvg;
@@ -766,6 +791,12 @@ static bool faultRecoveryTests()
             // 7 / 8 the channel's preamp circuit
             if (hit && (where == 5 || where == 6)) pa.testFaults = where - 4;
             if (hit && (where == 7 || where == 8)) (mode == Preamp5150::Red ? pre.lead.net.testFaults : pre.blue.net.testFaults) = where - 6;
+            // 9 / 10: the channel's preamp / the power amp ends a solve unconverged and 300 V off (must be caught);
+            // 11 / 12: the preamp / power amp fails for 2 ms (twice the hold time: back to the idle point)
+            if (hit && where == 9) (mode == Preamp5150::Red ? pre.lead.net.testCorrupt : pre.blue.net.testCorrupt) = 1;
+            if (hit && where == 10) pa.testCorrupt = 1;
+            if (hit && where == 11) (mode == Preamp5150::Red ? pre.lead.net.testFaults : pre.blue.net.testFaults) = (int) (4e-3 * rate);
+            if (hit && where == 12) pa.testFaults = (int) (4e-3 * rate);
             double v = pre.process (hit && where == 0 ? bad : hit && where == 2 ? dry (i - 1) : dry (i));
             y[(size_t) i] = pa.process (hit && where == 1 ? bad : v);
         }
@@ -816,6 +847,9 @@ static bool faultRecoveryTests()
         { "RED preamp fails, retry",      7, 0.0,           R },
         { "BLUE preamp fails, retry",     7, 0.0,           B },
         { "power amp fails, retry",       5, 0.0,           R },
+        { "RED preamp unconverged, 300 V off", 9, 0.0,      R },
+        { "BLUE preamp unconverged, 300 V", 9, 0.0,         B },
+        { "power amp unconverged, 300 V", 10, 0.0,          R },
     };
     std::printf ("clean render: peak %.1f V at the speaker (RED)\n", refPeak);
     // Deviation in the audio band (4th-order Butterworth low-pass at 20 kHz, what the downsampler keeps).
@@ -845,6 +879,22 @@ static bool faultRecoveryTests()
         const bool pass = r.finite && r.ms < 1.0;
         ok = ok && pass;
         std::printf ("%-24s %7s %12.2f %14.2f %15.2f %7s\n", c.name, r.finite ? "yes" : "NO", r.raw, r.band, r.ms, pass ? "PASS" : "FAIL");
+    }
+    // Persistent fault (2 ms of failing solves, twice the hold time): the circuit goes back to its idle point, a
+    // dropout that has to rebuild (cathode / coupling caps). Required: finite, never louder than 1.2x the clean peak,
+    // and back within 1% of the clean peak within 500 ms.
+    const Case persistent[] = { { "RED preamp fails 2 ms", 11, 0.0, R }, { "BLUE preamp fails 2 ms", 11, 0.0, B },
+                                { "power amp fails 2 ms", 12, 0.0, R } };
+    for (const auto& c : persistent)
+    {
+        const auto y = render (c.where, c.bad, nullptr, c.mode);
+        const Dev r = deviation (y, c.mode);
+        double peak = 0.0;
+        for (double v : y) peak = std::max (peak, std::abs (v));
+        const bool pass = r.finite && peak < 1.2 * refPeak && r.ms < 500.0;
+        ok = ok && pass;
+        std::printf ("%-24s %7s %12.2f %14.2f %15.2f %7s   (peak %.1f V)\n", c.name, r.finite ? "yes" : "NO", r.raw, r.band, r.ms,
+                     pass ? "PASS" : "FAIL", peak);
     }
 
     // Absurd but finite input: a 1 kV spike and 2 s of a 100 V sine at the guitar jack. Large deviations are

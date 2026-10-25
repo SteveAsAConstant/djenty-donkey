@@ -178,26 +178,31 @@ public:
 
         statSamples++;
         statIterations += iterations;
+        if (testCorrupt > 0) { --testCorrupt; converged = false; for (int k = 0; k < M; ++k) p[k] += 300.0; }
         if (! converged) { statFailures++; evalDevices (i, d); }
 
-        // A non-finite solve is retried as a lost input sample (the last accepted sources); if that fails too the
-        // sample is dropped (states held); a fault lasting 1 ms goes back to the idle point. As PowerAmp5150.
-        auto bad = [&]
+        // An unconverged solve is kept only when it is nearly a solution (port residual <= kAcceptResidual) and
+        // physically plausible; otherwise, like a non-finite one, it is retried as a lost input sample (the last
+        // accepted sources); if that fails too the sample is dropped (states held); a fault lasting 1 ms goes back to
+        // the idle point. As PowerAmp5150.
+        auto bad = [&] (bool conv)
         {
             if (testFaults > 0) { --testFaults; return true; }
             double sum = 0.0;
             for (int k = 0; k < M; ++k) sum += i[k] + p[k];
-            return ! std::isfinite (sum);
+            if (! std::isfinite (sum)) return true;
+            return ! conv && ! (residual (p0, K, i) <= kAcceptResidual && plausible());
         };
-        if (bad())
+        if (bad (converged))
         {
             ++statRetries;
             std::copy (lastU, lastU + nU, u);
-            dk.computeP0 (u);
+            dk.computeP0 (u); // p0 refers to the same buffer
             std::copy (std::begin (pPrev), std::end (pPrev), std::begin (p));
-            if (! newton (40))
+            const bool retried = newton (40);
+            if (! retried)
                 evalDevices (i, d);
-            if (bad())
+            if (bad (retried))
             {
                 ++statHeld;
                 std::copy (std::begin (pPrev), std::end (pPrev), std::begin (p));
@@ -249,9 +254,32 @@ public:
     }
 
     long long statSamples = 0, statIterations = 0, statFailures = 0, statRetries = 0, statHeld = 0;
-    int testFaults = 0; // tests: the next this-many fault checks report a bad solve
+    int testFaults = 0;  // tests: the next this-many fault checks report a bad solve
+    int testCorrupt = 0; // tests: the next this-many solves end unconverged, 300 V off (must not be accepted)
 
 private:
+    // largest port-equation residual (V, grids weighted 10x) of the state p with device currents i
+    template <typename P0, typename KM>
+    double residual (const P0& p0, const KM& K, const double (&i)[M]) const
+    {
+        double maxF = 0.0;
+        for (int r = 0; r < M; ++r)
+        {
+            double Ki = 0.0;
+            for (int k = 0; k < M; ++k) Ki += K[(size_t) r * M + k] * i[k];
+            maxF = std::max (maxF, std::abs (p[r] - p0[(size_t) r] - Ki) * (r % 2 == 0 ? 1.0 : 10.0));
+        }
+        return maxF;
+    }
+
+    // port voltages a real 12AX7 stage can have (plate-cathode, grid-cathode), with wide margins
+    bool plausible() const
+    {
+        for (int t = 0; t < NT; ++t)
+            if (! (p[2 * t] > -500.0 && p[2 * t] < 1500.0 && p[2 * t + 1] > -1000.0 && p[2 * t + 1] < 100.0)) return false;
+        return true;
+    }
+
     void evalDevices (double (&i)[M], double (&d)[M][2]) const
     {
         for (int t = 0; t < NT; ++t)
@@ -306,6 +334,8 @@ private:
     // Newton step (V) accepted without a confirming evaluation: plates 30 mV, grids 3 mV (weighted 10x: the
     // grid-current knee is 30 mV wide). Residual tolerance in volts (grids weighted 10x).
     static constexpr double kPlateStepTol = 3e-2, kGridStepWeight = 10.0;
+    // an unconverged solve is kept up to this residual (V): 10 mV, ~500x the tolerance, still inaudible
+    static constexpr double kAcceptResidual = 1e-2;
     double resTol = 2e-5;
     bool acceptSmallStep = true;
 

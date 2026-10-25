@@ -14,10 +14,15 @@ namespace vamp
 // ~890k at the 5150's, so the output stage had almost no source resistance of its own and followed the speaker's
 // impedance too much. An Early factor (1 + Vpk / va) gives rp ~ (va + Vpk) / Ip (together with Koren's own slope): va
 // 1650 V centres both datasheet points, kg1 1460 -> 1865 keeps their plate currents (dsp_test tube). Koren's screen
-// current was ~1.9x the datasheets' (8.4 / 5.5 mA vs 5.0 / 2.5 mA at the same two points): kg2 4500 -> 8500.
+// current was ~1.9x the datasheets' at the two static points and did not depend on the plate voltage at all, so under
+// heavy drive it was far too low (push-pull AB1 at full signal: 12.8 mA per pair, datasheet 22 mA). Screen current
+// with current conservation: the cathode current Koren's plate knee withholds at low plate voltage,
+// base (pi/2 - atan(Vpk / kvb)), goes to the screen, on top of Koren's screen term with kg2 12000 (least squares
+// over the static 250 / 350 V points and the AB1 zero / full signal pair currents: 5.15 / 3.03 / 4.76 / 20.5 mA vs
+// 5.0 / 2.5 / 5.6 / 22 mA; dsp_test tube).
 struct KorenPentode
 {
-    static constexpr double mu = 8.7, ex = 1.35, kg1 = 1865.0, kg2 = 8500.0, kp = 48.0, kvb = 12.0, va = 1650.0;
+    static constexpr double mu = 8.7, ex = 1.35, kg1 = 1865.0, kg2 = 12000.0, kp = 48.0, kvb = 12.0, va = 1650.0;
 
     static const SoftplusPow& softplusPow() { static const SoftplusPow t (ex); return t; }
 
@@ -94,11 +99,15 @@ struct KorenPentode
         early (vpk, ip, dVpk, dVg1);
     }
 
-    // screen current of ONE tube
-    inline double screen (double vg1k, double vg2k) const
+    // screen current of ONE tube: Koren's term plus the cathode current the plate knee withholds (see above)
+    inline double screen (double vpk, double vg1k, double vg2k) const
     {
+        if (vg2k <= 0.0) return 0.0;
         const double b = vg2k / mu + vg1k;
-        return b > 0.0 ? std::pow (b, ex) / kg2 : 0.0;
+        const double x = kp * (1.0 / mu + vg1k / vg2k);
+        const double sp = x > 30.0 ? x : (x < -30.0 ? std::exp (x) : std::log1p (std::exp (x)));
+        const double base = 2.0 / kg1 * std::pow (vg2k / kp * sp, ex);
+        return (b > 0.0 ? std::pow (b, ex) / kg2 : 0.0) + base * (1.5707963267948966 - std::atan (vpk / kvb));
     }
 };
 
@@ -153,6 +162,7 @@ public:
     // ---- from the schematic and datasheets ----
     static constexpr double kCgridFeed = 100e-12;  // C201 / C202: each side's grid feed to ground (factory power board)
     static constexpr double k6L6Cin = 10e-12, k6L6Cgp = 0.6e-12; // 6L6GC input and grid-to-plate capacitance
+    static constexpr double kRscreenTube = 100.0;  // R203 / R205 / R207 / R209: each 6L6's own screen resistor
 
     PowerAmp5150()
     {
@@ -263,6 +273,7 @@ public:
         // supply / bias at idle (rails: the DC solution, refined by the settle loop below)
         supply = Supply5150();
         cfIk = 1.25e-3;
+        std::fill (std::begin (ig2Tube), std::end (ig2Tube), 0.0);
 
         vBias = findBias (supply.plate, supply.screen);
         std::fill (std::begin (p), std::end (p), 0.0);
@@ -288,6 +299,7 @@ public:
         dk.saveState();
         std::copy (std::begin (p), std::end (p), std::begin (pIdle));
         plateIdle = supply.plate; screenIdle = supply.screen;
+        std::copy (std::begin (ig2Tube), std::end (ig2Tube), std::begin (ig2Idle));
         railIdle[0] = supply.v3; railIdle[1] = supply.v2; railIdle[2] = supply.v1;
     }
 
@@ -364,7 +376,9 @@ public:
         u[srcB] = supply.plate;
 
         const auto& p0 = dk.computeP0 (u);
-        screenNow = KorenPentode::screenTerms (supply.screen); // constant during the Newton solve
+        // each side's screen: the supply node minus its own 100 ohm resistor's drop (last sample's screen current; a few
+        // volts at most), constant during the Newton solve
+        for (int t = 0; t < 2; ++t) screenNow[t] = KorenPentode::screenTerms (supply.screen - kRscreenTube * ig2Tube[t]);
         const auto& K = dk.getK();
 
         // predictor: linear extrapolation of the last two solutions, switched off while it does
@@ -458,6 +472,7 @@ public:
 
         statSamples++;
         statIterations += iterations;
+        if (testCorrupt > 0) { --testCorrupt; converged = false; for (int k = 0; k < kPorts; ++k) p[k] += 300.0; }
         if (! converged) statFailures++;
         lastConverged = converged;
         for (int k = 0; k < kPorts; ++k) lastP0[k] = p0[(size_t) k];
@@ -470,23 +485,26 @@ public:
         // the supply and the output node still hold the last accepted sample, and its output is repeated.
         // Zeroing the states instead (v0.4) discharged C28/C29 and the supply caps mid-note: a ~20 V step at
         // the speaker for ~7 ms (tests/dsp_test fault). Only a fault that persists for 1 ms goes back to the
-        // settled idle point.
-        auto bad = [&]
+        // settled idle point. An unconverged solve is treated the same unless it is nearly a solution (port residual
+        // <= kAcceptResidual) and physically plausible.
+        auto bad = [&] (bool conv)
         {
             if (testFaults > 0) { --testFaults; return true; }
             double sum = 0.0;
             for (int k = 0; k < kPorts; ++k) sum += i[k] + p[k];
-            return ! std::isfinite (sum);
+            if (! std::isfinite (sum)) return true;
+            return ! conv && ! (residual (p0, K, i) <= kAcceptResidual && plausible());
         };
-        if (bad())
+        if (bad (converged))
         {
             ++statRetries;
             u[srcIn] = lastIn;
             dk.computeP0 (u); // updates p0 in place
             std::copy (std::begin (pPrev), std::end (pPrev), std::begin (p));
-            if (! newton (40))
+            const bool retried = newton (40);
+            if (! retried)
                 evalDevices (i, d);
-            if (bad())
+            if (bad (retried))
             {
                 ++statHeld;
                 std::copy (std::begin (pPrev), std::end (pPrev), std::begin (p));
@@ -501,7 +519,8 @@ public:
 
         // ---- power supply: the whole chain sags with this sample's currents (Supply5150) ----
         const double iPlates = i[4] + i[6];
-        const double iScreens = 2.0 * (tube.screen (p[5], supply.screen) + tube.screen (p[7], supply.screen));
+        for (int t = 0; t < 2; ++t) ig2Tube[t] = tube.screen (p[4 + 2 * t], p[5 + 2 * t], screenNow[t].vg2k);
+        const double iScreens = 2.0 * (ig2Tube[0] + ig2Tube[1]);
         const double iPI = i[0] + i[2];            // V4B + V4A plates (R46, R58 from V3+)
         const double iV2 = preI2 + i[8] + cathodeFollowerCurrent(); // + V3A plate
         if (supplyFrozen)
@@ -519,6 +538,7 @@ public:
     // Newton statistics (for tests)
     long long statSamples = 0, statIterations = 0, statFailures = 0, statRetries = 0, statHeld = 0;
     int testFaults = 0; // tests: the next this-many fault checks report a bad solve
+    int testCorrupt = 0; // tests: the next this-many solves end unconverged, 300 V off (must not be accepted)
     bool lastConverged = true;
 
     // Reference renders for the tone regression: 1000x tighter residual, no early step acceptance and
@@ -541,9 +561,30 @@ public:
     double getPIplateB() const { return dk.nodeV (nPB); }
 
 private:
+    // largest port-equation residual (V, grids weighted 10x) of the state p with device currents i
+    template <typename P0, typename KM>
+    double residual (const P0& p0, const KM& K, const double (&i)[kPorts]) const
+    {
+        double maxF = 0.0;
+        for (int r = 0; r < kPorts; ++r)
+        {
+            double Ki = 0.0;
+            for (int k = 0; k < kPorts; ++k) Ki += K[(size_t) r * kPorts + k] * i[k];
+            maxF = std::max (maxF, std::abs (p[r] - p0[(size_t) r] - Ki) * (r % 2 == 0 ? 1.0 : 10.0));
+        }
+        return maxF;
+    }
+
+    // port voltages the tubes can physically have (plate, grid), with wide margins
+    bool plausible() const
+    {
+        for (int k = 0; k < kPorts; k += 2)
+            if (! (p[k] > -500.0 && p[k] < 1500.0 && p[k + 1] > -1000.0 && p[k + 1] < 100.0)) return false;
+        return true;
+    }
+
     void evalDevices (double (&i)[kPorts], double (&d)[kPorts][2])
     {
-        const auto& screen = screenNow;
         for (int pk : { 0, 2, 8 }) // V4B, V4A, V3A
         {
             const int gk = pk + 1;
@@ -557,7 +598,7 @@ private:
         {
             const int pk = 4 + 2 * t, gk = pk + 1;
             double ip, dvpk, dvg1, ig, dig;
-            tube.plate (p[pk], p[gk], screen, ip, dvpk, dvg1);
+            tube.plate (p[pk], p[gk], screenNow[t], ip, dvpk, dvg1);
             gridCurrentR (p[gk], 1000.0, ig, dig);
             // CR200 / CR201 flyback diodes: conduct from ground into the plate when it swings below 0 V
             constexpr double von = 0.6, vd = 0.03, rd = 1.0;
@@ -638,6 +679,7 @@ private:
         std::copy (std::begin (pIdle), std::end (pIdle), std::begin (p));
         std::copy (std::begin (pIdle), std::end (pIdle), std::begin (pPrev));
         supply.plate = plateIdle; supply.screen = screenIdle;
+        std::copy (std::begin (ig2Idle), std::end (ig2Idle), std::begin (ig2Tube));
         supply.v3 = railIdle[0]; supply.v2 = railIdle[1]; supply.v1 = railIdle[2];
         heldRun = 0;
         lastIn = 0.0;
@@ -647,6 +689,8 @@ private:
     // grids 6 mV (weighted 5x: the grid-current knee is only 30 mV wide). Tuned with tone_regress:
     // -125 dB or better against the reference solution.
     static constexpr double kPlateStepTol = 3e-2, kGridStepWeight = 5.0;
+    // an unconverged solve is kept up to this residual (V): 10 mV, still inaudible
+    static constexpr double kAcceptResidual = 1e-2;
     double resTol = 1e-4;          // port-equation residual (V, grids weighted 10x)
     bool acceptSmallStep = true;
 
@@ -664,7 +708,8 @@ private:
     double fs = 192000.0, T = 1.0 / 192000.0;
     Supply5150 supply;
     double vBias = -45.0;
-    KorenPentode::Screen screenNow { 485.0, 1.0 / 485.0, 0.0 };
+    KorenPentode::Screen screenNow[2] { { 485.0, 1.0 / 485.0, 0.0 }, { 485.0, 1.0 / 485.0, 0.0 } };
+    double ig2Tube[2] {}, ig2Idle[2] {}; // screen current of one tube per side (last sample)
     double p[kPorts] {}, pPrev[kPorts] {};
     double pIdle[kPorts] {}, plateIdle = 490.0, screenIdle = 485.0, lastIn = 0.0;
     double railIdle[3] { 449.9, 322.1, 305.7 };

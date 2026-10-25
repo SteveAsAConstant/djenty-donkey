@@ -10,6 +10,7 @@
 // 4. dynamics: RMS envelope of a 110 Hz tone burst (quiet / loud / quiet), plugin vs NAM
 // Settings: lead channel, gain 5, bass 6, mid 4, treble 6, presence 8, resonance 9, master 3
 // (the "6505 1992 Ld Pr-5 B-6 M-4 T-6 Po-3 R-9 P-8" capture).
+#include <array>
 #include <chrono>
 #include <complex>
 #include <cstdio>
@@ -302,6 +303,76 @@ SwitchResult switchTest (int from, int to, double fadeMs)
     return { inharmonicDb (y, 220.0, 20.0), lowDb (y), inharmonicDb (ref, 220.0, 20.0), lowDb (ref) };
 }
 
+// A third channel mid-fade: `a` (pre-roll 1 s), the switch to `b`, then to `c` gapMs later (before the first fade
+// ends). Reference: three always-running preamps mixed with the same weights (the weights of the moment fade to the
+// new channel: Preamp5150::setMode), fed to one power amp. Same analysis as switchTest.
+SwitchResult switchTest3 (int a, int b, int c, double fadeMs, double gapMs)
+{
+    constexpr int os = 8;
+    const double rate = fs * os;
+    const long long pre = (long long) rate, len = (1 << 16) * (long long) os;
+    const long long sw1 = pre + len / 2, sw2 = sw1 + (long long) (gapMs * 1e-3 * rate);
+    const int fadeLen = std::max (1, (int) (fadeMs * 1e-3 * rate));
+    const auto s = settings();
+    auto makePre = [&] (int channel)
+    {
+        auto p = std::make_unique<vamp::Preamp5150>();
+        p->setChannelTrims (vamp::kChannelPost[0], vamp::kChannelPost[1], vamp::kChannelPost[2]);
+        p->switchFadeMs = fadeMs;
+        p->prepare (rate); p->setMode (channel);
+        p->setControls (s.gain, s.bass, s.mid, s.treble, s.master);
+        return p;
+    };
+    auto makePa = [&] { auto p = std::make_unique<vamp::PowerAmp5150>(); p->setControls (s.presence, s.resonance); p->prepare (rate); return p; };
+    auto in = [&] (long long n) { return 0.1 * std::sin (2 * kPi * 220.0 * (double) n / rate); };
+
+    Signal y, ref;
+    {
+        auto p = makePre (a); auto pa = makePa();
+        for (long long n = 0; n < pre + len; ++n)
+        {
+            if (n == sw1) p->setMode (b);
+            if (n == sw2) p->setMode (c);
+            const double v = vamp::processAmp5150 (*p, *pa, in (n), 1.0);
+            if (n >= pre) y.push_back (v * vamp::kSpeakerToDigital);
+        }
+    }
+    {
+        std::unique_ptr<vamp::Preamp5150> ps[3] = { makePre (a), makePre (b), makePre (c) };
+        auto pa = makePa();
+        auto ramp = [&] (long long n, long long sw) { const double t = (double) (n - sw + 1) / fadeLen; return t <= 0.0 ? 0.0 : t >= 1.0 ? 1.0 : 0.5 - 0.5 * std::cos (kPi * t); };
+        double w[3] = { 1.0, 0.0, 0.0 }, w0[3] = { 1.0, 0.0, 0.0 };
+        for (long long n = 0; n < pre + len; ++n)
+        {
+            if (n == sw2) std::copy (std::begin (w), std::end (w), std::begin (w0));
+            if (n >= sw2) { const double r = ramp (n, sw2); for (int k = 0; k < 3; ++k) w[k] = w0[k] * (1.0 - r) + (k == 2 ? r : 0.0); }
+            else if (n >= sw1) { const double r = ramp (n, sw1); w[0] = 1.0 - r; w[1] = r; w[2] = 0.0; }
+            double x = 0.0, i1 = 0.0, i2 = 0.0;
+            for (int k = 0; k < 3; ++k)
+            {
+                ps[k]->setRails (pa->getRailV1(), pa->getRailV2());
+                x += w[k] * ps[k]->process (in (n));
+                double c1, c2; ps[k]->railCurrents (c1, c2);
+                i1 += w[k] * c1; i2 += w[k] * c2;
+            }
+            pa->setPreampLoad (i1, i2);
+            const double v = pa->process (x);
+            if (n >= pre) ref.push_back (v * vamp::kSpeakerToDigital);
+        }
+    }
+    y = decimate (y, os);
+    ref = decimate (ref, os);
+    auto lowDb = [] (const Signal& x)
+    {
+        const auto p = spectrum (x);
+        const double binHz = fs / (2.0 * (double) p.size());
+        double tot = 0, low = 0;
+        for (size_t k = 1; k < p.size(); ++k) { tot += p[k]; if (k * binHz < 40.0) low += p[k]; }
+        return 10.0 * std::log10 (std::max (low, 1e-30) / tot);
+    };
+    return { inharmonicDb (y, 220.0, 20.0), lowDb (y), inharmonicDb (ref, 220.0, 20.0), lowDb (ref) };
+}
+
 // Sustain: a 110 Hz note (8 harmonics) picked at peakV and decaying at decayDbPerS, through the plugin amp path
 // (gate off and with the default 3-band gate keyed by the input) and the NAM capture. Output level (RMS over 100 ms)
 // every 0.5 s, dB re the level 0.2 s after the pick.
@@ -358,6 +429,12 @@ void switchTests()
             const auto r = switchTest (p.first, p.second, fadeMs);
             std::printf ("%-6s -> %-11s | %+10.1f %+10.1f | %+10.1f %+10.1f\n", name[p.first], name[p.second], r.click, r.thump, r.refClick, r.refThump);
         }
+    }
+    std::printf ("third channel 8 ms into a 20 ms fade | %10s %10s | %10s %10s\n", "clicks", "thump", "ideal clk", "ideal thp");
+    for (const auto& t : { std::array { 2, 1, 0 }, std::array { 0, 1, 2 }, std::array { 1, 2, 0 }, std::array { 2, 0, 1 } })
+    {
+        const auto r = switchTest3 (t[0], t[1], t[2], 20.0, 8.0);
+        std::printf ("%-6s -> %-6s -> %-14s | %+10.1f %+10.1f | %+10.1f %+10.1f\n", name[t[0]], name[t[1]], name[t[2]], r.click, r.thump, r.refClick, r.refThump);
     }
 }
 } // namespace
