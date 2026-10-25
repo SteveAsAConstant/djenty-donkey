@@ -287,20 +287,20 @@ int main (int argc, char** argv)
     {
         // grid over a physical 4x12 of Vintage 30-type speakers: Re 7.3 ohm (Celestion), Qec 1.02 (Qes 0.78 of a
         // V30-type speaker, raised by the box like fc), the unknowns within their physical ranges: total mechanical Q
-        // with the cabinet's losses, in-box resonance, voice-coil inductance (0.35-0.7 mH measured on such speakers)
+        // with the cabinet's losses, in-box resonance, voice-coil inductance (0.35-1 mH measured on such speakers)
         // and its eddy-current loss. One line per point:
         // SPK qmc fc Le Rloss  rms(40 Hz..12 kHz)  then ours - capture per tone (level matched 200 Hz..5 kHz)
         const double perTone = 0.02;
         const auto rn = gains (rig.namRun (sample (multitone (perTone), rig.rateNam(), 1.5)), rig.rateNam(), perTone);
         const auto f = multitoneFreqs();
-        for (double lk : { 1e-4, 10e-3, 20e-3, 40e-3 })
-        for (double qmc : { 3.0, 4.0, 5.0, 6.0 })
-            for (double fc : { 90.0, 95.0, 100.0 })
-                for (double l : { 0.5e-3, 0.7e-3 })
-                    for (double rl : { 15.0, 30.0 })
+        const double lk = vamp::PowerAmp5150::kLeakagePP; // more leakage only raised the highs (inside the loop)
+        for (double qmc : { 2.0, 2.5, 3.0, 4.0 })
+            for (double fc : { 80.0, 85.0, 90.0, 95.0 })
+                for (double l : { 0.5e-3, 0.7e-3, 1.0e-3 })
+                    for (double rl : { 10.0, 15.0, 20.0, 30.0 })
                     {
                         rig.spk[0] = 1.0; rig.spk[1] = l; rig.spk[2] = rl; rig.spk[3] = vamp::PowerAmp5150::kCwinding; rig.spk[4] = 7.3;
-                        rig.mot[0] = 7.3; rig.mot[1] = fc; rig.mot[2] = 1.02; rig.mot[3] = qmc; rig.leak = lk;
+                        rig.mot[0] = 7.3; rig.mot[1] = fc; rig.mot[2] = 0.78 * fc / 75.0; /* Qec = Qes fc / Fs */ rig.mot[3] = qmc; rig.leak = lk;
                         const auto ro = gains (rig.ours (sample (multitone (perTone), Rig::rateOurs, 1.5)), Rig::rateOurs, perTone);
                         double off = 0; int n = 0;
                         for (size_t i = 0; i < f.size(); ++i) if (f[i] >= 200 && f[i] <= 5000) { off += rn[i] - ro[i]; ++n; }

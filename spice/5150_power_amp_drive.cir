@@ -68,10 +68,10 @@ R58 v3 pa 100k
 X4B pb gb k 12AX7
 X4A pa ga k 12AX7
 
-* ---- NFB: Resonance (VR8 1M log) and Presence (VR9 10k log, wiper tied to C8 || C62), C30 to the tail ----
+* ---- NFB: Resonance (VR8 1M POT0752 "5% A": the pre-gain pots' law) and Presence (VR9 10k log, wiper tied to C8 || C62), C30 to the tail ----
 R56 s m 39k
 C12 m y 6.8n
-RVR8 m y {(pow(10,2*res)-1)/99*1Meg+100}
+RVR8 m y {(pow(10,2.65*res)-1)/(pow(10,2.65)-1)*1Meg+100}
 C30 y l 22u
 RVR9 y pr {(1-(pow(10,2*pres)-1)/99)*10k+10}
 C8 pr 0 0.1u
@@ -80,10 +80,17 @@ C62 pr 0 0.033u
 * ---- output grids ----
 C29 pb c1 47n
 R55 c1 bias 220k
+C202 c1 0 100p
 R206 c1 g1 2.2k
 C28 pa c2 47n
 R54 c2 bias 220k
+C201 c2 0 100p
 R202 c2 g2 2.2k
+* 6L6GC interelectrode capacitances (datasheet), two tubes per side: input 10p, grid-to-plate 0.6p each
+Cin1 g1 0 20p
+Cgp1 g1 o1 1.2p
+Cin2 g2 0 20p
+Cgp2 g2 o2 1.2p
 
 * ---- 2 x 2 x 6L6GC ----
 X5 o1 g1 0 scr 6L6GC
@@ -101,12 +108,12 @@ L3 s 0 {Ls}
 K1 L1 L2 L3 1
 Cw o1 o2 2.5n
 
-* ---- 4x12 of Vintage 30s: Re 7.3, voice coil 0.7 mH || 15, motional Res || Lces || Cmes (fc 90 Hz, Qec 0.936, Qmc 3) ----
+* ---- 4x12 of Vintage 30s: Re 7.3, voice coil 0.7 mH || 15, motional Res || Lces || Cmes (fc 85 Hz, Qec 0.884, Qmc 2) ----
 Re s sp1 7.3
 Le sp1 sp2 0.7m
 Rle sp1 sp2 15
-Rm sp2 0 23.397
-Lm sp2 0 13.792m
+Rm sp2 0 16.516
+Lm sp2 0 15.462m
 Cm sp2 0 226.74u
 
 .tran 0 0.3 0 4u

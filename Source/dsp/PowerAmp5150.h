@@ -2,6 +2,7 @@
 #include <algorithm>
 #include <cmath>
 #include "DKCircuit.h"
+#include "PotTapers.h"
 #include "Supply5150.h"
 #include "TriodeStage.h"
 
@@ -142,12 +143,16 @@ public:
     static constexpr double kLeakagePP = 1e-4;   // OT leakage inductance, plate to plate (H)
     // 4x12 of Celestion Vintage 30s, 8 ohm, from Thiele-Small physics: Re 7.3 ohm and Fs 75 Hz (Celestion), Qes 0.78
     // (a V30-type speaker, WGS Veteran 30); the closed cab stiffens the suspension (Vas ~19 L vs ~27-35 L of air per
-    // driver): fc ~90 Hz (owners measure 90-105 Hz), Qec = Qes fc / Fs. The total mechanical Q is far below a single
-    // driver's (~12): box leaks and four drivers with spread resonances (R. Aiken); 3 here, and a 0.7 mH voice coil (a
-    // G12H-75 measures 0.7 mH) with a 15 ohm eddy-current loss: these three fitted within their physical ranges to
-    // power-amp-only captures of a real 6505 into three real cabinets (docs/power_amp.md).
-    static constexpr double kSpeakerRe = 7.3, kSpeakerFc = 90.0, kSpeakerQec = 0.78 * 90.0 / 75.0, kSpeakerQmc = 3.0;
+    // driver): fc 80-105 Hz (owners measure 90-105 Hz), Qec = Qes fc / Fs. The total mechanical Q is far below a
+    // single driver's (~12): box leaks and four drivers with spread resonances (R. Aiken). fc 85 Hz and Qmc 2 (a
+    // 24 ohm peak) and a 0.7 mH voice coil (a G12H-75 measures 0.7 mH) with a 15 ohm eddy-current loss: fitted within
+    // their physical ranges to power-amp-only captures of a real 6505 into three real cabinets (docs/power_amp.md;
+    // the fit would take the loss lower, driven by highs that no physical part here explains, so it stays at 15)
+    static constexpr double kSpeakerRe = 7.3, kSpeakerFc = 85.0, kSpeakerQec = 0.78 * kSpeakerFc / 75.0, kSpeakerQmc = 2.0;
     static constexpr double kVoiceCoilL = 0.7e-3, kVoiceCoilLossR = 15.0;
+    // ---- from the schematic and datasheets ----
+    static constexpr double kCgridFeed = 100e-12;  // C201 / C202: each side's grid feed to ground (factory power board)
+    static constexpr double k6L6Cin = 10e-12, k6L6Cgp = 0.6e-12; // 6L6GC input and grid-to-plate capacitance
 
     PowerAmp5150()
     {
@@ -198,10 +203,19 @@ public:
 
         dk.addC (nPB, nC1, 47e-9);         // C29
         srcBias1 = dk.addSource (nC1, 220e3); // R55
+        dk.addC (nC1, G, kCgridFeed);      // C202
         dk.addR (nC1, nG1, 2.2e3);         // R206 / R208
         dk.addC (nPA, nC2, 47e-9);         // C28
         srcBias2 = dk.addSource (nC2, 220e3); // R54
+        dk.addC (nC2, G, kCgridFeed);      // C201
         dk.addR (nC2, nG2, 2.2e3);         // R202 / R204
+        // 6L6GC interelectrode capacitances (datasheet), two tubes per side: g1 to cathode + g2 + g3 (input) and g1 to
+        // plate (Miller, the plate swings ~6x the grid)
+        for (const auto& gp : { std::pair { nG1, nO1 }, std::pair { nG2, nO2 } })
+        {
+            dk.addC (gp.first, G, 2.0 * k6L6Cin);
+            dk.addC (gp.first, gp.second, 2.0 * k6L6Cgp);
+        }
 
         const double np = std::sqrt (kRaa / kRload);
         srcB = dk.addSource (nCT, 1.0);
@@ -309,12 +323,12 @@ public:
         dk.setC (cWinding, cWindingF);
     }
 
-    // The speaker's motional impedance from Thiele-Small terms (call before prepare): in-box resonance fc, electrical
-    // and total mechanical Q (box losses included): Cmes = Qec / (2 pi fc Re), Lces = 1 / ((2 pi fc)^2 Cmes),
-    // Res = Re Qmc / Qec (the parallel R || L || C behind Re and the voice coil)
     // OT leakage inductance, plate to plate (call before prepare)
     void setLeakage (double lpp) { dk.setL (lLeak, std::max (lpp, 1e-6) * kRload / kRaa); }
 
+    // The speaker's motional impedance from Thiele-Small terms (call before prepare): in-box resonance fc, electrical
+    // and total mechanical Q (box losses included): Cmes = Qec / (2 pi fc Re), Lces = 1 / ((2 pi fc)^2 Cmes),
+    // Res = Re Qmc / Qec (the parallel R || L || C behind Re and the voice coil)
     void setSpeakerMotional (double re, double fc, double qec, double qmc)
     {
         const double w = kTwoPi * fc, cmes = qec / (w * re);
@@ -330,7 +344,9 @@ public:
 
     void setControls (double presence, double resonance)
     {
-        dk.setR (rRes, (std::pow (10.0, 2.0 * std::clamp (resonance, 0.0, 1.0)) - 1.0) / 99.0 * 1e6 + 100.0);
+        // VR8 is POT0752 "1M 5% A", the same part as the pre-gain pots (wiper tied to the CW end: more resistance,
+        // less low-end feedback, as the knob turns up)
+        dk.setR (rRes, taperPot (std::clamp (resonance, 0.0, 1.0)) * 1e6 + 100.0);
         // VR9 10KA: the resistance left in circuit falls along the audio taper, so Presence acts mostly near the top
         dk.setR (rPres, (1.0 - (std::pow (10.0, 2.0 * std::clamp (presence, 0.0, 1.0)) - 1.0) / 99.0) * 10e3 + 10.0);
     }

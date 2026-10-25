@@ -269,6 +269,25 @@ CLEAN 用同一个电位器，所以中间刻度时也变响了（Gain 6 时约 
 极小信号（每个音 10 µV）下 BRIGHT 开在 13 kHz 反而多 8 dB；那个电平上 NAM 本身最不可靠（LeakyReLU），以吉他电平的结果为准。
 真机上 Rhythm 网络在 LEAD 时也挂在 C6 上，BRIGHT 对 LEAD 有一点影响：5 个接真实箱体的 LEAD 捕获上每个频段都小于 0.1 dB，LEAD 高频多出的 +1…+3 dB 不是它造成的。
 
+## LEAD 的低频和高频：接真实箱体的整机捕获（v0.5.3 之后）
+
+2dor 的 5 个 [AMP] LEAD 捕获（真实箱体、旋钮刻度在作者的表格里），`nam_compare --residual`，吉他信号，63 Hz 一档（我们 - 真机）：
+
+| 捕获（箱体，Resonance） | v0.5.3 | 现在 |
+|---|---|---|
+| Sneap（Marshall 4x12，R 7） | +2.0 | +0.8 |
+| Mirroring（Mesa 2x12，R 7.8） | +3.8 | +2.8 |
+| Legend（Mesa 2x12，R 6.5） | +1.4 | 0.0 |
+| Ending Heartbrake（Mesa 4x12，R 6） | +1.3 | -0.3 |
+| Pink Gator（Mesa 4x12，R 5.5，Post 1.5） | +3.5 | +1.8 |
+
+先用只录功放的 [POW] 捕获把误差分开：三个箱体上功放自己在 80–125 Hz 多 +0.8…+2.5 dB、6 kHz 以上多 +0.7…+2.9 dB，所以 LEAD 的低频和高频大部分来自功放，不是前级。低频的原因找到了：VR8 Resonance 在出厂原理图上和 Gain 是同一个零件（POT0752 "1M 5% A"），模型却用了一般的对数律，Resonance 7 时电阻多了约 50%。改正后重新拟合喇叭（fc 85 Hz、Qmc 2，都在物理范围内）。另外按原理图补上了 C201 / C202 和 6L6 的极间电容。细节见 [power_amp.md](power_amp.md)。
+
+剩下的：
+- Resonance 很高时（7.8）低频仍多 +2.8 dB，而且 41 个负载箱捕获上偏差随 Resonance 每格约 +0.5 dB：Resonance 高时输出阻抗大，输出跟着各自负载的谐振走，一个 4x12 模型对不上 2x12 和负载箱；
+- 12.8 kHz 约 +2…+4 dB：其中约 +2 dB 功放捕获上也有、三个箱体一样，没找到电路上的原因（见 power_amp.md"还没解决的高频"）；前级只多出 +0.5…+1.5 dB，只在 12.8 kHz 这一档；
+- 负载箱（Suhr）捕获上 12.8 kHz 多 +4…+7 dB：负载箱的高频阻抗比真实喇叭低，这些捕获不能用来判断高频。
+
 ## 延音：箱头本身和真机一致，短的是噪声门
 
 `amp_path_test sustain <capture.nam>`：110 Hz 的音符，输入每秒衰减 12 dB，看输出电平（re 拨弦后 0.2 s）。设置和 `Pr-5 B-6 M-4 T-6 Po-3 R-9 P-8` 捕获相同。
