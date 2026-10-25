@@ -373,6 +373,66 @@ SwitchResult switchTest3 (int a, int b, int c, double fadeMs, double gapMs)
     return { inharmonicDb (y, 220.0, 20.0), lowDb (y), inharmonicDb (ref, 220.0, 20.0), lowDb (ref) };
 }
 
+// CRUNCH flipped mid-note on BLUE (relay K4): as switchTest, the reference two always-running preamps (BLUE with
+// crunch from / to) crossfaded over the same time
+SwitchResult crunchTest (bool from, double fadeMs)
+{
+    constexpr int os = 8;
+    const double rate = fs * os;
+    const long long pre1 = (long long) (0.5 * rate), pre2 = pre1 + (long long) rate, len = (1 << 16) * (long long) os;
+    const long long sw = pre2 + len / 2;
+    const auto s = settings();
+    auto makePre = [&] (bool crunch)
+    {
+        auto p = std::make_unique<vamp::Preamp5150> (false, crunch);
+        p->setChannelTrims (vamp::kChannelPost[0], vamp::kChannelPost[1], vamp::kChannelPost[2]);
+        p->switchFadeMs = fadeMs;
+        p->prepare (rate); p->setMode (vamp::Preamp5150::Blue);
+        p->setControls (s.gain, s.bass, s.mid, s.treble, s.master);
+        return p;
+    };
+    auto makePa = [&] { auto p = std::make_unique<vamp::PowerAmp5150>(); p->setControls (s.presence, s.resonance); p->prepare (rate); return p; };
+    auto in = [&] (long long n) { return 0.1 * std::sin (2 * kPi * 220.0 * (double) n / rate); };
+
+    Signal y, ref;
+    {
+        auto pre = makePre (! from); auto pa = makePa();
+        for (long long n = 0; n < pre2 + len; ++n)
+        {
+            if (n == pre1) pre->setCrunch (from);
+            if (n == sw) pre->setCrunch (! from);
+            const double v = vamp::processAmp5150 (*pre, *pa, in (n), 1.0);
+            if (n >= pre2) y.push_back (v * vamp::kSpeakerToDigital);
+        }
+    }
+    {
+        auto a = makePre (from), b = makePre (! from); auto pa = makePa();
+        const double fade = fadeMs * 1e-3 * rate;
+        for (long long n = 0; n < pre2 + len; ++n)
+        {
+            const double t = (double) (n - sw) / std::max (fade, 1.0), w = t <= 0.0 ? 0.0 : t >= 1.0 ? 1.0 : 0.5 - 0.5 * std::cos (kPi * t);
+            for (auto* p : { a.get(), b.get() }) p->setRails (pa->getRailV1(), pa->getRailV2());
+            const double x = (1.0 - w) * a->process (in (n)) + w * b->process (in (n));
+            double i1a, i2a, i1b, i2b;
+            a->railCurrents (i1a, i2a); b->railCurrents (i1b, i2b);
+            pa->setPreampLoad ((1.0 - w) * i1a + w * i1b, (1.0 - w) * i2a + w * i2b);
+            const double v = pa->process (x);
+            if (n >= pre2) ref.push_back (v * vamp::kSpeakerToDigital);
+        }
+    }
+    y = decimate (y, os);
+    ref = decimate (ref, os);
+    auto lowDb = [] (const Signal& x)
+    {
+        const auto p = spectrum (x);
+        const double binHz = fs / (2.0 * (double) p.size());
+        double tot = 0, low = 0;
+        for (size_t k = 1; k < p.size(); ++k) { tot += p[k]; if (k * binHz < 40.0) low += p[k]; }
+        return 10.0 * std::log10 (std::max (low, 1e-30) / tot);
+    };
+    return { inharmonicDb (y, 220.0, 20.0), lowDb (y), inharmonicDb (ref, 220.0, 20.0), lowDb (ref) };
+}
+
 // Sustain: a 110 Hz note (8 harmonics) picked at peakV and decaying at decayDbPerS, through the plugin amp path
 // (gate off and with the default 3-band gate keyed by the input) and the NAM capture. Output level (RMS over 100 ms)
 // every 0.5 s, dB re the level 0.2 s after the pick.
@@ -435,6 +495,12 @@ void switchTests()
     {
         const auto r = switchTest3 (t[0], t[1], t[2], 20.0, 8.0);
         std::printf ("%-6s -> %-6s -> %-14s | %+10.1f %+10.1f | %+10.1f %+10.1f\n", name[t[0]], name[t[1]], name[t[2]], r.click, r.thump, r.refClick, r.refThump);
+    }
+    std::printf ("BLUE, CRUNCH flipped, 20 ms fade     | %10s %10s | %10s %10s\n", "clicks", "thump", "ideal clk", "ideal thp");
+    for (bool from : { true, false })
+    {
+        const auto r = crunchTest (from, 20.0);
+        std::printf ("crunch %-3s -> %-22s | %+10.1f %+10.1f | %+10.1f %+10.1f\n", from ? "on" : "off", from ? "off" : "on", r.click, r.thump, r.refClick, r.refThump);
     }
 }
 } // namespace

@@ -23,6 +23,7 @@ public:
     {
         int channel = 2;
         bool bright = true;    // BRIGHT pushbutton (rhythm: CLEAN and BLUE)
+        bool crunch = true;    // CRUNCH pushbutton (BLUE)
         bool noise = false;    // circuit noise of the preamp (resistors, tubes)
         int tubeSet = 0;       // TubeSet: 0 nominal tubes, 1.. particular sets
         float gain = 0.6f, bass = 0.5f, mid = 0.5f, treble = 0.6f;
@@ -93,6 +94,7 @@ public:
     void process (float* data, int numSamples, const Settings& s)
     {
         const int channel = juce::jlimit (0, 2, s.channel);
+        preamp.setCrunch (s.crunch); // before the channel, so the first block starts on the right circuit
         if (firstBlock) preamp.setModeNow (channel); // nothing audible yet: no switch crossfade
         else preamp.setMode (channel);
         preamp.setBright (s.bright); // no-op unless it changed

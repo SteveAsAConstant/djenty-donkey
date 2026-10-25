@@ -6,14 +6,14 @@ namespace vamp
 {
 // A set of real tubes instead of the nominal model: each position gets its own plate-current scale (current and gm
 // together: Koren's kg1) and, for the 12AX7s, amplification factor, drawn from production spreads. Set 0 is the
-// nominal model; sets 1..kSets-1 are fixed draws (a preset recalls the same tubes).
+// nominal model ("Stock"); sets 1..kSets-1 are fixed draws (a preset recalls the same tubes).
 //   12AX7: current sigma 12 %, mu sigma 4 % (+-25 % / +-8 % at 2 sigma, inside the datasheets' tolerances)
 //   6L6GC: current sigma 6 % per tube (a fairly matched quad); each side of the push-pull is the average of its two
 // Draws are clipped at 2.5 sigma. Passive parts keep their nominal values.
 struct TubeSet
 {
     static constexpr int kSets = 6;
-    static constexpr const char* kNames[kSets] = { "Nominal", "Set A", "Set B", "Set C", "Set D", "Set E" };
+    static constexpr const char* kNames[kSets] = { "Stock", "Set A", "Set B", "Set C", "Set D", "Set E" };
 
     double preI[6] { 1, 1, 1, 1, 1, 1 }, preMu[6] { 1, 1, 1, 1, 1, 1 }; // V1A V1B V2A V2B V5B V5A
     double paI[3] { 1, 1, 1 }, paMu[3] { 1, 1, 1 };                     // V4B V4A V3A

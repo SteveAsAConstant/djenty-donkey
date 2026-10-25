@@ -261,9 +261,11 @@ VibeAmpEditor::VibeAmpEditor (VibeAmpProcessor& p) : AudioProcessorEditor (&p), 
     ampSec->add<ChannelSelector> (s, ids::channel, [this] (int ch) { setAmpChannelColour (ch); });
     ampSec->add<ToggleStack> (s, std::vector<ToggleStack::Item> {
         { ids::ampBright, "BRIGHT", "The rhythm channel's BRIGHT switch (C10 across R21, as on the amp): CLEAN and BLUE." },
+        { ids::ampCrunch, "CRUNCH", "The rhythm channel's CRUNCH switch (relay K4, as on the amp): on, BLUE is the crunch "
+                                    "rhythm; off, the 6505's rhythm channel without crunch (all five stages, less gain)." },
         { ids::ampNoise, "NOISE", "The preamp's own noise, from physics: thermal noise of its resistors, shot and flicker "
                                   "noise of its tubes. Off: a noiseless amp." } }, colours::red,
-        ToggleStack::Item { ids::tubeSet, "TUBES", "Nominal: the datasheet tubes. Set A-E: particular real tubes, each "
+        ToggleStack::Item { ids::tubeSet, "TUBES", "Stock: the datasheet (nominal) tubes. Set A-E: particular real tubes, each "
                             "12AX7 and 6L6 within production spreads (gain, bias and the output pairs' balance differ "
                             "a little, as from one amp to the next)." });
     ampSec->add<Knob> (s, ids::ampGain, "Gain", colours::red);

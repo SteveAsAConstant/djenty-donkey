@@ -79,6 +79,7 @@ inline double masterKnobFromV03 (double x) { return taperPotInverse (std::clamp 
 // channel's relay positions (factory schematic sheet 1; docs/5150_schematic_notes.md), solved as one circuit:
 //  RED   (5150 lead):     FullPreamp5150 (Lead):   V1A -> both gain nets, VR2 -> V1B (R18) -> V2A -> V2B -> V5B -> V5A
 //  BLUE  (6505 crunch):   FullPreamp5150 (Crunch): V1A -> both gain nets, VR1 -> V1B -> V2A (R20) -> ... -> V5A
+//        CRUNCH off: FullPreamp5150 (Clean): the rhythm network at rest (K4), the same five stages (the amp's)
 //  CLEAN (6505 rhythm, optimized): CleanPreamp5150: V1A -> both gain nets, VR1 -> V1B
 //         "optimized" = V2A..V5A bypassed for headroom (not in the original amp)
 // then the tone stack.
@@ -91,14 +92,16 @@ public:
     // the model's tube currents. With the supply connected (setRails) they follow the sagging rails per sample.
     double vb1 = 305.7, vb2 = 322.1;
 
-    FullPreamp5150 lead;   // RED
-    FullPreamp5150 blue;   // BLUE
-    CleanPreamp5150 clean; // CLEAN
+    FullPreamp5150 lead;    // RED
+    FullPreamp5150 blue;    // BLUE (crunch)
+    CleanPreamp5150 clean;  // CLEAN
+    FullPreamp5150 blueOff; // BLUE with CRUNCH off
 
     // diagnostics: RED and BLUE also compute every cathode and plate voltage (getVk / getVp, tests).
-    // blueCrunch false: BLUE is the rhythm channel with crunch off instead (the amp's, all five stages; comparisons)
+    // blueCrunch: the CRUNCH switch's initial position (false: BLUE starts as the rhythm channel with crunch off)
     explicit Preamp5150 (bool diagnostics = false, bool blueCrunch = true)
-        : lead (channel5150::Lead, diagnostics), blue (blueCrunch ? channel5150::Crunch : channel5150::Clean, diagnostics)
+        : lead (channel5150::Lead, diagnostics), blue (channel5150::Crunch, diagnostics),
+          blueOff (channel5150::Clean, diagnostics), crunch (blueCrunch)
     {
         // ---- tone stack and its feed as on the schematic (factory sheet 1 and the redraw agree):
         // nodes 0 trebTop, 1 out, 2 trebBot / bassTop, 3 x, 4 bassBot / midTop, 5 C59-R94, 6 in, 7 mid wiper.
@@ -128,13 +131,15 @@ public:
         lead.configure (vb1, vb2, fs);
         blue.configure (vb1, vb2, fs);
         clean.configure (vb1, fs);
+        blueOff.configure (vb1, vb2, fs);
         // idle draw of the stages CLEAN bypasses: in the real amp every tube is lit and draws from its rail
         idleI1V2A = dcPlateCurrent (vb1, 100e3, 39e3);
         idleI2Late = dcPlateCurrent (vb2, 220e3, 1.82e3) + dcPlateCurrent (vb2, 220e3, 2.2e3) + dcPlateCurrent (vb2, 100e3, 2.2e3);
         fadeLen = std::max (1, (int) (switchFadeMs * 1e-3 * fs));
         fadePos = fadeLen; // no switch in progress
-        for (int c = 0; c < 3; ++c) w[c] = w0[c] = c == mode ? 1.0 : 0.0;
-        toneStack.setR (tsSrc, sourceR (mode));
+        path = pathOf (mode);
+        for (int c = 0; c < kPaths; ++c) w[c] = w0[c] = c == path ? 1.0 : 0.0;
+        toneStack.setR (tsSrc, sourceR (path));
 
         // let coupling / cathode caps settle
         for (int i = 0; i < (int) (fs * 0.3); ++i)
@@ -155,17 +160,18 @@ public:
     void setMode (int newMode)
     {
         if (newMode == mode) return;
-        if (fresh) { setModeNow (newMode); return; } // no audio since prepare(): nothing to fade from
-        if (w[newMode] <= 0.0)
-        {
-            int from = mode;
-            for (int c = 0; c < 3; ++c) if (c != newMode && w[c] > w[from]) from = c;
-            enterPath (newMode, from);
-        }
-        std::copy (std::begin (w), std::end (w), std::begin (w0));
         mode = newMode;
-        fadePos = 0;
+        switchPath (pathOf (mode));
     }
+
+    // CRUNCH (rhythm, relay K4): BLUE's gain network. Switched like a channel (K4 rewires the same tubes).
+    void setCrunch (bool on)
+    {
+        if (on == crunch) return;
+        crunch = on;
+        switchPath (pathOf (mode));
+    }
+    bool getCrunch() const { return crunch; }
 
     // Immediate switch without a crossfade, the channel's circuits from their idle point: for when nothing is
     // audible yet (the first block after prepare)
@@ -173,15 +179,20 @@ public:
     {
         if (newMode == mode && fadePos >= fadeLen) return;
         mode = newMode;
-        resetPath (mode);
+        path = pathOf (mode);
+        resetPath (path);
         fadePos = fadeLen;
-        for (int c = 0; c < 3; ++c) w[c] = w0[c] = c == mode ? 1.0 : 0.0;
-        toneStack.setR (tsSrc, sourceR (mode));
+        for (int c = 0; c < kPaths; ++c) w[c] = w0[c] = c == path ? 1.0 : 0.0;
+        toneStack.setR (tsSrc, sourceR (path));
     }
 
     // per-channel gain at the preamp output (AmpSim's Post trim): inside the crossfade, so a switch between
-    // channels of very different trim (CLEAN 25x) does not swell the old channel mid-fade
-    void setChannelTrims (double cleanTrim, double blueTrim, double redTrim) { trim[Clean] = cleanTrim; trim[Blue] = blueTrim; trim[Red] = redTrim; }
+    // channels of very different trim (CLEAN 25x) does not swell the old channel mid-fade. BLUE's trim for both
+    // CRUNCH positions (the same Post pot).
+    void setChannelTrims (double cleanTrim, double blueTrim, double redTrim)
+    {
+        trim[PClean] = cleanTrim; trim[PBlue] = trim[PBlueOff] = blueTrim; trim[PRed] = redTrim;
+    }
 
     // BRIGHT (rhythm) is on by default: BLUE was calibrated with it (docs/nam_calibration.md)
     bool bright = true;
@@ -221,6 +232,7 @@ public:
         lead.setGainPots (leadPot, rhythm);
         blue.setGainPots (leadPot, rhythm);
         clean.setGainPots (leadPot, rhythm);
+        blueOff.setGainPots (leadPot, rhythm);
     }
 
     // BRIGHT pushbutton (S1C shorts R75: C10 across R21). In every channel's circuit; audible in CLEAN and BLUE.
@@ -230,6 +242,7 @@ public:
         lead.setBright (on);
         blue.setBright (on);
         clean.setBright (on);
+        blueOff.setBright (on);
     }
 
     // Tube set (TubeSet): V1A V1B V2A V2B V5B V5A as particular tubes. The same tube in every channel's circuit (the
@@ -240,6 +253,7 @@ public:
         {
             lead.net.setTubeVariation (t, s.preI[t], s.preMu[t]);
             blue.net.setTubeVariation (t, s.preI[t], s.preMu[t]);
+            blueOff.net.setTubeVariation (t, s.preI[t], s.preMu[t]);
             if (t < 2) clean.net.setTubeVariation (t, s.preI[t], s.preMu[t]);
         }
     }
@@ -253,6 +267,7 @@ public:
         lead.setNoise (on, 0x1234567ull);
         blue.setNoise (on, 0x89abcdefull);
         clean.setNoise (on, 0x51ed270bull);
+        blueOff.setNoise (on, 0x2f6b9c4dull);
     }
     bool getNoise() const { return noise; }
 
@@ -267,10 +282,10 @@ public:
             const double s = 0.5 - 0.5 * std::cos (kPi * (double) fadePos / (double) fadeLen); // 0 -> 1
             x = 0.0;
             double rs = 0.0;
-            for (int c = 0; c < 3; ++c)
+            for (int c = 0; c < kPaths; ++c)
             {
-                const bool running = w[c] > 0.0 || c == mode;
-                w[c] = fadePos >= fadeLen ? (c == mode ? 1.0 : 0.0) : w0[c] * (1.0 - s) + (c == mode ? s : 0.0);
+                const bool running = w[c] > 0.0 || c == path;
+                w[c] = fadePos >= fadeLen ? (c == path ? 1.0 : 0.0) : w0[c] * (1.0 - s) + (c == path ? s : 0.0);
                 if (running) x += w[c] * runPath (c, vin) * trim[c]; // a fading-out channel runs to the end
                 rs += w[c] * sourceR (c);
             }
@@ -278,7 +293,7 @@ public:
                 toneStack.setR (tsSrc, rs);
         }
         else
-            x = runPath (mode, vin) * trim[mode];
+            x = runPath (path, vin) * trim[path];
 
         // Tone stack through R89 / R24 as on the schematic. Against the NAM captures it is ~3 dB brighter above
         // 5 kHz and ~2.5 dB lower in the mids than v0.4's fitted stand-in (a 60 pF low-pass, no R24 network); no
@@ -294,6 +309,7 @@ public:
         lead.setReferencePrecision (on);
         blue.setReferencePrecision (on);
         clean.setReferencePrecision (on);
+        blueOff.setReferencePrecision (on);
     }
 
     // Supply rails V1+ / V2+ for the next sample (from PowerAmp5150's supply chain)
@@ -302,17 +318,18 @@ public:
         lead.setRails (v1, v2);
         blue.setRails (v1, v2);
         clean.setRails (v1);
+        blueOff.setRails (v1, v2);
     }
 
     // current drawn from V1+ / V2+ at the last sample, by the channel's active stages (the bypassed ones idle);
     // during a switch the two channels' draws are blended with the crossfade
     void railCurrents (double& i1, double& i2) const
     {
-        pathCurrents (mode, i1, i2);
+        pathCurrents (path, i1, i2);
         if (fadePos < fadeLen)
         {
             i1 = i2 = 0.0;
-            for (int c = 0; c < 3; ++c)
+            for (int c = 0; c < kPaths; ++c)
                 if (w[c] > 0.0)
                 {
                     double o1, o2;
@@ -329,44 +346,63 @@ public:
 private:
     static constexpr double kPi = 3.14159265358979323846;
 
-    // one sample of a channel's preamp up to the tone stack input
-    double runPath (int m, double vin)
-    {
-        return m == Red ? lead.process (vin) : m == Blue ? blue.process (vin) : clean.process (vin);
-    }
+    // the circuits ("paths"): a channel, and for BLUE the CRUNCH position
+    enum Path { PClean = 0, PBlue = 1, PRed = 2, PBlueOff = 3 };
+    static constexpr int kPaths = 4;
+    int pathOf (int channel) const { return channel == Blue && ! crunch ? PBlueOff : channel; }
 
-    // a channel's circuit back to its idle point
-    void resetPath (int m)
+    // to circuit p, crossfaded from whatever runs now (see setMode)
+    void switchPath (int p)
     {
-        if (m == Red) lead.reset();
-        else if (m == Blue) blue.reset();
-        else clean.reset();
-    }
-
-    // channel m comes in: its circuit takes over the state of channel `from`'s (see setMode)
-    void enterPath (int m, int from)
-    {
-        if (m == Clean) { clean.warmFrom (from == Red ? lead : blue); return; }
-        auto& p = m == Red ? lead : blue;
-        if (from == Clean) p.warmFrom (clean);
-        else p.warmFrom (from == Red ? lead : blue);
-    }
-
-    void pathCurrents (int m, double& i1, double& i2) const
-    {
-        if (m != Clean)
+        if (p == path) return;
+        if (fresh) { path = p; resetPath (p); for (int c = 0; c < kPaths; ++c) w[c] = w0[c] = c == p ? 1.0 : 0.0;
+                     toneStack.setR (tsSrc, sourceR (p)); return; } // no audio since prepare(): nothing to fade from
+        if (w[p] <= 0.0)
         {
-            const auto& p = m == Red ? lead : blue;
-            i1 = p.railCurrent1();
-            i2 = p.railCurrent2();
+            int from = path;
+            for (int c = 0; c < kPaths; ++c) if (c != p && w[c] > w[from]) from = c;
+            enterPath (p, from);
+        }
+        std::copy (std::begin (w), std::end (w), std::begin (w0));
+        path = p;
+        fadePos = 0;
+    }
+
+    FullPreamp5150& full (int p) { return p == PRed ? lead : p == PBlue ? blue : blueOff; }
+    const FullPreamp5150& full (int p) const { return p == PRed ? lead : p == PBlue ? blue : blueOff; }
+
+    // one sample of a circuit up to the tone stack input
+    double runPath (int p, double vin) { return p == PClean ? clean.process (vin) : full (p).process (vin); }
+
+    // a circuit back to its idle point
+    void resetPath (int p)
+    {
+        if (p == PClean) clean.reset();
+        else full (p).reset();
+    }
+
+    // circuit p comes in: it takes over the state of circuit `from` (see setMode)
+    void enterPath (int p, int from)
+    {
+        if (p == PClean) { clean.warmFrom (full (from)); return; }
+        if (from == PClean) full (p).warmFrom (clean);
+        else full (p).warmFrom (full (from));
+    }
+
+    void pathCurrents (int p, double& i1, double& i2) const
+    {
+        if (p != PClean)
+        {
+            i1 = full (p).railCurrent1();
+            i2 = full (p).railCurrent2();
             return;
         }
         i1 = clean.railCurrent1() + idleI1V2A;
         i2 = idleI2Late;
     }
 
-    // R89 + the output impedance of the plate that drives it in channel m
-    static double sourceR (int m) { return kR89 + (m == Clean ? kRoutV1B : kRoutV5Afb); }
+    // R89 + the output impedance of the plate that drives it in circuit p
+    static double sourceR (int p) { return kR89 + (p == PClean ? kRoutV1B : kRoutV5Afb); }
 
     // idle (grid at 0 V) plate current of a cathode-biased stage
     static double dcPlateCurrent (double vb, double rp, double rk)
@@ -385,11 +421,13 @@ private:
     static constexpr double kRoutV5Afb = kRoutV5A / (1.0 + 26.0 * 0.346);
 
     double fs = 192000.0;
-    int mode = Red;
+    int mode = Red;               // the channel
+    bool crunch = true;           // the CRUNCH switch (BLUE)
+    int path = PRed;              // the circuit that runs (fading in, during a switch)
     int fadeLen = 1, fadePos = 1; // channel-switch crossfade (fadePos >= fadeLen: none in progress)
-    double w[3] { 0.0, 0.0, 1.0 }, w0[3] { 0.0, 0.0, 1.0 }; // channel weights now / at the start of the fade
+    double w[kPaths] { 0.0, 0.0, 1.0, 0.0 }, w0[kPaths] { 0.0, 0.0, 1.0, 0.0 }; // circuit weights now / at the fade start
     bool fresh = false;           // prepared, no audio yet: setMode() switches at once
-    double trim[3] { 1.0, 1.0, 1.0 };
+    double trim[kPaths] { 1.0, 1.0, 1.0, 1.0 };
     double postGain = 0.1;
     double lastPreampOut = 0.0;
     double idleI1V2A = 0.0, idleI2Late = 0.0; // CLEAN: rail draw of the bypassed stages

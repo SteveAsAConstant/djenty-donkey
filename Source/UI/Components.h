@@ -393,14 +393,23 @@ public:
     void resized() override
     {
         auto b = getLocalBounds();
-        const int h = 24, gap = 6, comboH = combo ? 16 + 24 + gap : 0;
-        const int total = buttons.size() * h + (buttons.size() - 1) * gap + comboH;
-        b = b.withSizeKeepingCentre (juce::jmin (b.getWidth(), 92), total);
+        // natural sizes, shrunk together (down to a floor) when the panel is short (small window)
+        int h = 24, gap = 6, labelH = combo ? 16 : 0, comboBoxH = combo ? 24 : 0;
+        const int n = buttons.size();
+        auto total = [&] { return n * h + (n - 1) * gap + (combo ? gap + labelH + comboBoxH : 0); };
+        while (total() > b.getHeight() && h > 16)
+        {
+            --h;
+            if (gap > 2) --gap;
+            if (comboBoxH > 18) --comboBoxH;
+            if (labelH > 12) --labelH;
+        }
+        b = b.withSizeKeepingCentre (juce::jmin (b.getWidth(), 92), total());
         for (auto* btn : buttons) { btn->setBounds (b.removeFromTop (h)); b.removeFromTop (gap); }
         if (combo)
         {
-            comboLabel.setBounds (b.removeFromTop (16));
-            combo->setBounds (b.removeFromTop (24));
+            comboLabel.setBounds (b.removeFromTop (labelH));
+            combo->setBounds (b.removeFromTop (comboBoxH));
         }
     }
 
