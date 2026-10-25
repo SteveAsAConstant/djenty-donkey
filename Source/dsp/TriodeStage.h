@@ -68,6 +68,14 @@ struct KorenTriode
 
     bool exact = false; // reference renders: original formula instead of the table
 
+    // This tube's deviation from the nominal one (TubeSet): plate current (and gm with it) x currentScale,
+    // amplification factor x muScale. 1 / 1: exactly the nominal model.
+    void setVariation (double currentScale, double muScale)
+    {
+        kpOverMu = kp / (mu * muScale);
+        twoOverKg1 = 2.0 / kg1 * currentScale;
+    }
+
     // Plate current and its partial derivatives w.r.t. Vpk and Vgk:
     //   ip = 2/kg1 (vpk/kp)^ex softplus(x)^ex,   x = kp (1/mu + vgk / sqrt(kvb + vpk^2))
     // (vpk/kp)^(ex-1) and the softplus table are independent, so the CPU overlaps them.
@@ -75,7 +83,7 @@ struct KorenTriode
     {
         if (exact) { evalExact (vpk, vgk, ip, dVpk, dVgk); return; }
         if (vpk <= 0.0) { ip = 0.0; dVpk = 0.0; dVgk = 0.0; return; }
-        constexpr double kpOverMu = kp / mu, invKp = 1.0 / kp, twoOverKg1 = 2.0 / kg1;
+        constexpr double invKp = 1.0 / kp;
         const double r = vpk * invKp;
         const double rp = std::exp ((ex - 1.0) * std::log (r)); // (vpk/kp)^(ex-1)
         const double invS = 1.0 / std::sqrt (kvb + vpk * vpk);
@@ -93,7 +101,7 @@ struct KorenTriode
     // The same with the original formula (3 serial exp/log calls): reference for the tests
     inline void evalExact (double vpk, double vgk, double& ip, double& dVpk, double& dVgk) const
     {
-        constexpr double kpOverMu = kp / mu, invKp = 1.0 / kp, twoOverKg1 = 2.0 / kg1;
+        constexpr double invKp = 1.0 / kp;
         const double invS = 1.0 / std::sqrt (kvb + vpk * vpk);
         const double x = kpOverMu + kp * vgk * invS;
 
@@ -117,6 +125,9 @@ struct KorenTriode
         dVgk = dIdE * vs;
         dVpk = dIdE * (sp * invKp - vpk * vgk * vs * invS * invS);
     }
+
+private:
+    double kpOverMu = kp / mu, twoOverKg1 = 2.0 / kg1; // nominal unless setVariation
 };
 
 // Grid conduction: diode-like knee (~0.25 V) into ~2k grid resistance

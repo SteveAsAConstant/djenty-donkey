@@ -4,6 +4,7 @@
 #include "LinearNetwork.h"
 #include "FullPreamp5150.h"
 #include "PotTapers.h"
+#include "TubeSet.h"
 #include "TriodeStage.h"
 
 namespace vamp
@@ -229,6 +230,18 @@ public:
         lead.setBright (on);
         blue.setBright (on);
         clean.setBright (on);
+    }
+
+    // Tube set (TubeSet): V1A V1B V2A V2B V5B V5A as particular tubes. The same tube in every channel's circuit (the
+    // relays only rewire around it); CLEAN uses V1A and V1B. Takes effect at once, as swapping tubes.
+    void setTubeSet (const TubeSet& s)
+    {
+        for (int t = 0; t < 6; ++t)
+        {
+            lead.net.setTubeVariation (t, s.preI[t], s.preMu[t]);
+            blue.net.setTubeVariation (t, s.preI[t], s.preMu[t]);
+            if (t < 2) clean.net.setTubeVariation (t, s.preI[t], s.preMu[t]);
+        }
     }
 
     // Circuit noise: every resistor in the grid networks (thermal) and every tube (shot, flicker) of the three channel

@@ -5,6 +5,7 @@
 #include "PotTapers.h"
 #include "Supply5150.h"
 #include "TriodeStage.h"
+#include "TubeSet.h"
 
 namespace vamp
 {
@@ -27,6 +28,7 @@ struct KorenPentode
     static const SoftplusPow& softplusPow() { static const SoftplusPow t (ex); return t; }
 
     bool exact = false; // reference renders: original formula instead of the table
+    double currentScale = 1.0; // this tube's deviation from the nominal one (TubeSet): cathode current x
 
     // Terms that depend only on the screen voltage (constant during a Newton solve)
     struct Screen { double vg2k, inv, scale; };
@@ -60,6 +62,7 @@ struct KorenPentode
         dVg1 = s.scale * dG * kp * s.inv * at;
         dVpk = base * invKvb / (1.0 + r * r);
         early (vpk, ip, dVpk, dVg1);
+        ip *= currentScale; dVpk *= currentScale; dVg1 *= currentScale;
     }
 
     // the finite plate resistance: ip (1 + Vpk / va) above 0 V (continuous there, ip = 0)
@@ -97,6 +100,7 @@ struct KorenPentode
         dVg1 = twoOverKg1 * ex * Ep * sig * at;
         dVpk = base * invKvb / (1.0 + r * r);
         early (vpk, ip, dVpk, dVg1);
+        ip *= currentScale; dVpk *= currentScale; dVg1 *= currentScale;
     }
 
     // screen current of ONE tube: Koren's term plus the cathode current the plate knee withholds (see above)
@@ -107,7 +111,7 @@ struct KorenPentode
         const double x = kp * (1.0 / mu + vg1k / vg2k);
         const double sp = x > 30.0 ? x : (x < -30.0 ? std::exp (x) : std::log1p (std::exp (x)));
         const double base = 2.0 / kg1 * std::pow (vg2k / kp * sp, ex);
-        return (b > 0.0 ? std::pow (b, ex) / kg2 : 0.0) + base * (1.5707963267948966 - std::atan (vpk / kvb));
+        return currentScale * ((b > 0.0 ? std::pow (b, ex) / kg2 : 0.0) + base * (1.5707963267948966 - std::atan (vpk / kvb)));
     }
 };
 
@@ -335,6 +339,14 @@ public:
         dk.setC (cWinding, cWindingF);
     }
 
+    // Tube set (TubeSet): V4B / V4A / V3A and the two output pairs as particular tubes. Takes effect at once (the
+    // fixed bias stays where the factory set it for nominal tubes, so a hotter pair just draws more).
+    void setTubeSet (const TubeSet& s)
+    {
+        for (int t = 0; t < 3; ++t) devTriode[t].setVariation (s.paI[t], s.paMu[t]);
+        for (int t = 0; t < 2; ++t) side6L6[t].currentScale = s.sideI[t];
+    }
+
     // OT leakage inductance, plate to plate (call before prepare)
     void setLeakage (double lpp) { dk.setL (lLeak, std::max (lpp, 1e-6) * kRload / kRaa); }
 
@@ -519,7 +531,7 @@ public:
 
         // ---- power supply: the whole chain sags with this sample's currents (Supply5150) ----
         const double iPlates = i[4] + i[6];
-        for (int t = 0; t < 2; ++t) ig2Tube[t] = tube.screen (p[4 + 2 * t], p[5 + 2 * t], screenNow[t].vg2k);
+        for (int t = 0; t < 2; ++t) ig2Tube[t] = side6L6[t].screen (p[4 + 2 * t], p[5 + 2 * t], screenNow[t].vg2k);
         const double iScreens = 2.0 * (ig2Tube[0] + ig2Tube[1]);
         const double iPI = i[0] + i[2];            // V4B + V4A plates (R46, R58 from V3+)
         const double iV2 = preI2 + i[8] + cathodeFollowerCurrent(); // + V3A plate
@@ -548,6 +560,8 @@ public:
         resTol = on ? 1e-7 : 1e-4;
         acceptSmallStep = ! on;
         triode.exact = tube.exact = on;
+        for (auto& t : devTriode) t.exact = on;
+        for (auto& t : side6L6) t.exact = on;
     }
     double lastP0[kPorts] {};
     double getPort (int k) const { return p[k]; }
@@ -589,7 +603,7 @@ private:
         {
             const int gk = pk + 1;
             double ip, dvpk, dvgk, ig, dig;
-            triode.eval (p[pk], p[gk], ip, dvpk, dvgk);
+            devTriode[pk == 8 ? 2 : pk / 2].eval (p[pk], p[gk], ip, dvpk, dvgk);
             gridCurrent (p[gk], ig, dig);
             i[pk] = ip; d[pk][0] = dvpk; d[pk][1] = dvgk;
             i[gk] = ig; d[gk][0] = 0.0;  d[gk][1] = dig;
@@ -598,7 +612,7 @@ private:
         {
             const int pk = 4 + 2 * t, gk = pk + 1;
             double ip, dvpk, dvg1, ig, dig;
-            tube.plate (p[pk], p[gk], screenNow[t], ip, dvpk, dvg1);
+            side6L6[t].plate (p[pk], p[gk], screenNow[t], ip, dvpk, dvg1);
             gridCurrentR (p[gk], 1000.0, ig, dig);
             // CR200 / CR201 flyback diodes: conduct from ground into the plate when it swings below 0 V
             constexpr double von = 0.6, vd = 0.03, rd = 1.0;
@@ -695,8 +709,10 @@ private:
     bool acceptSmallStep = true;
 
     DKCircuit dk;
-    KorenTriode triode;
-    KorenPentode tube;
+    KorenTriode triode;          // nominal: V3B (cathode follower, DC only)
+    KorenPentode tube;           // nominal: sets the fixed bias (findBias)
+    KorenTriode devTriode[3];    // V4B, V4A, V3A (each its own tube: setTubeVariation)
+    KorenPentode side6L6[2];     // the two output pairs, each the average of its two tubes
 
     int nA = 0, nP1 = 0, nGB = 0, nGA = 0, nK = 0, nQ = 0, nL = 0, nM = 0, nPr = 0, nY = 0;
     int nPB = 0, nPA = 0, nC1 = 0, nG1 = 0, nC2 = 0, nG2 = 0, nO1 = 0, nO2 = 0;

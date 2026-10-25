@@ -1019,9 +1019,57 @@ static void noiseTests()
                  std::sqrt (kT4 * (21.5e3 + 68e3 + 2000.0 * (1.0 + TubeNoise::kFlickerCorner / 1000.0))) * 1e9);
 }
 
+// Tube sets: each set's draws and what they do (preamp gain and harmonics, output-pair balance, hum, H2)
+static void tubeSetTests()
+{
+    constexpr double fs = 192000.0;
+    auto tone = [&] (const std::vector<double>& y, double f, int skip)
+    {
+        double re = 0, im = 0; const size_t n = y.size() - (size_t) skip;
+        for (size_t i = 0; i < n; ++i) { const double ph = 2 * kPi * f * (double) i / fs; re += y[(size_t) skip + i] * std::cos (ph); im += y[(size_t) skip + i] * std::sin (ph); }
+        return 2.0 * std::sqrt (re * re + im * im) / (double) n;
+    };
+    std::printf ("\n== tube sets (RED gain 5, presence / resonance 5) ==\n");
+    std::printf ("%-8s | %-34s | %-15s | %7s %12s %12s | %9s %13s\n", "set", "12AX7 current (V1A..V5A)", "6L6 pairs", "pre dB",
+                 "pre H2 dBc", "pre H3 dBc", "hum dB", "out H2 dBc");
+    double g0 = 0.0;
+    for (int set = 0; set < TubeSet::kSets; ++set)
+    {
+        const auto s = TubeSet::make (set);
+        // preamp alone: 1 kHz 20 uV small-signal gain; 110 Hz 30 mV harmonics at the preamp output
+        auto pre = [&] (double amp, double f)
+        {
+            Preamp5150 p; p.setTubeSet (s); p.prepare (fs); p.setModeNow (Preamp5150::Red);
+            p.setControls (0.5, 0.5, 0.5, 0.5, 0.5);
+            std::vector<double> y ((size_t) (fs * 1.0));
+            for (size_t i = 0; i < y.size(); ++i) y[i] = p.process (amp * std::sin (2 * kPi * f * (double) i / fs));
+            return y;
+        };
+        const double g = 20 * std::log10 (tone (pre (20e-6, 1000.0), 1000.0, (int) (fs * 0.5)) / 20e-6);
+        if (set == 0) g0 = g;
+        const auto yh = pre (0.03, 110.0);
+        const double h1 = tone (yh, 110.0, (int) (fs * 0.5)), h2 = tone (yh, 220.0, (int) (fs * 0.5)), h3 = tone (yh, 330.0, (int) (fs * 0.5));
+        // power amp: idle hum at the speaker (dB re 53 V peak) and H2 at 1 kHz, 0.2 V at the master node
+        auto pa = [&] (double amp)
+        {
+            PowerAmp5150 a; a.setTubeSet (s); a.setControls (0.5, 0.5); a.prepare (fs);
+            std::vector<double> y ((size_t) (fs * 1.0));
+            for (size_t i = 0; i < y.size(); ++i) y[i] = a.process (amp * std::sin (2 * kPi * 1000.0 * (double) i / fs));
+            return y;
+        };
+        const auto yi = pa (0.0), yd = pa (0.2);
+        const double hum = 20 * std::log10 (std::max (tone (yi, 120.0, (int) (fs * 0.3)), 1e-15) / 53.0);
+        const double o1 = tone (yd, 1000.0, (int) (fs * 0.5)), o2 = tone (yd, 2000.0, (int) (fs * 0.5));
+        char pres[64]; std::snprintf (pres, sizeof pres, "%.2f %.2f %.2f %.2f %.2f %.2f", s.preI[0], s.preI[1], s.preI[2], s.preI[3], s.preI[4], s.preI[5]);
+        std::printf ("%-8s | %-34s | %6.3f %6.3f  | %+7.2f %12.1f %12.1f | %9.1f %13.1f\n", TubeSet::kNames[set], pres, s.sideI[0], s.sideI[1],
+                     g - g0, 20 * std::log10 (h2 / h1), 20 * std::log10 (h3 / h1), hum, 20 * std::log10 (o2 / o1));
+    }
+}
+
 int main (int argc, char** argv)
 {
     if (argc > 1 && std::string (argv[1]) == "noise") { noiseTests(); return 0; }
+    if (argc > 1 && std::string (argv[1]) == "tubes") { tubeSetTests(); return 0; }
     if (argc > 1 && std::string (argv[1]) == "fault") return faultRecoveryTests() ? 0 : 1;
     if (argc > 1 && std::string (argv[1]) == "cpu") { cpuModules(); return 0; }
     if (argc > 1 && std::string (argv[1]) == "tables") { tubeTableAccuracy(); return 0; }

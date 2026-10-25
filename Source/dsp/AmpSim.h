@@ -24,6 +24,7 @@ public:
         int channel = 2;
         bool bright = true;    // BRIGHT pushbutton (rhythm: CLEAN and BLUE)
         bool noise = false;    // circuit noise of the preamp (resistors, tubes)
+        int tubeSet = 0;       // TubeSet: 0 nominal tubes, 1.. particular sets
         float gain = 0.6f, bass = 0.5f, mid = 0.5f, treble = 0.6f;
         float presence = 0.5f, resonance = 0.5f, master = 0.3f; // all 0..1
         float volumeDb = 0.0f; // post-power-amp level (like an attenuator), does not change the tone
@@ -50,6 +51,10 @@ public:
         ts9.prepare (osRate);
         modelStep = 1.0 / (0.02 * osRate); // drive model switch: 20 ms crossfade
         preamp.setChannelTrims (kChannelPost[0], kChannelPost[1], kChannelPost[2]); // applied inside the switch crossfade
+        // the tubes of the last block (or nominal): settled with them
+        const auto tubes = TubeSet::make (tubeSetApplied);
+        preamp.setTubeSet (tubes);
+        power.setTubeSet (tubes);
         preamp.prepare (osRate);
         power.prepare (osRate);
         // settle preamp and power amp together on the shared supply, so the rails start at the loaded DC point
@@ -92,6 +97,13 @@ public:
         else preamp.setMode (channel);
         preamp.setBright (s.bright); // no-op unless it changed
         preamp.setNoise (s.noise);   // likewise
+        if (s.tubeSet != tubeSetApplied) // other tubes: as swapping them, the stages re-bias through their caps
+        {
+            tubeSetApplied = std::clamp (s.tubeSet, 0, TubeSet::kSets - 1);
+            const auto tubes = TubeSet::make (tubeSetApplied);
+            preamp.setTubeSet (tubes);
+            power.setTubeSet (tubes);
+        }
         firstBlock = false;
         if (s.boostOn && (! lastBoostOn || s.boostAttack != boostAttack)) // switches: no smoothing
         {
@@ -198,6 +210,7 @@ private:
     double heavyApplied[3] {}; // Gain, Presence, Resonance as last applied
     int heavyPhase = 0;
     bool knobsSet = false, lastBoostOn = false, firstBlock = true, firstModel = true;
+    int tubeSetApplied = 0;
     double modelMix = 0.0, modelTarget = 0.0, modelStep = 1e-4; // drive model crossfade, 0 = Precision Drive
     int controlPhase = 0, boostAttack = 3;
 

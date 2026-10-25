@@ -62,7 +62,7 @@ public:
             p[2 * t + 1] = -vk[t];
             // shot / flicker noise of this tube from its transconductance at the operating point
             double ip, dvpk, gm;
-            triode.eval (vp[t] - vk[t], -vk[t], ip, dvpk, gm);
+            triode[t].eval (vp[t] - vk[t], -vk[t], ip, dvpk, gm);
             tubeNoise[t].prepare (sampleRate, gm, noiseSeed + 7919ull * (unsigned long long) (t + 1));
         }
         maxHeldRun = std::max (1, (int) (1e-3 * sampleRate));
@@ -229,7 +229,7 @@ public:
     {
         resTol = on ? 2e-8 : 2e-5;
         acceptSmallStep = ! on;
-        triode.exact = on;
+        for (auto& tr : triode) tr.exact = on;
     }
 
     // plate current of triode t at the last accepted sample: what it draws from its supply rail
@@ -258,6 +258,10 @@ public:
         restoreIdle();
         for (int t = 0; t < NT; ++t) plateI[t] = 0.0;
     }
+
+    // Tube t's deviation from the nominal 12AX7 (TubeSet): plate current x currentScale, mu x muScale. Takes effect
+    // at once (as swapping a tube; the stage re-biases through its caps).
+    void setTubeVariation (int t, double currentScale, double muScale) { triode[t].setVariation (currentScale, muScale); }
 
     // Noise (thermal noise of the circuit's noisy resistors, shot / flicker noise of the tubes) on / off. The seed
     // takes effect at the next initDC (tubes) / now (resistors).
@@ -303,7 +307,7 @@ private:
         {
             const int pk = 2 * t, gk = pk + 1;
             double ip, dvpk, dvgk, ig, dig;
-            triode.eval (p[pk], p[gk] + vn[t], ip, dvpk, dvgk); // the tube's noise acts like a grid voltage
+            triode[t].eval (p[pk], p[gk] + vn[t], ip, dvpk, dvgk); // the tube's noise acts like a grid voltage
             gridCurrent (p[gk], ig, dig);
             i[pk] = ip; d[pk][0] = dvpk; d[pk][1] = dvgk;
             i[gk] = ig; d[gk][0] = 0.0;  d[gk][1] = dig;
@@ -356,7 +360,7 @@ private:
     double resTol = 2e-5;
     bool acceptSmallStep = true;
 
-    KorenTriode triode;
+    KorenTriode triode[NT]; // one per tube: their variations (setTubeVariation) differ
     TubeNoise tubeNoise[NT];
     double vn[NT] {};           // this sample's tube noise (V at the grid)
     bool noiseOn = false;

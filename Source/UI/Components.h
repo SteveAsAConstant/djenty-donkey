@@ -365,7 +365,8 @@ class ToggleStack : public juce::Component
 public:
     struct Item { juce::String paramID, text, tooltip; };
 
-    ToggleStack (APVTS& state, const std::vector<Item>& items, juce::Colour accent)
+    // choice: optionally a choice parameter below the toggles, as a drop-down
+    ToggleStack (APVTS& state, const std::vector<Item>& items, juce::Colour accent, const Item& choice = {})
     {
         for (const auto& it : items)
         {
@@ -375,19 +376,40 @@ public:
             addAndMakeVisible (b);
             attachments.add (new APVTS::ButtonAttachment (state, it.paramID, *b));
         }
+        if (auto* p = dynamic_cast<juce::AudioParameterChoice*> (state.getParameter (choice.paramID)))
+        {
+            combo = std::make_unique<juce::ComboBox>();
+            combo->addItemList (p->choices, 1);
+            combo->setTooltip (choice.tooltip);
+            addAndMakeVisible (*combo);
+            comboAttachment = std::make_unique<APVTS::ComboBoxAttachment> (state, choice.paramID, *combo);
+            comboLabel.setText (choice.text, juce::dontSendNotification);
+            comboLabel.setJustificationType (juce::Justification::centred);
+            comboLabel.setFont (font (11.0f, true));
+            addAndMakeVisible (comboLabel);
+        }
     }
 
     void resized() override
     {
         auto b = getLocalBounds();
-        const int h = 24, gap = 6, total = buttons.size() * h + (buttons.size() - 1) * gap;
+        const int h = 24, gap = 6, comboH = combo ? 16 + 24 + gap : 0;
+        const int total = buttons.size() * h + (buttons.size() - 1) * gap + comboH;
         b = b.withSizeKeepingCentre (juce::jmin (b.getWidth(), 92), total);
         for (auto* btn : buttons) { btn->setBounds (b.removeFromTop (h)); b.removeFromTop (gap); }
+        if (combo)
+        {
+            comboLabel.setBounds (b.removeFromTop (16));
+            combo->setBounds (b.removeFromTop (24));
+        }
     }
 
 private:
     juce::OwnedArray<juce::ToggleButton> buttons;
     juce::OwnedArray<APVTS::ButtonAttachment> attachments;
+    std::unique_ptr<juce::ComboBox> combo;
+    std::unique_ptr<APVTS::ComboBoxAttachment> comboAttachment;
+    juce::Label comboLabel;
 };
 
 // ---------------------------------------------------------------------------
