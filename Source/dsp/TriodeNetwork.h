@@ -3,6 +3,7 @@
 #include <cmath>
 #include "DKCircuit.h"
 #include "TriodeStage.h"
+#include "TubeNoise.h"
 
 namespace vamp
 {
@@ -59,6 +60,10 @@ public:
             dk.setCapVoltage (tube[t].cgp, -vp[t]);
             p[2 * t] = vp[t] - vk[t];
             p[2 * t + 1] = -vk[t];
+            // shot / flicker noise of this tube from its transconductance at the operating point
+            double ip, dvpk, gm;
+            triode.eval (vp[t] - vk[t], -vk[t], ip, dvpk, gm);
+            tubeNoise[t].prepare (sampleRate, gm, noiseSeed + 7919ull * (unsigned long long) (t + 1));
         }
         maxHeldRun = std::max (1, (int) (1e-3 * sampleRate));
     }
@@ -80,6 +85,7 @@ public:
     bool solve (double* u)
     {
         const auto& p0 = dk.computeP0 (u); // updated in place by later computeP0 calls
+        if (noiseOn) for (int t = 0; t < NT; ++t) vn[t] = tubeNoise[t].next();
         const auto& K = dk.getK();
 
         // predictor: linear extrapolation of the last two solutions while it pays off
@@ -253,6 +259,17 @@ public:
         for (int t = 0; t < NT; ++t) plateI[t] = 0.0;
     }
 
+    // Noise (thermal noise of the circuit's noisy resistors, shot / flicker noise of the tubes) on / off. The seed
+    // takes effect at the next initDC (tubes) / now (resistors).
+    void setNoise (bool on, unsigned long long seed)
+    {
+        noiseOn = on;
+        noiseSeed = seed;
+        dk.setNoise (on, seed);
+        if (! on) for (double& v : vn) v = 0.0;
+    }
+    bool getNoise() const { return noiseOn; }
+
     long long statSamples = 0, statIterations = 0, statFailures = 0, statRetries = 0, statHeld = 0;
     int testFaults = 0;  // tests: the next this-many fault checks report a bad solve
     int testCorrupt = 0; // tests: the next this-many solves end unconverged, 300 V off (must not be accepted)
@@ -286,7 +303,7 @@ private:
         {
             const int pk = 2 * t, gk = pk + 1;
             double ip, dvpk, dvgk, ig, dig;
-            triode.eval (p[pk], p[gk], ip, dvpk, dvgk);
+            triode.eval (p[pk], p[gk] + vn[t], ip, dvpk, dvgk); // the tube's noise acts like a grid voltage
             gridCurrent (p[gk], ig, dig);
             i[pk] = ip; d[pk][0] = dvpk; d[pk][1] = dvgk;
             i[gk] = ig; d[gk][0] = 0.0;  d[gk][1] = dig;
@@ -340,6 +357,10 @@ private:
     bool acceptSmallStep = true;
 
     KorenTriode triode;
+    TubeNoise tubeNoise[NT];
+    double vn[NT] {};           // this sample's tube noise (V at the grid)
+    bool noiseOn = false;
+    unsigned long long noiseSeed = 0x2545F4914F6CDD1Dull;
     double p[M] {}, pPrev[M] {}, pIdle[M] {}, plateI[NT] {};
     double lastU[kMaxInputs] {}, idleU[kMaxInputs] {};
     int nU = 0;

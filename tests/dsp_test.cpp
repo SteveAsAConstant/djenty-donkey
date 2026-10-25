@@ -6,6 +6,7 @@
 #include <cstdlib>
 #include <string>
 #include <vector>
+#include "dsp/FFT.h"
 #include "dsp/MultibandGate.h"
 #include "dsp/PitchShifter.h"
 #include "dsp/Amp5150.h"
@@ -934,8 +935,93 @@ static bool faultRecoveryTests()
     return ok;
 }
 
+// One-sided noise density (V / sqrt(Hz)) of x at rate, Welch average of Hann-windowed 2^14 blocks; band RMS helper
+struct Density
+{
+    double rate = 1.0, binHz = 1.0;
+    std::vector<double> psd; // V^2 / Hz per bin
+    Density (const std::vector<double>& x, double fs) : rate (fs)
+    {
+        constexpr int n = 1 << 14;
+        FFT fft; fft.prepare (n);
+        psd.assign (n / 2, 0.0);
+        std::vector<std::complex<double>> b ((size_t) n);
+        double wsum = 0.0;
+        for (int i = 0; i < n; ++i) { const double w = 0.5 - 0.5 * std::cos (2 * kPi * i / n); wsum += w * w; }
+        int blocks = 0;
+        for (size_t s = 0; s + n <= x.size(); s += n / 2, ++blocks)
+        {
+            for (int i = 0; i < n; ++i) b[(size_t) i] = x[s + (size_t) i] * (0.5 - 0.5 * std::cos (2 * kPi * i / n));
+            fft.transform (b.data(), false);
+            for (int k = 1; k < n / 2; ++k) psd[(size_t) k] += 2.0 * std::norm (b[(size_t) k]) / (wsum * fs);
+        }
+        for (double& v : psd) v /= std::max (blocks, 1);
+        binHz = fs / n;
+    }
+    double at (double f) const // density around f (1/6 octave average)
+    {
+        double s = 0; int c = 0;
+        for (size_t k = 1; k < psd.size(); ++k) if (k * binHz > f / 1.06 && k * binHz < f * 1.06) { s += psd[k]; ++c; }
+        return std::sqrt (s / std::max (c, 1));
+    }
+    double rms (double f0, double f1) const
+    {
+        double s = 0;
+        for (size_t k = 1; k < psd.size(); ++k) if (k * binHz >= f0 && k * binHz <= f1) s += psd[k] * binHz;
+        return std::sqrt (s);
+    }
+};
+
+// Circuit noise: the tube noise generator against its target, then the whole preamp's hiss
+static void noiseTests()
+{
+    constexpr double fs = 192000.0, kT4 = 4.0 * 1.380649e-23 * 300.0;
+    std::printf ("\n== tube noise (12AX7, gm 1.25 mA/V: Req 2 kOhm, flicker corner %.0f Hz), referred to the grid ==\n",
+                 TubeNoise::kFlickerCorner);
+    {
+        TubeNoise tn; tn.prepare (fs, 1.25e-3, 12345);
+        std::vector<double> x ((size_t) (fs * 20));
+        for (double& v : x) v = tn.next();
+        const Density d (x, fs);
+        const double ew = std::sqrt (kT4 * 2000.0);
+        std::printf ("%8s %12s %12s\n", "Hz", "nV/rtHz", "target");
+        for (double f : { 50.0, 100.0, 1000.0, 5000.0, 20000.0 })
+            std::printf ("%8.0f %12.2f %12.2f\n", f, d.at (f) * 1e9, ew * std::sqrt (1.0 + TubeNoise::kFlickerCorner / f) * 1e9);
+        std::printf ("25 Hz - 10 kHz: %.2f uV rms (12AX7A / 7025 spec: 1.8 uV average, noise and hum)\n", d.rms (25, 10000) * 1e6);
+    }
+
+    std::printf ("\n== preamp hiss, input shorted (jack at 0 V through R27), tone stack + Post 5, 20 Hz - 20 kHz ==\n");
+    std::printf ("%-6s %5s | %14s %16s %24s\n", "chan", "gain", "out (mV rms)", "gain at 1 kHz", "in-referred at 1 kHz");
+    for (int mode : { Preamp5150::Red, Preamp5150::Blue, Preamp5150::Clean })
+        for (double gain : { 0.2, 0.5, 0.8 })
+        {
+            auto run = [&] (bool noise, double amp)
+            {
+                Preamp5150 pre; pre.setNoise (noise); pre.prepare (fs); pre.setModeNow (mode);
+                pre.setChannelTrims (54.0, 1.0, 1.0); // AmpSim kChannelPost
+                pre.setControls (gain, 0.5, 0.5, 0.5, 0.5);
+                for (int i = 0; i < (int) (fs * 0.3); ++i) pre.process (0.0);
+                std::vector<double> y ((size_t) (fs * 3));
+                for (size_t i = 0; i < y.size(); ++i) y[i] = pre.process (amp * std::sin (2 * kPi * 1000.0 * (double) i / fs));
+                return y;
+            };
+            const Density dn (run (true, 0.0), fs);
+            // small-signal gain at 1 kHz (noise off): 20 uV in, amplitude of the 1 kHz bin
+            const auto ys = run (false, 20e-6);
+            double re = 0, im = 0;
+            for (size_t i = 0; i < ys.size(); ++i) { const double ph = 2 * kPi * 1000.0 * (double) i / fs; re += ys[i] * std::cos (ph); im += ys[i] * std::sin (ph); }
+            const double g = 2.0 * std::sqrt (re * re + im * im) / (double) ys.size() / 20e-6;
+            const char* nm[] = { "CLEAN", "BLUE", "RED" };
+            std::printf ("%-6s %5.1f | %14.2f %16.1f %16.1f nV/rtHz\n", nm[mode], gain * 10, dn.rms (20, 20000) * 1e3, g,
+                         dn.at (1000.0) / g * 1e9);
+        }
+    std::printf ("(by hand, V1A's grid alone: R27 22k || R25 1M + R22 68k + its tube, at 1 kHz: %.1f nV/rtHz)\n",
+                 std::sqrt (kT4 * (21.5e3 + 68e3 + 2000.0 * (1.0 + TubeNoise::kFlickerCorner / 1000.0))) * 1e9);
+}
+
 int main (int argc, char** argv)
 {
+    if (argc > 1 && std::string (argv[1]) == "noise") { noiseTests(); return 0; }
     if (argc > 1 && std::string (argv[1]) == "fault") return faultRecoveryTests() ? 0 : 1;
     if (argc > 1 && std::string (argv[1]) == "cpu") { cpuModules(); return 0; }
     if (argc > 1 && std::string (argv[1]) == "tables") { tubeTableAccuracy(); return 0; }

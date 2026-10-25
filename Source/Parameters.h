@@ -29,6 +29,7 @@ inline constexpr const char* boostAttack = "boostAttack";
 inline constexpr const char* boostModel  = "boostModel";
 inline constexpr const char* channel     = "channel";
 inline constexpr const char* ampBright   = "ampBright";
+inline constexpr const char* ampNoise    = "ampNoise";
 inline constexpr const char* ampGain     = "ampGain";
 inline constexpr const char* bass        = "bass";
 inline constexpr const char* mid         = "mid";
@@ -123,6 +124,7 @@ inline juce::AudioProcessorValueTreeState::ParameterLayout createParameterLayout
     layout.add (std::make_unique<juce::AudioParameterChoice> (juce::ParameterID { ids::channel, 1 }, "Channel",
                                                               juce::StringArray { "Clean", "Blue", "Red" }, 2));
     layout.add (makeBool (ids::ampBright, "Bright", true)); // the rhythm channel's BRIGHT pushbutton (CLEAN, BLUE)
+    layout.add (makeBool (ids::ampNoise, "Amp Noise", false)); // circuit noise: resistors' thermal, tubes' shot / flicker
     layout.add (makeFloat (ids::ampGain, "Gain", 0.0f, 10.0f, 6.9f));
     layout.add (makeFloat (ids::bass, "Bass", 0.0f, 10.0f, 5.0f));
     layout.add (makeFloat (ids::mid, "Mid", 0.0f, 10.0f, 5.0f));

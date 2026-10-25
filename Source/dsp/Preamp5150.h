@@ -231,6 +231,18 @@ public:
         clean.setBright (on);
     }
 
+    // Circuit noise: every resistor in the grid networks (thermal) and every tube (shot, flicker) of the three channel
+    // circuits, independent per circuit (TubeNoise, DKCircuit::setNoise). Off by default.
+    void setNoise (bool on)
+    {
+        if (on == noise) return;
+        noise = on;
+        lead.setNoise (on, 0x1234567ull);
+        blue.setNoise (on, 0x89abcdefull);
+        clean.setNoise (on, 0x51ed270bull);
+    }
+    bool getNoise() const { return noise; }
+
     // input: guitar voltage. output: volts after tone stack and post-gain pot (channel trim included)
     double process (double vin)
     {
@@ -368,6 +380,7 @@ private:
     double postGain = 0.1;
     double lastPreampOut = 0.0;
     double idleI1V2A = 0.0, idleI2Late = 0.0; // CLEAN: rail draw of the bypassed stages
+    bool noise = false;
 
     LinearNetwork<8> toneStack;
     int tsSrc = 0, tsTrebUp = 0, tsTrebLo = 0, tsBass = 0, tsMidUp = 0, tsMidLo = 0;

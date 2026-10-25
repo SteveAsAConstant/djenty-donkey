@@ -31,9 +31,11 @@ public:
 
     int addNode() { return numNodes++; }
 
-    int addR (int a, int b, double r)
+    // noisy: the resistor's thermal (Johnson) noise is simulated when noise is on (setNoise): a noise current of
+    // spectral density 4kT/R across it, white up to Nyquist. Structural: set before prepare().
+    int addR (int a, int b, double r, bool noisy = false)
     {
-        resistors.push_back ({ a, b, 1.0 / std::max (r, 1e-3) });
+        resistors.push_back ({ a, b, 1.0 / std::max (r, 1e-3), noisy });
         dirty = true;
         return (int) resistors.size() - 1;
     }
@@ -51,12 +53,29 @@ public:
     void setC (int idx, double c) { auto& e = caps[(size_t) idx]; e.c = c; e.gc = 2.0 * c / T; dirty = true; }
     void setL (int idx, double l) { auto& e = inds[(size_t) idx]; e.l = l; e.gl = T / (2.0 * l); dirty = true; }
 
-    // node --[rs]-- u[k]; returns the input index k
-    int addSource (int node, double rs)
+    // node --[rs]-- u[k]; returns the input index k. noisy: rs's thermal noise (a series noise voltage, 4kT rs)
+    int addSource (int node, double rs, bool noisy = false)
     {
-        sources.push_back ({ node, 1.0 / rs });
+        sources.push_back ({ node, 1.0 / rs, noisy });
         dirty = true;
         return (int) sources.size() - 1;
+    }
+
+    // Thermal noise of the noisy resistors and sources on / off (no rebuild), at kelvin; seed per circuit
+    void setNoise (bool on, unsigned long long seed = 0x9e3779b97f4a7c15ull, double kelvin = 300.0)
+    {
+        noiseOn = on;
+        rng = seed | 1ull;
+        noiseKT = kBoltzmann * kelvin;
+        dirty = true; // the noise amplitudes are computed in rebuild()
+    }
+    bool getNoise() const { return noiseOn; }
+
+    // uniform white noise in [-1, 1) (xorshift64*): a uniform of variance 1/3, scaled by sqrt(3) sigma
+    double noiseUniform()
+    {
+        rng ^= rng >> 12; rng ^= rng << 25; rng ^= rng >> 27;
+        return (double) ((rng * 0x2545F4914F6CDD1Dull) >> 11) * (2.0 / 9007199254740992.0) - 1.0;
     }
 
     void setSourceResistance (int k, double rs)
@@ -93,21 +112,27 @@ public:
         N = numNodes + numAux;
         m = (int) ports.size();
         numS = (int) (caps.size() + inds.size());
-        numU = (int) sources.size();
+        numSrc = (int) sources.size();
+        numNoise = 0;
+        for (auto& r : resistors) numNoise += r.noisy ? 1 : 0;
+        // z = [s; u; i; noise]: the noise inputs (one current per noisy resistor) last, so that with noise off every
+        // product stops before them and costs what it did without noise
+        nzMain = numS + numSrc + m;
+        nz = nzMain + numNoise;
+        noiseAmp.assign ((size_t) (numSrc + numNoise), 0.0);
         assert (numS <= kMaxStates && (int) outputs.size() <= kMaxStates); // finish() keeps both on the stack
         x.assign ((size_t) N, 0.0);
-        z.assign ((size_t) (numS + numU + m), 0.0);
+        z.assign ((size_t) nz, 0.0);
         p0.assign ((size_t) m, 0.0);
         // rebuild() reuses these (assign to the same size does not reallocate)
-        const size_t nz = (size_t) (numS + numU + m);
         bufA.assign ((size_t) N * N, 0.0);
         bufInv.assign ((size_t) N * N, 0.0);
         bufAinvNi.assign ((size_t) N * m, 0.0);
         bufV.assign ((size_t) N * nz, 0.0);
         K.assign ((size_t) m * m, 0.0);
-        P.assign ((size_t) m * (numS + numU), 0.0);
+        P.assign ((size_t) m * nz, 0.0); // over all of z, zero in the port-current columns
         M.assign ((size_t) numS * nz, 0.0);
-        O.assign (outputs.size() * nz, 0.0);
+        O.assign (outputs.size() * (size_t) nz, 0.0);
         dirty = true;
         reset();
     }
@@ -142,8 +167,17 @@ public:
     {
         if (dirty) rebuild();
 
-        std::copy (u, u + numU, z.begin() + numS);
-        matVec (P.data(), m, numS + numU, z.data(), p0.data());
+        std::copy (u, u + numSrc, z.begin() + numS);
+        if (noiseOn && numSrc + numNoise > 0)
+        {
+            double* zu = z.data() + numS;
+            for (int k = 0; k < numSrc; ++k) if (noiseAmp[(size_t) k] > 0.0) zu[k] += noiseAmp[(size_t) k] * noiseUniform();
+            double* zn = z.data() + nzMain;
+            for (int k = 0; k < numNoise; ++k) zn[k] = noiseAmp[(size_t) (numSrc + k)] * noiseUniform();
+            matVec (P.data(), m, nz, nz, z.data(), p0.data()); // (the port-current columns of P are 0)
+        }
+        else
+            matVec (P.data(), m, numS + numSrc, nz, z.data(), p0.data());
         return p0;
     }
 
@@ -154,15 +188,15 @@ public:
     // (uses the u passed to the preceding computeP0)
     void finish (const double* iPorts)
     {
-        std::copy (iPorts, iPorts + m, z.begin() + numS + numU);
-        const int nz = numS + numU + m;
+        std::copy (iPorts, iPorts + m, z.begin() + numS + numSrc);
+        const int cols = noiseOn ? nz : nzMain;
 
         double buf[kMaxStates];
         const int numO = (int) outputs.size();
-        matVec (O.data(), numO, nz, z.data(), buf);
+        matVec (O.data(), numO, cols, nz, z.data(), buf);
         for (int o = 0; o < numO; ++o) x[(size_t) outputs[(size_t) o]] = buf[o];
 
-        matVec (M.data(), numS, nz, z.data(), buf);
+        matVec (M.data(), numS, cols, nz, z.data(), buf);
         std::copy (buf, buf + numS, z.begin());
     }
 
@@ -173,10 +207,10 @@ public:
     void markDirty() { dirty = true; }
 
 private:
-    struct Res { int a, b; double g; };
+    struct Res { int a, b; double g; bool noisy; };
     struct Cap { int a, b; double c, gc; };
     struct Ind { int a, b; double l, gl; };
-    struct Src { int node; double g; };
+    struct Src { int node; double g; bool noisy; };
     struct Port { int a, b; };
 
 public:
@@ -185,13 +219,19 @@ public:
     // result is bit-identical to the plain loop.
     static void matVec (const double* A, int rows, int cols, const double* v, double* out)
     {
+        matVec (A, rows, cols, cols, v, out);
+    }
+
+    // the same over the first `cols` columns of a matrix whose rows are `stride` long
+    static void matVec (const double* A, int rows, int cols, int stride, const double* v, double* out)
+    {
         int r = 0;
         for (; r + 4 <= rows; r += 4)
         {
-            const double* a0 = A + (size_t) r * cols;
-            const double* a1 = a0 + cols;
-            const double* a2 = a1 + cols;
-            const double* a3 = a2 + cols;
+            const double* a0 = A + (size_t) r * stride;
+            const double* a1 = a0 + stride;
+            const double* a2 = a1 + stride;
+            const double* a3 = a2 + stride;
             double s0 = 0.0, s1 = 0.0, s2 = 0.0, s3 = 0.0;
             for (int j = 0; j < cols; ++j)
             {
@@ -202,7 +242,7 @@ public:
         }
         for (; r < rows; ++r)
         {
-            const double* a = A + (size_t) r * cols;
+            const double* a = A + (size_t) r * stride;
             double s = 0.0;
             for (int j = 0; j < cols; ++j) s += a[j] * v[j];
             out[r] = s;
@@ -275,8 +315,7 @@ private:
         // The MNA right-hand side is b = Bs s + Bu u: a capacitor companion current ieq enters node a
         // and leaves b, an inductor's the other way round, a source drives its node through g.
         // Node voltages are then  v = Ainv Bs s + Ainv Bu u + AinvNi i,  written here as one row
-        // per node over z = [s; u; i].
-        const int nz = numS + numU + m;
+        // per node over z = [s; u; i; noise] (a noise current enters its resistor's node a and leaves b).
         auto& V = bufV;
         V.assign ((size_t) N * nz, 0.0);
         for (int r = 0; r < N; ++r)
@@ -300,15 +339,19 @@ private:
                 row[k++] = a[s.node] * s.g;
             for (int j = 0; j < m; ++j)
                 row[k++] = AinvNi[(size_t) r * m + j];
+            for (auto& rs : resistors)
+                if (rs.noisy)
+                    row[k++] = (rs.a >= 0 ? a[rs.a] : 0.0) - (rs.b >= 0 ? a[rs.b] : 0.0);
         }
         auto nodeRow = [&] (int n, int j) { return n < 0 ? 0.0 : V[(size_t) n * nz + j]; };
 
-        // p0 = (v(a) - v(b)) of each port with i = 0, over [s; u]
-        const int nsu = numS + numU;
-        P.assign ((size_t) m * nsu, 0.0);
+        // p0 = (v(a) - v(b)) of each port with i = 0: over z, the port-current columns left at 0
+        const int iBegin = numS + numSrc, iEnd = iBegin + m;
+        P.assign ((size_t) m * nz, 0.0);
         for (int k = 0; k < m; ++k)
-            for (int j = 0; j < nsu; ++j)
-                P[(size_t) k * nsu + j] = nodeRow (ports[(size_t) k].a, j) - nodeRow (ports[(size_t) k].b, j);
+            for (int j = 0; j < nz; ++j)
+                if (j < iBegin || j >= iEnd)
+                    P[(size_t) k * nz + j] = nodeRow (ports[(size_t) k].a, j) - nodeRow (ports[(size_t) k].b, j);
 
         // trapezoidal companions:  cap  ieq' = 2 gc v - ieq,   inductor  ieq' = 2 gl v + ieq
         M.assign ((size_t) numS * nz, 0.0);
@@ -332,6 +375,17 @@ private:
         for (size_t o = 0; o < outputs.size(); ++o)
             for (int j = 0; j < nz; ++j)
                 O[o * (size_t) nz + j] = nodeRow (outputs[o], j);
+
+        // thermal noise per sample, white up to Nyquist (one-sided density 4kT R, i.e. variance 2kT R fs), as uniform
+        // samples of the same variance: a series voltage for a noisy source, a parallel current for a resistor
+        {
+            const double fs = 1.0 / T;
+            for (int k = 0; k < numSrc; ++k)
+                noiseAmp[(size_t) k] = sources[(size_t) k].noisy ? std::sqrt (3.0 * 2.0 * noiseKT * fs / sources[(size_t) k].g) : 0.0;
+            int j = numSrc;
+            for (auto& rs : resistors)
+                if (rs.noisy) noiseAmp[(size_t) j++] = std::sqrt (3.0 * 2.0 * noiseKT * fs * rs.g);
+        }
 
         dirty = false;
     }
@@ -373,8 +427,14 @@ private:
     static constexpr int kMaxStates = 64; // capacitors + inductors, and output nodes (finish() keeps them on the stack)
 
     double T = 1.0 / 192000.0;
-    int numNodes = 0, numAux = 0, N = 0, m = 0, numS = 0, numU = 0;
+    int numNodes = 0, numAux = 0, N = 0, m = 0, numS = 0, numSrc = 0, numNoise = 0, nzMain = 0, nz = 0;
     bool dirty = true;
+
+    static constexpr double kBoltzmann = 1.380649e-23;
+    bool noiseOn = false;
+    double noiseKT = kBoltzmann * 300.0;
+    unsigned long long rng = 0x9e3779b97f4a7c15ull;
+    std::vector<double> noiseAmp; // per input: thermal noise amplitude (uniform, peak) of a noisy source / resistor
 
     std::vector<Res> resistors;
     std::vector<Cap> caps;

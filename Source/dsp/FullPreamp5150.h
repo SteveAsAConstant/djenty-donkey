@@ -43,53 +43,53 @@ struct Front5150
         const auto& v1b = net.tube[1];
         const int nIn = n(), nG1 = n(), nN1 = n(), nP = n(), nLW = n(), nA = n(), nB = n(), nRW = n();
 
-        srcIn = dk.addSource (nIn, 22e3);         // R27 (guitar on the jack)
+        srcIn = dk.addSource (nIn, 22e3, true);         // R27 (guitar on the jack)
         cap[C20] = dk.addC (nIn, G, 39e-12);      // C20
         cap[C15] = cC15 = dk.addC (nIn, nG1, 0.1e-6); // C15
-        dk.addR (nG1, G, 1e6);                    // R25
-        dk.addR (nG1, v1a.g, 68e3);               // R22
-        srcB[0] = dk.addSource (v1a.p, 220e3);    // R2
+        dk.addR (nG1, G, 1e6, true);                    // R25
+        dk.addR (nG1, v1a.g, 68e3, true);               // R22
+        srcB[0] = dk.addSource (v1a.p, 220e3, true);    // R2
         dk.addR (v1a.k, G, 1.82e3);               // R12
         cap[C3] = cK[0] = dk.addC (v1a.k, G, 1e-6); // C3
         cap[C6] = cC6 = dk.addC (v1a.p, nN1, 22e-9); // C6
 
         // lead pre-gain network (VR2 Ultra Pre)
-        dk.addR (nN1, nP, 470e3);                 // R29
+        dk.addR (nN1, nP, 470e3, true);                 // R29
         cap[C17] = dk.addC (nN1, nP, 2.2e-9);     // C17
-        dk.addR (nP, G, 1e6);                     // R41
-        leadTop = dk.addR (nP, nLW, 5e5);         // VR2 upper
-        leadBot = dk.addR (nLW, G, 5e5);          // VR2 lower
+        dk.addR (nP, G, 1e6, true);                     // R41
+        leadTop = dk.addR (nP, nLW, 5e5, true);         // VR2 upper
+        leadBot = dk.addR (nLW, G, 5e5, true);          // VR2 lower
         cap[C19] = dk.addC (nP, nLW, 1e-9);       // C19
-        dk.addR (nP, nLW, 1e6);                   // R40
+        dk.addR (nP, nLW, 1e6, true);                   // R40
 
         // rhythm pre-gain network (VR1 Clean Pre)
         if (crunch)
         {
-            dk.addR (nN1, nA, 2.2e6);             // R43 (K4A, crunch)
+            dk.addR (nN1, nA, 2.2e6, true);             // R43 (K4A, crunch)
             cap[C13] = dk.addC (nN1, nA, 470e-12); // C13
         }
         else
         {
-            dk.addR (nN1, nA, 470e3);             // R19 (K4A at rest)
+            dk.addR (nN1, nA, 470e3, true);             // R19 (K4A at rest)
             cap[C51] = dk.addC (nN1, nA, 270e-12); // C51
         }
-        dk.addR (nA, nB, 1e6);                    // R21
+        dk.addR (nA, nB, 1e6, true);                    // R21
         const int nC10 = n();
         cap[C10] = dk.addC (nA, nC10, 470e-12);   // C10
-        rR75 = dk.addR (nC10, nB, 2.2e6);         // R75 (S1C, BRIGHT, shorts it: setBright)
-        rhyTop = dk.addR (nB, nRW, 5e5);          // VR1 upper
-        rhyBot = dk.addR (nRW, G, 5e5);           // VR1 lower
+        rR75 = dk.addR (nC10, nB, 2.2e6, true);         // R75 (S1C, BRIGHT, shorts it: setBright)
+        rhyTop = dk.addR (nB, nRW, 5e5, true);          // VR1 upper
+        rhyBot = dk.addR (nRW, G, 5e5, true);           // VR1 lower
         cap[C27] = dk.addC (nB, nRW, 180e-12);    // C27
         if (! crunch)
         {
             const int nC63 = n();
-            dk.addR (nB, nC63, 39e3);             // R23 (K4B at rest)
+            dk.addR (nB, nC63, 39e3, true);             // R23 (K4B at rest)
             cap[C63] = dk.addC (nC63, G, 0.1e-6); // C63
         }
 
         // K2A -> R82 -> V1B
-        dk.addR (lead ? nLW : nRW, v1b.g, 470e3); // R82
-        srcB[1] = dk.addSource (v1b.p, 100e3);    // R3
+        dk.addR (lead ? nLW : nRW, v1b.g, 470e3, true); // R82
+        srcB[1] = dk.addSource (v1b.p, 100e3, true);    // R3
         dk.addR (v1b.k, G, 1.82e3);               // R17
         cap[C4] = cK[1] = dk.addC (v1b.k, G, 1e-6); // C4
         if (lead)
@@ -179,33 +179,33 @@ public:
         const int nTs = n(), nC59 = n();
 
         cC2 = dk.addC (v1b.p, nC2, 22e-9);        // C2
-        dk.addR (nC2, v2a.g, 470e3);              // R6
-        dk.addR (v2a.g, G, 1e6);                  // R9
-        if (! lead) dk.addR (v2a.g, G, 220e3);    // R20 (K1B at rest: rhythm)
-        srcB[2] = dk.addSource (v2a.p, 100e3);    // R1
-        dk.addR (v2a.k, G, 39e3);                 // R15
+        dk.addR (nC2, v2a.g, 470e3, true);              // R6
+        dk.addR (v2a.g, G, 1e6, true);                  // R9
+        if (! lead) dk.addR (v2a.g, G, 220e3, true);    // R20 (K1B at rest: rhythm)
+        srcB[2] = dk.addSource (v2a.p, 100e3, true);    // R1
+        dk.addR (v2a.k, G, 39e3, true);                 // R15
 
         cC1 = dk.addC (v2a.p, nC1, 22e-9);        // C1
         cC48 = dk.addC (nC1, G, 1e-9);            // C48
-        dk.addR (nC1, G, 330e3);                  // R11
-        dk.addR (nC1, v2b.g, 220e3);              // R7
-        srcB[3] = dk.addSource (v2b.p, 220e3);    // R4
+        dk.addR (nC1, G, 330e3, true);                  // R11
+        dk.addR (nC1, v2b.g, 220e3, true);              // R7
+        srcB[3] = dk.addSource (v2b.p, 220e3, true);    // R4
         dk.addR (v2b.k, G, 1.82e3);               // R13
         cK3 = dk.addC (v2b.k, G, 1e-6);           // C5
 
-        dk.addR (v2b.p, nR32, 1e6);               // R32
+        dk.addR (v2b.p, nR32, 1e6, true);               // R32
         cC57 = dk.addC (nR32, v5b.g, 22e-9);      // C57
-        dk.addR (v5b.g, G, 100e3);                // R101
-        srcB[4] = dk.addSource (v5b.p, 220e3);    // R96
-        dk.addR (v5b.k, G, 2.2e3);                // R102
+        dk.addR (v5b.g, G, 100e3, true);                // R101
+        srcB[4] = dk.addSource (v5b.p, 220e3, true);    // R96
+        dk.addR (v5b.k, G, 2.2e3, true);                // R102
 
-        dk.addR (v5b.p, nR87, 1e6);               // R87
+        dk.addR (v5b.p, nR87, 1e6, true);               // R87
         cC56 = dk.addC (nR87, v5a.g, 22e-9);      // C56
-        dk.addR (v5a.g, G, 1e6);                  // R91
-        srcB[5] = dk.addSource (v5a.p, 100e3);    // R86
-        dk.addR (v5a.k, G, 2.2e3);                // R93
+        dk.addR (v5a.g, G, 1e6, true);                  // R91
+        srcB[5] = dk.addSource (v5a.p, 100e3, true);    // R86
+        dk.addR (v5a.k, G, 2.2e3, true);                // R93
         cC58 = dk.addC (v5a.p, nOut, 22e-9);      // C58
-        dk.addR (nOut, v5a.g, 1e6);               // R88
+        dk.addR (nOut, v5a.g, 1e6, true);               // R88
 
         rLoad = dk.addR (nOut, nTs, 470e3);       // R89 (v5aLoad false: 1e12, for comparisons)
         dk.addR (nTs, G, 33e3);                   // R24
@@ -250,6 +250,8 @@ public:
     void setGainPots (double leadF, double rhythmF) { front.setPots (net.dk, leadF, rhythmF); }
     // BRIGHT pushbutton (S1C). Rebuilds the matrices on the next sample, like the pots.
     void setBright (bool on) { front.setBright (net.dk, on); }
+    // circuit noise (resistors' thermal noise, tubes' shot and flicker noise) on / off
+    void setNoise (bool on, unsigned long long seed) { net.setNoise (on, seed); }
 
     // input: volts at the guitar jack. output: AC voltage after C58 (into R88 and the tone stack feed)
     double process (double vin)
@@ -347,9 +349,9 @@ public:
         nOut = dk.addNode();
         const int nG = dk.addNode();
         cC2 = dk.addC (net.tube[1].p, nOut, 22e-9); // C2
-        dk.addR (nOut, nG, 470e3);                  // R6
-        dk.addR (nG, G, 1e6);                       // R9
-        dk.addR (nG, G, 220e3);                     // R20 (K1B at rest)
+        dk.addR (nOut, nG, 470e3, true);                  // R6
+        dk.addR (nG, G, 1e6, true);                       // R9
+        dk.addR (nG, G, 220e3, true);                     // R20 (K1B at rest)
         net.addMillerAndOutputs (false);
         dk.markOutput (nOut);
         net.addPorts();
@@ -375,6 +377,8 @@ public:
     void setGainPots (double leadF, double rhythmF) { front.setPots (net.dk, leadF, rhythmF); }
     // BRIGHT pushbutton (S1C). Rebuilds the matrices on the next sample, like the pots.
     void setBright (bool on) { front.setBright (net.dk, on); }
+    // circuit noise (resistors' thermal noise, tubes' shot and flicker noise) on / off
+    void setNoise (bool on, unsigned long long seed) { net.setNoise (on, seed); }
 
     // input: volts at the guitar jack. output: V1B's AC plate voltage after C2
     double process (double vin)

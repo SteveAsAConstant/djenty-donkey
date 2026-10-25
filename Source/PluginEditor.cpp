@@ -259,8 +259,10 @@ VibeAmpEditor::VibeAmpEditor (VibeAmpProcessor& p) : AudioProcessorEditor (&p), 
     // ---- row 2: amp ----
     ampSec = std::make_unique<Section> ("DONKEY HEAD  //  515 HIGH GAIN", colours::red);
     ampSec->add<ChannelSelector> (s, ids::channel, [this] (int ch) { setAmpChannelColour (ch); });
-    ampSec->add<Toggle> (s, ids::ampBright, "BRIGHT", colours::red)->setTooltip ("The rhythm channel's BRIGHT switch "
-        "(C10 across R21, as on the amp): CLEAN and BLUE.");
+    ampSec->add<ToggleStack> (s, std::vector<ToggleStack::Item> {
+        { ids::ampBright, "BRIGHT", "The rhythm channel's BRIGHT switch (C10 across R21, as on the amp): CLEAN and BLUE." },
+        { ids::ampNoise, "NOISE", "The preamp's own noise, from physics: thermal noise of its resistors, shot and flicker "
+                                  "noise of its tubes. Off: a noiseless amp." } }, colours::red);
     ampSec->add<Knob> (s, ids::ampGain, "Gain", colours::red);
     ampSec->add<Knob> (s, ids::bass, "Bass", colours::red);
     ampSec->add<Knob> (s, ids::mid, "Middle", colours::red);

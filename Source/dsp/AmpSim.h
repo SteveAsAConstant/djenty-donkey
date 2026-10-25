@@ -23,6 +23,7 @@ public:
     {
         int channel = 2;
         bool bright = true;    // BRIGHT pushbutton (rhythm: CLEAN and BLUE)
+        bool noise = false;    // circuit noise of the preamp (resistors, tubes)
         float gain = 0.6f, bass = 0.5f, mid = 0.5f, treble = 0.6f;
         float presence = 0.5f, resonance = 0.5f, master = 0.3f; // all 0..1
         float volumeDb = 0.0f; // post-power-amp level (like an attenuator), does not change the tone
@@ -90,6 +91,7 @@ public:
         if (firstBlock) preamp.setModeNow (channel); // nothing audible yet: no switch crossfade
         else preamp.setMode (channel);
         preamp.setBright (s.bright); // no-op unless it changed
+        preamp.setNoise (s.noise);   // likewise
         firstBlock = false;
         if (s.boostOn && (! lastBoostOn || s.boostAttack != boostAttack)) // switches: no smoothing
         {

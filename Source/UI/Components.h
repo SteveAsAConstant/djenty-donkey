@@ -359,6 +359,38 @@ private:
 };
 
 // ---------------------------------------------------------------------------
+// Two or more toggles stacked in one column, each with its own tooltip.
+class ToggleStack : public juce::Component
+{
+public:
+    struct Item { juce::String paramID, text, tooltip; };
+
+    ToggleStack (APVTS& state, const std::vector<Item>& items, juce::Colour accent)
+    {
+        for (const auto& it : items)
+        {
+            auto* b = buttons.add (new juce::ToggleButton (it.text));
+            b->setColour (juce::ToggleButton::tickColourId, accent);
+            b->setTooltip (it.tooltip);
+            addAndMakeVisible (b);
+            attachments.add (new APVTS::ButtonAttachment (state, it.paramID, *b));
+        }
+    }
+
+    void resized() override
+    {
+        auto b = getLocalBounds();
+        const int h = 24, gap = 6, total = buttons.size() * h + (buttons.size() - 1) * gap;
+        b = b.withSizeKeepingCentre (juce::jmin (b.getWidth(), 92), total);
+        for (auto* btn : buttons) { btn->setBounds (b.removeFromTop (h)); b.removeFromTop (gap); }
+    }
+
+private:
+    juce::OwnedArray<juce::ToggleButton> buttons;
+    juce::OwnedArray<APVTS::ButtonAttachment> attachments;
+};
+
+// ---------------------------------------------------------------------------
 // A titled panel with an optional on/off switch and a row of controls.
 class Section : public juce::Component
 {
