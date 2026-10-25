@@ -367,6 +367,33 @@ struct LegacyShifter
 
 // The softplus^ex tables in the Koren models against the original formulas, over the whole range
 // the tubes visit (cutoff to grid conduction). Errors are relative to the local current scale.
+// The 6L6GC model at published operating points (single tube, class A1 / push-pull AB1 idle) and the 5150's idle
+static void pentodeDatasheet()
+{
+    struct Point { const char* name; double vp, vg2, vg1, ip, gm, rp; }; // datasheet: mA, mA/V, kOhm (0: not given)
+    const Point pts[] = {
+        { "A1 250 V / 250 V / -14 V (ds 72 mA, 6.0 mA/V, 22.5k)", 250, 250, -14, 72, 6.0, 22.5 },
+        { "A1 350 V / 250 V / -18 V (ds 54 mA, 5.2 mA/V, 33k)",   350, 250, -18, 54, 5.2, 33.0 },
+        { "AB1 450 V / 400 V / -37 V idle (ds 58 mA per tube)",   450, 400, -37, 58, 0.0, 0.0 },
+    };
+    KorenPentode t;
+    std::printf ("\n== 6L6GC model vs datasheets: plate current, gm, plate resistance, screen current ==\n");
+    for (const auto& p : pts)
+    {
+        double ip, dvp, dvg;
+        t.plate (p.vp, p.vg1, p.vg2, ip, dvp, dvg);
+        std::printf ("%-55s ip %6.1f mA  gm %5.2f mA/V  rp %6.1f k  ig2 %5.2f mA", p.name, ip * 1e3, dvg * 1e3, 1e-3 / dvp,
+                     t.screen (p.vg1, p.vg2) * 1e3);
+        if (p.gm > 0) std::printf ("   (gm %+.0f %%, rp %+.0f %%)", (dvg * 1e3 / p.gm - 1) * 100, (1.0 / dvp / (p.rp * 1e3) - 1) * 100);
+        std::printf ("\n");
+    }
+    PowerAmp5150 pa; pa.setControls (0.5, 0.5); pa.prepare (fs);
+    double ip, dvp, dvg;
+    t.plate (pa.getSupplyVoltage(), pa.getBiasVoltage(), pa.getScreenVoltage(), ip, dvp, dvg);
+    std::printf ("5150 idle: plate %.0f V, screen %.0f V, bias %.2f V -> ip %.1f mA  gm %.2f mA/V  rp %.1f k\n",
+                 pa.getSupplyVoltage(), pa.getScreenVoltage(), pa.getBiasVoltage(), ip * 1e3, dvg * 1e3, 1e-3 / dvp);
+}
+
 static void tubeTableAccuracy()
 {
     std::printf ("\n== Koren tube models: tabulated vs exact formula (max relative error) ==\n");
@@ -862,6 +889,7 @@ int main (int argc, char** argv)
     if (argc > 1 && std::string (argv[1]) == "fault") return faultRecoveryTests() ? 0 : 1;
     if (argc > 1 && std::string (argv[1]) == "cpu") { cpuModules(); return 0; }
     if (argc > 1 && std::string (argv[1]) == "tables") { tubeTableAccuracy(); return 0; }
+    if (argc > 1 && std::string (argv[1]) == "tube") { pentodeDatasheet(); return 0; }
     if (argc > 1 && std::string (argv[1]) == "chain") { chainLevels(); return 0; }
     if (argc > 1 && std::string (argv[1]) == "transpose") { transposeTests(); return 0; }
     if (argc > 1 && std::string (argv[1]) == "ingate") { inputGateTest(); return 0; }

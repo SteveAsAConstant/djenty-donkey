@@ -38,7 +38,7 @@
 ```
 V1A → C6 → N1 ─┬─ Lead 网络：R29 470k ‖ C17 2.2n → R41 1M、VR2 1M（C19 1n ‖ R40 1M）      两个网络始终都接在 N1 上
                └─ K4A：静止 R19 470k ‖ C51 270p │ 吸合（crunch）R43 2.2M ‖ C13 470p → A
-                    A → R21 1M ‖（C10 470p + R75 2.2M；crunch 时 S1C 短路 R75）→ B
+                    A → R21 1M ‖（C10 470p + R75 2.2M；BRIGHT 时 S1C 短路 R75）→ B
                     B = VR1 "Clean Pre" 1M 上端，C27 180p 跨接到滑臂
                     K4B 静止：R23 39k + C63 0.1µ 从 B 到地；吸合时断开
 K2A 选择哪个滑臂（VR2 或 VR1）经 R82 470k 到 V1B 栅极
@@ -46,7 +46,9 @@ K2A 选择哪个滑臂（VR2 或 VR1）经 R82 470k 到 V1B 栅极
 
 继电器状态怎么判断：
 - K1C / K2C 线圈和红色 LED（LEDRD2）、通道开关 S2A 串联：按下 Lead 时线圈通电、红灯亮 → **K1 / K2 吸合 = LEAD（RED）**，图上画的静止状态是 Rhythm
-- K4C 线圈由 crunch 开关的 S1A 段接地 → **K4 吸合 = crunch（BLUE）**；S1C 是同一个开关的另一段，crunch 时把 R75 短路
+- K4C 线圈由 S1A 经 R39 820Ω 接地 → **K4 吸合 = crunch（BLUE）**
+- S1 是面板上的双联按键（12 脚，两个 DPDT 按钮，零件名 DRASW）：1–6 脚（S1A、S1D）是 CRUNCH 按钮，7–12 脚（S1B、S1C）是 **BRIGHT** 按钮；S1B、S1D 两段没有用。所以 S1C 短路 R75（C10 470p 直接跨在 R21 上）属于 BRIGHT，和 crunch 无关。6505 面板上 BRIGHT 和 CRUNCH 本来就是两个独立的按键，2dor 的捕获表里四种组合都有
+- v0.5.2 之前的模型把 S1C 当成 crunch 的一段：BLUE 总是带 bright，CLEAN 总是不带。现在 BRIGHT 是单独的开关（插件里的 BRIGHT 按钮，默认开），三个通道的电路里都有：rhythm 网络始终挂在 C6 上，所以真机上 BRIGHT 对 LEAD 的高频也有一点影响
 
 增益对比（1 kHz）：CLEAN 的 R19 → R21 1M → 39k 分流约 -30 dB；crunch 的 R43 ‖ C13 → R21 → VR1 1M 约 -7 dB。两者差约 23 dB，和"crunch 增益更高"一致，说明静止 / 吸合的判断是对的。
 
@@ -107,7 +109,7 @@ K2A 选择哪个滑臂（VR2 或 VR1）经 R82 470k 到 V1B 栅极
 | 问题 | 查到的资料 | 模型里的做法 |
 |---|---|---|
 | 前级 B+ | v0.2：Music Electronics Forum 维修帖，前级节点大约在 300–350V 之间，每个 12AX7 半管约 1mA，取 320V。现在按出厂原理图第 2 页的电源链计算（见下节） | V1+ 305.7 V、V2+ 322.1 V（怠速），随信号下垂 |
-| Clean / Crunch | 重绘图上 K4B 把 R23 39k + C53 0.1µF 切换到地 | v0.5 之后按出厂原理图：K4 吸合 = crunch，换成 R43 ‖ C13 并断开 R23 + C63 分流，S1C 短路 R75（见第 3 节） |
+| Clean / Crunch | 重绘图上 K4B 把 R23 39k + C53 0.1µF 切换到地 | v0.5 之后按出厂原理图：K4 吸合 = crunch，换成 R43 ‖ C13 并断开 R23 + C63 分流，BRIGHT（S1C）单独短路 R75（见第 3 节） |
 | Rhythm 和 Lead 的区别 | 论坛：两个通道其实是同一条电路，用继电器改动增益和电平 | 出厂原理图（v0.5 之后）：Rhythm 时 C26 直接接地、V2A 栅极并联 R20 220k；Lead 时 C26 经 R18 47k、没有 R20。v0.5.0-beta 之前 C26 的接法正好反了 |
 | 音色堆栈 | 元件值符合 Marshall 式 TMB | 标准 TMB 拓扑，用节点分析求解，已和 LTspice 对比（误差 < 0.01dB） |
 | 清音"优化" | 原机 Rhythm 也要经过全部 5 级（所以清音名声差） | CLEAN 只走 V1A → V1B → 音色堆栈，余量大很多（这是我们的改动，不是原机） |

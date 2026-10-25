@@ -16,6 +16,7 @@
 //    only the first ~120 ms after a transition are compared: the coupling-cap bias shift (C28 / C29 47n x 220k
 //    ~10 ms) and the plate-node sag are inside it, the preamp rails' slow recovery (200-500 ms) is not.
 #include <cmath>
+#include <complex>
 #include <cstdio>
 #include <fstream>
 #include <functional>
@@ -56,6 +57,19 @@ double tone (const Signal& x, double rate, double f, double start)
     return 2.0 * std::sqrt (re * re + im * im) / (double) n;
 }
 
+// complex amplitude of frequency f (integer Hz) over exactly one second starting at `start` seconds
+std::complex<double> toneC (const Signal& x, double rate, double f, double start)
+{
+    const size_t s = (size_t) (start * rate), n = (size_t) rate;
+    double re = 0, im = 0;
+    for (size_t i = 0; i < n && s + i < x.size(); ++i)
+    {
+        const double ph = 2 * kPi * f * (double) i / rate;
+        re += x[s + i] * std::cos (ph); im += x[s + i] * std::sin (ph);
+    }
+    return { 2.0 * re / (double) n, 2.0 * im / (double) n };
+}
+
 // RMS over one period of f centred on time t
 double rmsAt (const Signal& x, double rate, double t, double f)
 {
@@ -83,13 +97,24 @@ struct Rig
     namcmp::NamWaveNet nam;
     double vIn = 9.78;              // volts at the return per NAM full scale
     double pres = 0.7, reso = 0.7;  // 0..1
+    // --spk: speaker / transformer for fitting (PowerAmp5150::setLoadAndTransformer): peak R, voice-coil L, its loss
+    // R, OT winding C, Re; spk[0] < 0: the model's defaults
+    double spk[5] { -1.0, 0, 0, 0, 0 };
+    void applySpeaker (vamp::PowerAmp5150& pa) const
+    {
+        if (spk[0] > 0) pa.setLoadAndTransformer (spk[0], spk[1], spk[2], spk[3], spk[4]);
+        if (mot[0] > 0) pa.setSpeakerMotional (mot[0], mot[1], mot[2], mot[3]);
+        if (leak >= 0) pa.setLeakage (leak);
+    }
+    double mot[4] { -1.0, 0, 0, 0 }; // --mot re,fc,qec,qmc: the speaker's motional impedance (setSpeakerMotional)
+    double leak = -1.0; // --leak H: OT leakage inductance plate to plate (setLeakage)
     static constexpr double rateOurs = 192000.0, kReturnDrive = 1.0, kReturnSourceR = 1000.0;
 
     Signal ours (const Signal& v) const
     {
         vamp::Preamp5150 pre; pre.prepare (rateOurs); pre.setMode (vamp::Preamp5150::Red);
         pre.setControls (0.5, 0.5, 0.5, 0.5, 0.3);
-        vamp::PowerAmp5150 pa; pa.setInputSourceResistance (kReturnSourceR); pa.setControls (pres, reso); pa.prepare (rateOurs);
+        vamp::PowerAmp5150 pa; pa.setInputSourceResistance (kReturnSourceR); applySpeaker (pa); pa.setControls (pres, reso); pa.prepare (rateOurs);
         auto step = [&] (double x)
         {
             pre.setRails (pa.getRailV1(), pa.getRailV2());
@@ -120,7 +145,7 @@ struct Rig
     {
         vamp::Preamp5150 pre; pre.prepare (rateOurs); pre.setMode (vamp::Preamp5150::Red);
         pre.setControls (0.5, 0.5, 0.5, 0.5, 0.3);
-        vamp::PowerAmp5150 pa; pa.setInputSourceResistance (kReturnSourceR); pa.setControls (pres, reso); pa.prepare (rateOurs);
+        vamp::PowerAmp5150 pa; pa.setInputSourceResistance (kReturnSourceR); applySpeaker (pa); pa.setControls (pres, reso); pa.prepare (rateOurs);
         const int ports[] = { 9, 3, 1, 5, 7 };
         std::vector<Signal> g (5, Signal (v.size()));
         Signal plate (v.size());
@@ -209,6 +234,7 @@ int main (int argc, char** argv)
     if (! rig.nam.load (argv[1])) { std::printf ("cannot load %s\n", argv[1]); return 1; }
     double inDbu = 18.995;
     std::string wavDir;
+    bool fitSpk = false;
     for (int i = 2; i < argc; ++i)
     {
         const std::string a = argv[i];
@@ -216,6 +242,32 @@ int main (int argc, char** argv)
         if (a == "--in-dbu") inDbu = next();
         else if (a == "--pres") rig.pres = next() / 10;
         else if (a == "--reso") rig.reso = next() / 10;
+        else if (a == "--spk" && i + 1 < argc) // peak,L,Rloss,cw,re
+            std::sscanf (argv[++i], "%lf,%lf,%lf,%lf,%lf", &rig.spk[0], &rig.spk[1], &rig.spk[2], &rig.spk[3], &rig.spk[4]);
+        else if (a == "--fitspk") fitSpk = true;
+        else if (a == "--leak") rig.leak = next();
+        else if (a == "--mot" && i + 1 < argc) std::sscanf (argv[++i], "%lf,%lf,%lf,%lf", &rig.mot[0], &rig.mot[1], &rig.mot[2], &rig.mot[3]);
+        else if (a == "--zout")
+        {
+            // output impedance at the speaker terminal from two resistive loads (complex amplitudes):
+            // Zout = (V1 - V2) / (V2 / R2 - V1 / R1)
+            const double r1 = 8.0, r2 = 16.0, perTone = 0.02;
+            auto run = [&] (double r)
+            {
+                rig.spk[0] = 1e-3; rig.spk[1] = 1e-9; rig.spk[2] = 1e-3; rig.spk[3] = vamp::PowerAmp5150::kCwinding; rig.spk[4] = r;
+                return rig.ours (sample (multitone (perTone), Rig::rateOurs, 1.5));
+            };
+            const auto y1 = run (r1), y2 = run (r2);
+            std::printf ("output impedance at the speaker terminal (ohm), presence %.1f resonance %.1f\n",
+                         rig.pres * 10, rig.reso * 10);
+            for (double f : multitoneFreqs())
+            {
+                const auto v1 = toneC (y1, Rig::rateOurs, f, 0.5), v2 = toneC (y2, Rig::rateOurs, f, 0.5);
+                const auto z = (v1 - v2) / (v2 / r2 - v1 / r1);
+                std::printf ("%6.0f Hz: |Z| %6.2f\n", f, std::abs (z));
+            }
+            return 0;
+        }
         else if (a == "--wav" && i + 1 < argc) wavDir = argv[++i];
         else if (a == "--probe")
         {
@@ -230,6 +282,38 @@ int main (int argc, char** argv)
     rig.vIn = dbuToVpk (inDbu);
     std::printf ("%s  (NAM %.0f Hz)  return: %.3f dBu = %.2f Vpk per full scale; presence %.1f resonance %.1f\n", argv[1],
                  rig.rateNam(), inDbu, rig.vIn, rig.pres * 10, rig.reso * 10);
+
+    if (fitSpk)
+    {
+        // grid over a physical 4x12 of Vintage 30-type speakers: Re 7.3 ohm (Celestion), Qec 1.02 (Qes 0.78 of a
+        // V30-type speaker, raised by the box like fc), the unknowns within their physical ranges: total mechanical Q
+        // with the cabinet's losses, in-box resonance, voice-coil inductance (0.35-0.7 mH measured on such speakers)
+        // and its eddy-current loss. One line per point:
+        // SPK qmc fc Le Rloss  rms(40 Hz..12 kHz)  then ours - capture per tone (level matched 200 Hz..5 kHz)
+        const double perTone = 0.02;
+        const auto rn = gains (rig.namRun (sample (multitone (perTone), rig.rateNam(), 1.5)), rig.rateNam(), perTone);
+        const auto f = multitoneFreqs();
+        for (double lk : { 1e-4, 10e-3, 20e-3, 40e-3 })
+        for (double qmc : { 3.0, 4.0, 5.0, 6.0 })
+            for (double fc : { 90.0, 95.0, 100.0 })
+                for (double l : { 0.5e-3, 0.7e-3 })
+                    for (double rl : { 15.0, 30.0 })
+                    {
+                        rig.spk[0] = 1.0; rig.spk[1] = l; rig.spk[2] = rl; rig.spk[3] = vamp::PowerAmp5150::kCwinding; rig.spk[4] = 7.3;
+                        rig.mot[0] = 7.3; rig.mot[1] = fc; rig.mot[2] = 1.02; rig.mot[3] = qmc; rig.leak = lk;
+                        const auto ro = gains (rig.ours (sample (multitone (perTone), Rig::rateOurs, 1.5)), Rig::rateOurs, perTone);
+                        double off = 0; int n = 0;
+                        for (size_t i = 0; i < f.size(); ++i) if (f[i] >= 200 && f[i] <= 5000) { off += rn[i] - ro[i]; ++n; }
+                        off /= n;
+                        double r = 0; int nr = 0;
+                        for (size_t i = 0; i < f.size(); ++i) if (f[i] >= 40 && f[i] <= 12000) { const double d = ro[i] + off - rn[i]; r += d * d; ++nr; }
+                        std::printf ("SPK %g %g %g %g %g %.3f", lk * 1e3, qmc, fc, l * 1e3, rl, std::sqrt (r / nr));
+                        for (size_t i = 0; i < f.size(); ++i) std::printf (" %.2f", ro[i] + off - rn[i]);
+                        std::printf ("\n");
+                        std::fflush (stdout);
+                    }
+        return 0;
+    }
 
     // 1. small-signal response, level match
     const double perTone = 0.02;

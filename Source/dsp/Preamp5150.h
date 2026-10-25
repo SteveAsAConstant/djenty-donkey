@@ -135,6 +135,7 @@ public:
     {
         fs = sampleRate;
         toneStack.prepare (fs);
+        setBright (bright);
         lead.configure (vb1, vb2, fs);
         blue.configure (vb1, vb2, fs);
         clean.configure (vb1, fs);
@@ -193,6 +194,9 @@ public:
     // channels of very different trim (CLEAN 25x) does not swell the old channel mid-fade
     void setChannelTrims (double cleanTrim, double blueTrim, double redTrim) { trim[Clean] = cleanTrim; trim[Blue] = blueTrim; trim[Red] = redTrim; }
 
+    // BRIGHT (rhythm) is on by default: BLUE was calibrated with it (docs/nam_calibration.md)
+    bool bright = true;
+
     // channel-switch crossfade length (takes effect at the next prepare)
     double switchFadeMs = 20.0;
 
@@ -228,6 +232,15 @@ public:
         lead.setGainPots (leadPot, rhythm);
         blue.setGainPots (leadPot, rhythm);
         clean.setGainPots (leadPot, rhythm);
+    }
+
+    // BRIGHT pushbutton (S1C shorts R75: C10 across R21). In every channel's circuit; audible in CLEAN and BLUE.
+    void setBright (bool on)
+    {
+        bright = on;
+        lead.setBright (on);
+        blue.setBright (on);
+        clean.setBright (on);
     }
 
     // input: guitar voltage. output: volts after tone stack and post-gain pot (channel trim included)

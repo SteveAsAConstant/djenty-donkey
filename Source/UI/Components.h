@@ -337,7 +337,7 @@ private:
 };
 
 // ---------------------------------------------------------------------------
-class Toggle : public juce::Component
+class Toggle : public juce::Component, public juce::SettableTooltipClient
 {
 public:
     Toggle (APVTS& state, const juce::String& paramID, const juce::String& text, juce::Colour accent)

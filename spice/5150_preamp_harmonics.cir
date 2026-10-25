@@ -1,11 +1,12 @@
 * Whole 5150 preamp (factory schematic sheet 1), fully coupled, LEAD (lead=1) or rhythm with crunch (lead=0), 110 Hz
 * input sweep: harmonics of all six plates. Reference for Source/dsp/FullPreamp5150.h: the 12AX7 here uses exactly
 * the C++ device equations (12AX7_cpp.inc), so differences come from the circuit solution only.
-* Relay contacts are resistors: closed 1m, open 1T. K1 / K2 energized in LEAD, K4 (and the S1C section of the
-* crunch switch) with crunch; in LEAD the crunch switch is taken as off. gl / gr: VR2 (lead) / VR1 (rhythm) wiper
+* Relay contacts are resistors: closed 1m, open 1T. K1 / K2 energized in LEAD, K4 with crunch (in LEAD the crunch
+* switch is taken as off); bright=1: the BRIGHT button's S1C shorts R75 (in every channel, as in the plugin). gl / gr: VR2 (lead) / VR1 (rhythm) wiper
 * fractions from ground. Rails: the factory supply chain at idle. See docs/spice_reference_lead.md.
 .include 12AX7_cpp.inc
 .param lead=1
+.param bright=1
 .param gl=0.0132
 .param gr=0.3
 .param amp=0.01
@@ -39,7 +40,7 @@ RVR2b lw 0 {1Meg*gl+10}
 C19 n2 lw 1n
 R40 n2 lw 1Meg
 
-* ---- rhythm pre-gain network (always on C6); K4A, S1C, K4B: crunch = not lead here ----
+* ---- rhythm pre-gain network (always on C6); K4A, K4B: crunch = not lead here; S1C: bright ----
 RK4r n1 k4r {kL}
 R19 k4r na 470k
 C51 k4r na 270p
@@ -48,7 +49,7 @@ R43 k4c na 2.2Meg
 C13 k4c na 470p
 R21 na nb 1Meg
 C10 na nc10 470p
-R75 nc10 nb {if(lead,2.2Meg,1m)}
+R75 nc10 nb {if(bright,1m,2.2Meg)}
 RVR1a nb rw {1Meg*(1-gr)+10}
 RVR1b rw 0 {1Meg*gr+10}
 C27 nb rw 180p

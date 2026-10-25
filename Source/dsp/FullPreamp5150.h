@@ -6,8 +6,9 @@
 namespace vamp
 {
 // Channels as relay positions (factory schematic sheet 1, "EVH 120 preamp bd."). K1 / K2 are energized in LEAD:
-// their coils are in series with the red LED and the channel switch S2A. K4 is energized with crunch: S1A, a section
-// of the crunch switch, grounds its coil; S1C is another section of the same switch. Values as Preamp5150::Mode.
+// their coils are in series with the red LED and the channel switch S2A. K4 is energized with crunch: S1A grounds its
+// coil. S1 is the front panel's twin pushbutton (12 pins, two DPDT buttons): S1A / S1D are CRUNCH, S1B / S1C BRIGHT
+// (S1C shorts R75; the 6505's BRIGHT and CRUNCH are independent). Values as Preamp5150::Mode.
 namespace channel5150 { constexpr int Clean = 0, Crunch = 1, Lead = 2; }
 
 // The front of the preamp, the same for every channel: input jack, V1A, C6 into BOTH pre-gain networks (the one K2A
@@ -16,7 +17,7 @@ namespace channel5150 { constexpr int Clean = 0, Crunch = 1, Lead = 2; }
 //   jack -> R27 22k, C20 39p -> C15 0.1u -> R25 1M, R22 68k -> V1A (R2 220k, R12 1.82k || C3 1u) -> C6 22n -> N1
 //   lead:   N1 -> R29 470k || C17 2.2n -> R41 1M; VR2 Ultra Pre 1M (C19 1n || R40 1M top to wiper)
 //   rhythm: N1 -> K4A: R19 470k || C51 270p (at rest) or R43 2.2M || C13 470p (crunch) -> A
-//           A -> R21 1M || (C10 470p + R75 2.2M; S1C shorts R75 with crunch) -> B: VR1 Clean Pre 1M (C27 180p top
+//           A -> R21 1M || (C10 470p + R75 2.2M; S1C shorts R75 with BRIGHT) -> B: VR1 Clean Pre 1M (C27 180p top
 //           to wiper); K4B at rest: R23 39k + C63 0.1u from B to ground
 //   K2A: VR2 wiper (lead) or VR1 wiper (rhythm) -> R82 470k -> V1B (R3 100k, R17 1.82k || C4 1u, C26 22u)
 //   K1A at rest shorts R18 47k: C26 straight to ground in rhythm, through R18 in lead (a tighter low end)
@@ -30,7 +31,7 @@ struct Front5150
     // every capacitor of the front by name (-1: not in this channel), to carry state across a channel switch
     enum Cap { C20, C15, C3, C6, C17, C19, C51, C13, C10, C27, C63, C4, C26, kCaps };
     int cap[kCaps] { -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1 };
-    int leadTop = 0, leadBot = 0, rhyTop = 0, rhyBot = 0, rR18 = -1;
+    int leadTop = 0, leadBot = 0, rhyTop = 0, rhyBot = 0, rR18 = -1, rR75 = 0;
 
     void build (TriodeNetwork<NT>& net, int channel)
     {
@@ -73,14 +74,9 @@ struct Front5150
             cap[C51] = dk.addC (nN1, nA, 270e-12); // C51
         }
         dk.addR (nA, nB, 1e6);                    // R21
-        if (crunch)
-            cap[C10] = dk.addC (nA, nB, 470e-12); // C10, R75 shorted by S1C
-        else
-        {
-            const int nC10 = n();
-            cap[C10] = dk.addC (nA, nC10, 470e-12); // C10
-            dk.addR (nC10, nB, 2.2e6);            // R75
-        }
+        const int nC10 = n();
+        cap[C10] = dk.addC (nA, nC10, 470e-12);   // C10
+        rR75 = dk.addR (nC10, nB, 2.2e6);         // R75 (S1C, BRIGHT, shorts it: setBright)
         rhyTop = dk.addR (nB, nRW, 5e5);          // VR1 upper
         rhyBot = dk.addR (nRW, G, 5e5);           // VR1 lower
         cap[C27] = dk.addC (nB, nRW, 180e-12);    // C27
@@ -116,6 +112,10 @@ struct Front5150
         dk.setR (rhyTop, (1.0 - rhythmF) * 1e6);
         dk.setR (rhyBot, rhythmF * 1e6);
     }
+
+    // BRIGHT (S1C closed: R75 shorted, C10 470p straight across R21). Changes the circuit matrices like setPots.
+    void setBright (DKCircuit& dk, bool on) { dk.setR (rR75, on ? kSwitchClosed : 2.2e6); }
+    static constexpr double kSwitchClosed = 0.05; // pushbutton contact
 
     // the state of every capacitor this channel shares with o's (same part, same value; at the same sample rate)
     template <int N2>
@@ -248,6 +248,8 @@ public:
     // VR2 Ultra Pre (lead) and VR1 Clean Pre (rhythm) wiper fractions from ground. Changes the circuit matrices:
     // rebuilt (allocation-free) on the next sample, so call it at most once per few dozen samples while a knob moves.
     void setGainPots (double leadF, double rhythmF) { front.setPots (net.dk, leadF, rhythmF); }
+    // BRIGHT pushbutton (S1C). Rebuilds the matrices on the next sample, like the pots.
+    void setBright (bool on) { front.setBright (net.dk, on); }
 
     // input: volts at the guitar jack. output: AC voltage after C58 (into R88 and the tone stack feed)
     double process (double vin)
@@ -371,6 +373,8 @@ public:
     }
 
     void setGainPots (double leadF, double rhythmF) { front.setPots (net.dk, leadF, rhythmF); }
+    // BRIGHT pushbutton (S1C). Rebuilds the matrices on the next sample, like the pots.
+    void setBright (bool on) { front.setBright (net.dk, on); }
 
     // input: volts at the guitar jack. output: V1B's AC plate voltage after C2
     double process (double vin)

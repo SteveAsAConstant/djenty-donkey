@@ -168,18 +168,22 @@ struct Rig
     bool frozenSupply = false; // --frozen-supply: rails held at their DC point (no sag), to separate DC from dynamics
     double r18 = -1.0;         // --r18 ohms: V1B cathode R18 in the lead preamp (default: FullPreamp5150::r18)
     bool crunchOff = false;    // --crunch-off: Rhythm captures against the rhythm channel with crunch off (all five stages)
+    bool preOnly = false;      // --pre-only: preamp output (tone stack and Post, rails at idle) against a preamp-only capture
+    int bright = -1;           // --bright 0/1: the BRIGHT pushbutton (default: the plugin's default)
 
     std::vector<double> ours (const std::vector<double>& v, double preKnob, double drive) const
     {
         vamp::Preamp5150 pre (false, ! crunchOff);
         if (r18 >= 0.0) pre.lead.r18 = r18;
+        if (bright >= 0) pre.setBright (bright != 0);
         pre.prepare (rateOurs); pre.setMode (s.mode);
         pre.setControls (preKnob, s.bass, s.mid, s.treble, vamp::masterKnobForDrive (drive));
         vamp::PowerAmp5150 pa; pa.setControls (s.presence, s.resonance); pa.prepare (rateOurs);
         if (frozenSupply) pa.beginSupplySettle();
         const double post = s.mode == 0 ? 54.0 : 1.0; // AmpSim kChannelPost
         std::vector<double> y (v.size());
-        for (size_t i = 0; i < v.size(); ++i) y[i] = vamp::processAmp5150 (pre, pa, v[i], post);
+        if (preOnly) for (size_t i = 0; i < v.size(); ++i) y[i] = pre.process (v[i]) * post;
+        else for (size_t i = 0; i < v.size(); ++i) y[i] = vamp::processAmp5150 (pre, pa, v[i], post);
         return y;
     }
     std::vector<double> namRun (const std::vector<double>& v) const
@@ -299,6 +303,7 @@ int main (int argc, char** argv)
     bool driveOverride = false;
     std::string wavDir;
     bool fit = false, fitPre = false, fitDrive = false, residual = false, sweep = false;
+    double smallSignal = 0.0; // --ss volts per tone: small-signal response (multitone) against the capture
     for (int i = 2; i < argc; ++i)
     {
         const std::string a = argv[i];
@@ -313,9 +318,14 @@ int main (int argc, char** argv)
         else if (a == "--frozen-supply") rig.frozenSupply = true;
         else if (a == "--r18" && i + 1 < argc) rig.r18 = std::atof (argv[++i]);
         else if (a == "--crunch-off") rig.crunchOff = true;
+        else if (a == "--pre-only") rig.preOnly = true;
+        else if (a == "--bright" && i + 1 < argc) rig.bright = std::atoi (argv[++i]);
+        else if (a == "--ss" && i + 1 < argc) smallSignal = std::atof (argv[++i]);
         else if (a == "--fit-drive") fitDrive = true;
     }
-    rig.s = parseSettings (rig.nam.getName());
+    // dials from the model's name, or from the file name when the model's name has none (e.g. 2dor's captures,
+    // whose settings are in the author's spreadsheet: copy the file to a name like "... Ld Pr-4 B-6 ... P-7.nam")
+    rig.s = parseSettings (rig.nam.getName().find (" Pr-") != std::string::npos ? rig.nam.getName() : std::string (argv[1]));
     rig.voltsPerFS = 0.7746 * std::pow (10.0, dbu / 20.0) * std::sqrt (2.0); // full-scale sine peak
     rig.rateNam = rig.nam.getSampleRate();
     rig.rateOurs = 4.0 * rig.rateNam;
@@ -364,6 +374,34 @@ int main (int argc, char** argv)
         }
         std::printf ("SWEEP pre %.1f | all: comp %.2f H2 %.2f H3 %.2f H4 %.2f | <30mV: comp %.2f H2 %.2f H3 %.2f H4 %.2f\n", rig.s.pre * 10,
                      sum[0] / n, sum[1] / n, sum[2] / n, sum[3] / n, sumLo[0] / nLo, sumLo[1] / nLo, sumLo[2] / nLo, sumLo[3] / nLo);
+        return 0;
+    }
+
+    if (smallSignal > 0.0)
+    {
+        // small-signal response: 29 tones (1/3 octave, 31 Hz .. 16 kHz, integer Hz) at `smallSignal` volts each, one
+        // second analysed after 0.5 s; ours - NAM per tone after matching the level over 200 Hz .. 5 kHz
+        std::vector<double> f;
+        for (int k = 0; k < 29; ++k) f.push_back (std::round (31.5 * std::pow (2.0, k / 3.0)));
+        const double a = smallSignal;
+        const Fn mt = [f, a] (double t) { double v = 0; for (size_t k = 0; k < f.size(); ++k) v += std::sin (2 * kPi * f[k] * t + 1.7 * (double) (k * k)); return a * v; };
+        const Test tst { "multitone", 1.5, mt };
+        const auto yo = rig.ours (sample (tst, rig.rateOurs), preOverride >= 0.0 ? preOverride : rig.s.pre, driveCalibrated);
+        const auto yn = rig.namRun (sample (tst, rig.rateNam));
+        auto amp = [] (const std::vector<double>& x, double rate, double fr)
+        {
+            const size_t s = (size_t) (0.5 * rate), n = (size_t) rate;
+            double re = 0, im = 0;
+            for (size_t i = 0; i < n && s + i < x.size(); ++i) { const double ph = 2 * kPi * fr * (double) i / rate; re += x[s + i] * std::cos (ph); im += x[s + i] * std::sin (ph); }
+            return 2.0 * std::sqrt (re * re + im * im) / (double) n;
+        };
+        std::vector<double> d;
+        double off = 0; int n = 0;
+        for (double fr : f) { d.push_back (db (amp (yo, rig.rateOurs, fr) / amp (yn, rig.rateNam, fr))); if (fr >= 200 && fr <= 5000) { off += d.back(); ++n; } }
+        off /= n;
+        std::printf ("SS %.0e V/tone, ours %+.1f dB re capture (200 Hz-5 kHz):", a, off);
+        for (size_t k = 0; k < f.size(); ++k) std::printf (" %.0f:%+.1f", f[k], d[k] - off);
+        std::printf ("\n");
         return 0;
     }
 

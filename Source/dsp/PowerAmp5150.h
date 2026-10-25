@@ -7,10 +7,16 @@
 
 namespace vamp
 {
-// Norman Koren's pentode model (6L6GC parameters from the wdv.com SPICE tube table)
+// Norman Koren's pentode model (6L6GC parameters from the wdv.com SPICE tube table) with a finite plate resistance.
+// Koren's plate current hardly depends on the plate voltage above the knee (atan): the 6L6GC's plate resistance came
+// out at ~100-280k at the datasheet operating points (datasheets: 22.5k at 250 V / 72 mA, 33k at 350 V / 54 mA) and
+// ~890k at the 5150's, so the output stage had almost no source resistance of its own and followed the speaker's
+// impedance too much. An Early factor (1 + Vpk / va) gives rp ~ (va + Vpk) / Ip (together with Koren's own slope): va
+// 1650 V centres both datasheet points, kg1 1460 -> 1865 keeps their plate currents (dsp_test tube). Koren's screen
+// current was ~1.9x the datasheets' (8.4 / 5.5 mA vs 5.0 / 2.5 mA at the same two points): kg2 4500 -> 8500.
 struct KorenPentode
 {
-    static constexpr double mu = 8.7, ex = 1.35, kg1 = 1460.0, kg2 = 4500.0, kp = 48.0, kvb = 12.0;
+    static constexpr double mu = 8.7, ex = 1.35, kg1 = 1865.0, kg2 = 8500.0, kp = 48.0, kvb = 12.0, va = 1650.0;
 
     static const SoftplusPow& softplusPow() { static const SoftplusPow t (ex); return t; }
 
@@ -47,6 +53,17 @@ struct KorenPentode
         ip = base * at;
         dVg1 = s.scale * dG * kp * s.inv * at;
         dVpk = base * invKvb / (1.0 + r * r);
+        early (vpk, ip, dVpk, dVg1);
+    }
+
+    // the finite plate resistance: ip (1 + Vpk / va) above 0 V (continuous there, ip = 0)
+    static inline void early (double vpk, double& ip, double& dVpk, double& dVg1)
+    {
+        if (vpk <= 0.0) return;
+        const double f = 1.0 + vpk * (1.0 / va);
+        dVpk = dVpk * f + ip * (1.0 / va);
+        ip *= f;
+        dVg1 *= f;
     }
 
     // The same with the original formula: reference for the tests
@@ -73,6 +90,7 @@ struct KorenPentode
         ip = base * at;
         dVg1 = twoOverKg1 * ex * Ep * sig * at;
         dVpk = base * invKvb / (1.0 + r * r);
+        early (vpk, ip, dVpk, dVg1);
     }
 
     // screen current of ONE tube
@@ -99,8 +117,8 @@ inline void gridCurrentR (double vgk, double rgk, double& ig, double& dIg)
 //   master -> V3A recovery stage -> C49 -> LTP phase inverter V4A/V4B (R46 82k / R58 100k,
 //   tail R52 470 + R51 10k + R57 4.7k) -> C28/C29 47n, R54/R55 220k bias, 2.2k grid stoppers
 //   -> 2 x 2 x 6L6GC push-pull -> output transformer (Raa ~2.1k) -> 4x12 speaker impedance
-//   NFB: speaker -> R56 39k -> (C12 6.8n || VR8 Resonance) -> tail node L,
-//        presence: L -> VR9 10k (A) -> C8 0.1u || C62 0.033u -> gnd.   V4A grid AC-referenced to L via C31.
+//   NFB: speaker -> R56 39k -> (C12 6.8n || VR8 Resonance) -> Y -> C30 22u -> tail node L (R57 4.7k),
+//        presence: Y -> VR9 10k (A) -> C8 0.1u || C62 0.033u -> gnd.   V4A grid AC-referenced to L via C31.
 //   Supply: the factory chain (Supply5150), every node sagging with the stages' currents.
 //
 // V3A + PI + output stage + transformer + speaker + NFB loop are solved simultaneously with the DK method
@@ -115,14 +133,21 @@ public:
     static constexpr double kPreampIdleI1 = 1.65e-3, kPreampIdleI2 = 2.19e-3;
 
     // ---- assumptions (not printed on the schematic) ----
+    static constexpr double kTwoPi = 6.283185307179586;
     static constexpr double kIdlePerTube = 0.035;
     static constexpr double kRaa = 2100.0;      // plate-to-plate impedance
     static constexpr double kRload = 8.0;
     static constexpr double kLmagPrimary = 30.0; // OT magnetizing inductance (H)
     static constexpr double kCwinding = 2.5e-9;  // OT primary shunt capacitance (F)
-    // Resonance damping of the 4x12 load: 6 + 8 ohm peak at ~100 Hz. Fitted to NAM captures through a Suhr
-    // Reactive Load (docs/nam_calibration.md); v0.3 had a 6 + 39 ohm peak, which gave ~2-3 dB too much low end.
-    static constexpr double kSpeakerPeakR = 8.0;
+    static constexpr double kLeakagePP = 1e-4;   // OT leakage inductance, plate to plate (H)
+    // 4x12 of Celestion Vintage 30s, 8 ohm, from Thiele-Small physics: Re 7.3 ohm and Fs 75 Hz (Celestion), Qes 0.78
+    // (a V30-type speaker, WGS Veteran 30); the closed cab stiffens the suspension (Vas ~19 L vs ~27-35 L of air per
+    // driver): fc ~90 Hz (owners measure 90-105 Hz), Qec = Qes fc / Fs. The total mechanical Q is far below a single
+    // driver's (~12): box leaks and four drivers with spread resonances (R. Aiken); 3 here, and a 0.7 mH voice coil (a
+    // G12H-75 measures 0.7 mH) with a 15 ohm eddy-current loss: these three fitted within their physical ranges to
+    // power-amp-only captures of a real 6505 into three real cabinets (docs/power_amp.md).
+    static constexpr double kSpeakerRe = 7.3, kSpeakerFc = 90.0, kSpeakerQec = 0.78 * 90.0 / 75.0, kSpeakerQmc = 3.0;
+    static constexpr double kVoiceCoilL = 0.7e-3, kVoiceCoilLossR = 15.0;
 
     PowerAmp5150()
     {
@@ -130,9 +155,9 @@ public:
         using D = DKCircuit;
         const int G = D::GND;
 
-        nA = n(); nP1 = n(); nGB = n(); nGA = n(); nK = n(); nQ = n(); nL = n(); nM = n(); nPr = n();
+        nA = n(); nP1 = n(); nGB = n(); nGA = n(); nK = n(); nQ = n(); nL = n(); nM = n(); nPr = n(); nY = n();
         nPB = n(); nPA = n(); nC1 = n(); nG1 = n(); nC2 = n(); nG2 = n();
-        nO1 = n(); nO2 = n(); nCT = n(); nS = n(); nSp1 = n(); nSp2 = n();
+        nO1 = n(); nO2 = n(); nCT = n(); nS = n(); nSp1 = n(); nSp2 = n(); nSec = n();
         nIn = n(); nG3 = n(); nK3 = n(); nP3 = n();
 
         // V3A recovery stage: master wiper (~100k source) -> C11 47n -> R26 1M, 1k grid stopper;
@@ -160,14 +185,15 @@ public:
         const int tri[3][3] = { { nPB, nGB, nK }, { nPA, nGA, nK }, { nP3, nG3, nK3 } }; // plate, grid, cathode
         for (auto& t : tri)
         {
-            dk.addC (t[1], t[2], 2.3e-12); // Cgk
-            dk.addC (t[1], t[0], 2.4e-12); // Cgp
+            dk.addC (t[1], t[2], KorenTriode::cgk); // Cgk
+            dk.addC (t[1], t[0], KorenTriode::cgp); // Cgp
         }
 
         dk.addR (nS, nM, 39e3);            // R56
-        dk.addC (nM, nL, 6.8e-9);          // C12
-        rRes = dk.addR (nM, nL, 1e6);      // VR8 resonance
-        rPres = dk.addR (nL, nPr, 10e3);   // VR9 presence (10k audio taper, wiper tied to the capacitor end)
+        dk.addC (nM, nY, 6.8e-9);          // C12
+        rRes = dk.addR (nM, nY, 1e6);      // VR8 resonance
+        dk.addC (nY, nL, 22e-6);           // C30: the feedback network is AC-coupled to the tail (no DC through VR8)
+        rPres = dk.addR (nY, nPr, 10e3);   // VR9 presence (10k audio taper, wiper tied to the capacitor end)
         dk.addC (nPr, G, 0.133e-6);        // C8 0.1u || C62 0.033u
 
         dk.addC (nPB, nC1, 47e-9);         // C29
@@ -182,16 +208,22 @@ public:
         // primary shunt capacitance (in parallel with the reflected load, so it is damped):
         // gives the open-loop high-frequency roll-off of the output transformer
         cWinding = dk.addC (nO1, nO2, kCwinding);
-        dk.addTransformer ({ { nO1, nCT, np / 2 }, { nCT, nO2, np / 2 }, { nS, G, 1.0 } });
-        dk.addL (nS, G, kLmagPrimary / (np * np));
+        // the secondary winding drives the speaker terminal (where the feedback is taken) through the leakage
+        // inductance, referred to the secondary (plate-to-plate value / np^2)
+        dk.addTransformer ({ { nO1, nCT, np / 2 }, { nCT, nO2, np / 2 }, { nSec, G, 1.0 } });
+        lLeak = dk.addL (nSec, nS, kLeakagePP / (np * np));
+        dk.addL (nSec, G, kLmagPrimary / (np * np));
 
-        // 4x12 closed-back cab impedance: Re, lossy voice-coil inductance, ~100 Hz resonance
-        dk.addR (nS, nSp1, 6.0);
-        lVoice = dk.addL (nSp1, nSp2, 0.5e-3);
-        rVoiceLoss = dk.addR (nSp1, nSp2, 30.0);
-        rSpkPeak = dk.addR (nSp2, G, kSpeakerPeakR);
-        dk.addL (nSp2, G, 20.7e-3);
-        dk.addC (nSp2, G, 122e-6);
+        // 4x12 cab: Re, the lossy voice coil, the motional impedance (Res || Lces || Cmes) of the in-box resonance
+        rSpkRe = dk.addR (nS, nSp1, kSpeakerRe);
+        lVoice = dk.addL (nSp1, nSp2, kVoiceCoilL);
+        rVoiceLoss = dk.addR (nSp1, nSp2, kVoiceCoilLossR);
+        {
+            const double w = kTwoPi * kSpeakerFc, cmes = kSpeakerQec / (w * kSpeakerRe);
+            rSpkPeak = dk.addR (nSp2, G, kSpeakerRe * kSpeakerQmc / kSpeakerQec);
+            lSpkM = dk.addL (nSp2, G, 1.0 / (w * w * cmes));
+            cSpkM = dk.addC (nSp2, G, cmes);
+        }
 
         dk.markOutput (nS);  // speaker
         dk.markOutput (nK);  // diagnostics
@@ -267,13 +299,29 @@ public:
     double getScreenVoltage() const { return supply.screen; }
 
     // Not on the schematic, for fitting / comparisons (call before prepare): the load (4x12 or load box) peak
-    // damping resistance, voice-coil inductance and its loss resistance, and the OT primary shunt capacitance
-    void setLoadAndTransformer (double peakR, double voiceL, double voiceLossR, double cWindingF)
+    // damping resistance, voice-coil inductance and its loss resistance, the OT primary shunt capacitance, and Re
+    void setLoadAndTransformer (double peakR, double voiceL, double voiceLossR, double cWindingF, double re = kSpeakerRe)
     {
+        dk.setR (rSpkRe, re);
         dk.setR (rSpkPeak, peakR);
         dk.setL (lVoice, voiceL);
         dk.setR (rVoiceLoss, voiceLossR);
         dk.setC (cWinding, cWindingF);
+    }
+
+    // The speaker's motional impedance from Thiele-Small terms (call before prepare): in-box resonance fc, electrical
+    // and total mechanical Q (box losses included): Cmes = Qec / (2 pi fc Re), Lces = 1 / ((2 pi fc)^2 Cmes),
+    // Res = Re Qmc / Qec (the parallel R || L || C behind Re and the voice coil)
+    // OT leakage inductance, plate to plate (call before prepare)
+    void setLeakage (double lpp) { dk.setL (lLeak, std::max (lpp, 1e-6) * kRload / kRaa); }
+
+    void setSpeakerMotional (double re, double fc, double qec, double qmc)
+    {
+        const double w = kTwoPi * fc, cmes = qec / (w * re);
+        dk.setR (rSpkRe, re);
+        dk.setC (cSpkM, cmes);
+        dk.setL (lSpkM, 1.0 / (w * w * cmes));
+        dk.setR (rSpkPeak, re * qmc / qec);
     }
 
     // 0..1 knob positions
@@ -590,12 +638,12 @@ private:
     KorenTriode triode;
     KorenPentode tube;
 
-    int nA = 0, nP1 = 0, nGB = 0, nGA = 0, nK = 0, nQ = 0, nL = 0, nM = 0, nPr = 0;
+    int nA = 0, nP1 = 0, nGB = 0, nGA = 0, nK = 0, nQ = 0, nL = 0, nM = 0, nPr = 0, nY = 0;
     int nPB = 0, nPA = 0, nC1 = 0, nG1 = 0, nC2 = 0, nG2 = 0, nO1 = 0, nO2 = 0;
-    int nCT = 0, nS = 0, nSp1 = 0, nSp2 = 0, nIn = 0, nG3 = 0, nK3 = 0, nP3 = 0;
+    int nCT = 0, nS = 0, nSp1 = 0, nSp2 = 0, nIn = 0, nG3 = 0, nK3 = 0, nP3 = 0, nSec = 0, lLeak = 0;
     int srcIn = 0, srcR5 = 0, srcR46 = 0, srcR58 = 0, srcBias1 = 0, srcBias2 = 0, srcB = 0;
     int rRes = 0, rPres = 0;
-    int cWinding = 0, lVoice = 0, rVoiceLoss = 0, rSpkPeak = 0;
+    int cWinding = 0, lVoice = 0, rVoiceLoss = 0, rSpkPeak = 0, rSpkRe = 0, lSpkM = 0, cSpkM = 0;
 
     double fs = 192000.0, T = 1.0 / 192000.0;
     Supply5150 supply;

@@ -72,7 +72,7 @@ v0.4 的 C++ 把每一级单独求解：后一级由前一级的开路屏压经�
 
 ## 3b. 出厂原理图的继电器位置：RED 和 BLUE（v0.5 之后）
 
-网表 `spice/5150_preamp_harmonics.cir`：整个前级按出厂原理图第 1 页，两个增益网络都接在 C6 上，继电器触点用电阻表示（闭合 1 mΩ、断开 1 TΩ），`.param lead=1` 是 RED、`lead=0` 是 BLUE（crunch）。12AX7 用 `spice/12AX7_cpp.inc`（和 C++ 同一组方程），出厂电源链的怠速电压，VR2 = 0.0132、VR1 = 0.3，110 Hz，`.four` 取最后 20 个周期。C++ 端是 `FullPreamp5150`（参考精度），同样取最后 20 个周期。
+网表 `spice/5150_preamp_harmonics.cir`：整个前级按出厂原理图第 1 页，两个增益网络都接在 C6 上，继电器触点用电阻表示（闭合 1 mΩ、断开 1 TΩ），`.param lead=1` 是 RED、`lead=0` 是 BLUE（crunch）。`.param bright` 是 BRIGHT 按钮（S1C 短路 R75，默认 1）；下表 RED 是 bright=0、BLUE 是 bright=1（当时的模型把 S1C 算在 crunch 上），v0.5.2 之后 RED 用 bright=1 重跑，6 个屏极、6 个电平上同样幅度差 ≤ 0.1%、H2 差 ≤ 0.6 dB（BRIGHT 对 LEAD 的影响本来就很小）。12AX7 用 `spice/12AX7_cpp.inc`（和 C++ 同一组方程），出厂电源链的怠速电压，VR2 = 0.0132、VR1 = 0.3，110 Hz，`.four` 取最后 20 个周期。C++ 端是 `FullPreamp5150`（参考精度），同样取最后 20 个周期。
 
 H1 Vpk / H2 / H3（dB re 基波），C++ / LTspice：
 

@@ -60,6 +60,9 @@ private:
 struct KorenTriode
 {
     static constexpr double mu = 100.0, ex = 1.4, kg1 = 1060.0, kp = 600.0, kvb = 300.0;
+    // interelectrode capacitances in circuit (Koren's values: tube + socket + wiring; the bare-tube datasheet
+    // 1.6 / 1.7 pF fit the rhythm [PRE] capture slightly better but the full-amp captures worse, so not used)
+    static constexpr double cgk = 2.3e-12, cgp = 2.4e-12;
 
     static const SoftplusPow& softplusPow() { static const SoftplusPow t (ex); return t; }
 
@@ -370,8 +373,8 @@ private:
         GAtot = Gs + Ga + GcA + Grs;
         invGAtot = 1.0 / GAtot;
         betaA = Grs * invGAtot;
-        Gcgp = 2.0 * 2.4e-12 / T; // 12AX7 Cgp
-        Gcgk = 2.0 * 2.3e-12 / T; // 12AX7 Cgk
+        Gcgp = 2.0 * KorenTriode::cgp / T; // 12AX7 Cgp
+        Gcgk = 2.0 * KorenTriode::cgk / T; // 12AX7 Cgk
     }
 
     // Quiescent point: grid at 0 V, caps open

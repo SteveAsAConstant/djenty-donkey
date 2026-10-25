@@ -38,7 +38,7 @@ X3B v2 g3b k3b 12AX7
 R80 k3b j3b 1k
 R16 j3b 0 100k
 R79 g3b j3b 1Meg
-Vbias bias 0 -53.11
+Vbias bias 0 -53.26
 .model D1N4007 D(Is=7.02767n Rs=0.0341512 N=1.80803 Cjo=10p M=0.3 Bv=1000 tt=4.32u)
 * start the rails at their idle values (the mains sine starts at 0 V)
 .ic V(bplus)=487.7 V(scr)=479.6 V(v3)=445 V(v2)=317.5 V(v1)=301.2
@@ -68,11 +68,12 @@ R58 v3 pa 100k
 X4B pb gb k 12AX7
 X4A pa ga k 12AX7
 
-* ---- NFB: Resonance (VR8 1M log) and Presence (VR9 10k log, wiper tied to C8 || C62) ----
+* ---- NFB: Resonance (VR8 1M log) and Presence (VR9 10k log, wiper tied to C8 || C62), C30 to the tail ----
 R56 s m 39k
-C12 m l 6.8n
-RVR8 m l {(pow(10,2*res)-1)/99*1Meg+100}
-RVR9 l pr {(1-(pow(10,2*pres)-1)/99)*10k+10}
+C12 m y 6.8n
+RVR8 m y {(pow(10,2*res)-1)/99*1Meg+100}
+C30 y l 22u
+RVR9 y pr {(1-(pow(10,2*pres)-1)/99)*10k+10}
 C8 pr 0 0.1u
 C62 pr 0 0.033u
 
@@ -100,13 +101,13 @@ L3 s 0 {Ls}
 K1 L1 L2 L3 1
 Cw o1 o2 2.5n
 
-* ---- 4x12 speaker impedance ----
-Re s sp1 6
-Le sp1 sp2 0.5m
-Rle sp1 sp2 30
-Rm sp2 0 8
-Lm sp2 0 20.7m
-Cm sp2 0 122u
+* ---- 4x12 of Vintage 30s: Re 7.3, voice coil 0.7 mH || 15, motional Res || Lces || Cmes (fc 90 Hz, Qec 0.936, Qmc 3) ----
+Re s sp1 7.3
+Le sp1 sp2 0.7m
+Rle sp1 sp2 15
+Rm sp2 0 23.397
+Lm sp2 0 13.792m
+Cm sp2 0 226.74u
 
 .tran 0 0.25 0 4u
 .step param run list 1 2 3 4

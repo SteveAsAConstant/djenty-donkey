@@ -33,8 +33,8 @@ public:
     {
         for (auto& t : tube)
         {
-            t.cgk = dk.addC (t.g, t.k, 2.3e-12); // 12AX7 Cgk
-            t.cgp = dk.addC (t.g, t.p, 2.4e-12); // 12AX7 Cgp
+            t.cgk = dk.addC (t.g, t.k, KorenTriode::cgk); // 12AX7 Cgk
+            t.cgp = dk.addC (t.g, t.p, KorenTriode::cgp); // 12AX7 Cgp
             if (! tubeOutputs) continue;
             dk.markOutput (t.k);
             dk.markOutput (t.p);
