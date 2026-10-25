@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.22)
-project(DjentyDonkey VERSION 0.5.1)
+project(DjentyDonkey VERSION 0.5.2)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -24,7 +24,7 @@ if(WIN32)
 endif()
 
 juce_add_plugin(DjentyDonkey
-    VERSION 0.5.1
+    VERSION 0.5.2
     COMPANY_NAME "Djenty Donkey"
     PLUGIN_MANUFACTURER_CODE Djdk
     PLUGIN_CODE Djdn
@@ -82,6 +82,10 @@ target_include_directories(nam_compare PRIVATE Source)
 # The drive pedals against NAM captures of real pedals
 add_executable(pedal_compare tests/pedal_compare.cpp)
 target_include_directories(pedal_compare PRIVATE Source)
+
+# The power amp against NAM captures of a real power amp (driven at the effects return)
+add_executable(power_compare tests/power_compare.cpp)
+target_include_directories(power_compare PRIVATE Source)
 
 # The plugin's real amp path (JUCE oversampling) vs an alias-free reference and a NAM capture
 juce_add_console_app(amp_path_test PRODUCT_NAME "amp_path_test")

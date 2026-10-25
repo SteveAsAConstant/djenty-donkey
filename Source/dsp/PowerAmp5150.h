@@ -100,7 +100,7 @@ inline void gridCurrentR (double vgk, double rgk, double& ig, double& dIg)
 //   tail R52 470 + R51 10k + R57 4.7k) -> C28/C29 47n, R54/R55 220k bias, 2.2k grid stoppers
 //   -> 2 x 2 x 6L6GC push-pull -> output transformer (Raa ~2.1k) -> 4x12 speaker impedance
 //   NFB: speaker -> R56 39k -> (C12 6.8n || VR8 Resonance) -> tail node L,
-//        presence: L -> VR9 10k -> C8 0.1u -> gnd.   V4A grid AC-referenced to L via C31.
+//        presence: L -> VR9 10k (A) -> C8 0.1u || C62 0.033u -> gnd.   V4A grid AC-referenced to L via C31.
 //   Supply: the factory chain (Supply5150), every node sagging with the stages' currents.
 //
 // V3A + PI + output stage + transformer + speaker + NFB loop are solved simultaneously with the DK method
@@ -167,8 +167,8 @@ public:
         dk.addR (nS, nM, 39e3);            // R56
         dk.addC (nM, nL, 6.8e-9);          // C12
         rRes = dk.addR (nM, nL, 1e6);      // VR8 resonance
-        rPres = dk.addR (nL, nPr, 10e3);   // VR9 presence
-        dk.addC (nPr, G, 0.1e-6);          // C8
+        rPres = dk.addR (nL, nPr, 10e3);   // VR9 presence (10k audio taper, wiper tied to the capacitor end)
+        dk.addC (nPr, G, 0.133e-6);        // C8 0.1u || C62 0.033u
 
         dk.addC (nPB, nC1, 47e-9);         // C29
         srcBias1 = dk.addSource (nC1, 220e3); // R55
@@ -277,10 +277,14 @@ public:
     }
 
     // 0..1 knob positions
+    // input source impedance (default: the Post pot wiper, ~100k); a low value for a signal at the effects return
+    void setInputSourceResistance (double r) { dk.setSourceResistance (srcIn, r); }
+
     void setControls (double presence, double resonance)
     {
         dk.setR (rRes, (std::pow (10.0, 2.0 * std::clamp (resonance, 0.0, 1.0)) - 1.0) / 99.0 * 1e6 + 100.0);
-        dk.setR (rPres, (1.0 - std::clamp (presence, 0.0, 1.0)) * 10e3 + 10.0);
+        // VR9 10KA: the resistance left in circuit falls along the audio taper, so Presence acts mostly near the top
+        dk.setR (rPres, (1.0 - (std::pow (10.0, 2.0 * std::clamp (presence, 0.0, 1.0)) - 1.0) / 99.0) * 10e3 + 10.0);
     }
 
     // input: volts at the master (post-gain) pot wiper. output: volts across the speaker

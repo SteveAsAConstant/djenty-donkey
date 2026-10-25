@@ -12,14 +12,20 @@
 .param Lh={Ls*(np/2)*(np/2)}
 
 * ---- supplies ----
-V0 v0 0 500
-Dr v0 vr DR
-Rsup vr bplus 60
+* power transformer HV winding (350 VAC at 600 mA: 374.5 V unloaded, 41 ohm, 60 Hz) -> bridge CR8-CR11 1N4007
+Vsec ta tb SINE(0 {374.5*sqrt(2)} 60)
+Rw ta ta1 41
+D8 tb bplus D1N4007
+D9 ta1 bplus D1N4007
+D10 0 ta1 D1N4007
+D11 0 tb D1N4007
+Rbl1 bplus 0 440k
 * factory supply chain (schematic sheet 2): PLATE -> R210 -> SCREEN -> R59 -> V3+ (PI) -> R60 -> V2+ (V3A, V3B,
 * preamp V2B V5B V5A) -> R61 -> V1+ (preamp V1A V1B V2A); the preamp as its idle currents, V3B as a real tube
 Cres bplus 0 165u
 Rscr bplus scr 400
 Cscr scr 0 50u
+Rbl2 scr 0 440k
 R59 scr v3 4k
 C36 v3 0 47u
 R60 v3 v2 22k
@@ -32,8 +38,10 @@ X3B v2 g3b k3b 12AX7
 R80 k3b j3b 1k
 R16 j3b 0 100k
 R79 g3b j3b 1Meg
-Vbias bias 0 -54.01
-.model DR D(Ron=0.01 Roff=1G Vfwd=0)
+Vbias bias 0 -53.11
+.model D1N4007 D(Is=7.02767n Rs=0.0341512 N=1.80803 Cjo=10p M=0.3 Bv=1000 tt=4.32u)
+* start the rails at their idle values (the mains sine starts at 0 V)
+.ic V(bplus)=487.7 V(scr)=479.6 V(v3)=445 V(v2)=317.5 V(v1)=301.2
 
 * ---- input at the master pot wiper -> V3A ----
 Vin in 0 SINE(0 {amp} {freq})
@@ -60,12 +68,13 @@ R58 v3 pa 100k
 X4B pb gb k 12AX7
 X4A pa ga k 12AX7
 
-* ---- NFB: Resonance (VR8 1M log) and Presence (VR9 10k) ----
+* ---- NFB: Resonance (VR8 1M log) and Presence (VR9 10k log, wiper tied to C8 || C62) ----
 R56 s m 39k
 C12 m l 6.8n
 RVR8 m l {(pow(10,2*res)-1)/99*1Meg+100}
-RVR9 l pr {(1-pres)*10k+10}
+RVR9 l pr {(1-(pow(10,2*pres)-1)/99)*10k+10}
 C8 pr 0 0.1u
+C62 pr 0 0.033u
 
 * ---- output grids ----
 C29 pb c1 47n

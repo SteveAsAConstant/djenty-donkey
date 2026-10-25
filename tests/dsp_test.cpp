@@ -238,6 +238,32 @@ static void powerAmpTests()
                      pa.getPIplateA(), pa.getPIplateB(), pa.getV3a());
     }
 
+    // B+ carries the bridge rectifier's 120 Hz ripple (Supply5150): the push-pull stage cancels most of it
+    std::printf ("\n== idle hum at the speaker (RED, gain 7, no input), dB re full power (~53 V peak) ==\n");
+    for (double master : { 0.3, 0.7 })
+    {
+        Preamp5150 pre; pre.prepare (fs); pre.setMode (2); pre.setControls (0.7, 0.5, 0.5, 0.5, master);
+        PowerAmp5150 pa; pa.setControls (0.5, 0.5); pa.prepare (fs);
+        for (int i = 0; i < (int) (0.5 * fs); ++i) processAmp5150 (pre, pa, 0.0, 1.0);
+        double re[4] {}, im[4] {}, tot = 0.0;
+        const int n = (int) fs; // 1 s
+        for (int i = 0; i < n; ++i)
+        {
+            const double y = processAmp5150 (pre, pa, 0.0, 1.0);
+            tot += y * y;
+            for (int h = 0; h < 4; ++h)
+            {
+                const double ph = 2.0 * kPi * 120.0 * (h + 1) * i / fs;
+                re[h] += y * std::cos (ph); im[h] += y * std::sin (ph);
+            }
+        }
+        const double full = 53.0 / std::sqrt (2.0);
+        std::printf ("master %.1f: total %6.1f dB", master, 20.0 * std::log10 (std::sqrt (tot / n) / full));
+        for (int h = 0; h < 4; ++h)
+            std::printf ("   %3.0f Hz %6.1f", 120.0 * (h + 1), 20.0 * std::log10 (2.0 * std::hypot (re[h], im[h]) / n / std::sqrt (2.0) / full));
+        std::printf ("\n");
+    }
+
     std::printf ("\n== power amp: small-signal response, 20 mV at master node, speaker Vpk (dB re 1 V) ==\n");
     const double freqs[] = { 50, 100, 200, 500, 1000, 2000, 5000, 10000 };
     std::printf ("%-14s", "pres/res");
