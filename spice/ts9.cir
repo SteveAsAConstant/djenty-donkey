@@ -2,11 +2,11 @@
 * Reference for Source/dsp/PrecisionDrive.h (OpAmpDrive::ts9). IC1 JRC4558: LTspice's universal op-amp (level 2) with datasheet values
 * (Avol 100 dB, GBW 3 MHz, slew 1 V/us, output to within ~1.5 V of the 9 V rails); ideal=1 makes it near ideal
 * (GBW 3 GHz, no slew limit, rail-to-rail) to separate the op-amp's part from the rest.
-* The including file sets .param ideal (0 or 1). Params: d = DRIVE rotation, b = TONE wiper fraction from the R7 / C7 node end, vol = VOLUME
-* rotation (A tapers as (10^(2x)-1)/99), amp / freq = the input sine.
+* The including file sets .param ideal (0 or 1). Params: d = DRIVE rotation, b = TONE wiper fraction from the R7 / C7 node end, vol = LEVEL
+* rotation (DRIVE A taper (10^(2x)-1)/99, LEVEL B: linear), amp / freq = the input sine.
 .lib UniversalOpAmp2.lib
 .param d=0.5 vol=1
-.param td={(pow(10,2*d)-1)/99} tv={(pow(10,2*vol)-1)/99}
+.param td={(pow(10,2*d)-1)/99} tv={vol}
 .param gbw={if(ideal,3G,3Meg)} sr={if(ideal,1T,1Meg)} rl={if(ideal,0,1.5)}
 
 VCC vcc 0 9

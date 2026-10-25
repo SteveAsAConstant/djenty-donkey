@@ -85,7 +85,7 @@ static void driveSanity()
 {
     std::printf ("\n== Precision Drive: 0.2 V peak 1 kHz in, volume 10 ==\n");
     for (double drv : { 0.0, 0.5, 1.0 })
-        for (int atk : { 0, 7 })
+        for (int atk : { 0, 5 })
         {
             PrecisionDrive pd;
             pd.prepare (fs);

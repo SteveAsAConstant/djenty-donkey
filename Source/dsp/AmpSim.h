@@ -27,7 +27,7 @@ public:
         float volumeDb = 0.0f; // post-power-amp level (like an attenuator), does not change the tone
         bool boostOn = false;
         float boostDrive = 0.0f, boostBright = 0.5f, boostLevel = 0.7f;
-        int boostAttack = 3; // 0..7
+        int boostAttack = 3; // 0..5 (the knob minus one)
         int boostModel = 0;  // 0 Precision Drive, 1 TS9
     };
 

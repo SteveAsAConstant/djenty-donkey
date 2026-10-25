@@ -36,13 +36,15 @@ public:
         double toneP;      // tone pot (linear)
         double toneRf;     // tone stage feedback resistor
         double ra, rb;     // output: series resistor, load to ground
+        bool levelLinear;  // Volume / Level pot: B (linear) or A (audio)
     };
 
     // Horizon Devices Precision Drive (Dwarven Hammer): R15 10k, C8 47p, R16 1k, C9 120p, BRIGHT B5k, R8 3k9,
-    // R11 100R, R14 10k
-    static constexpr Circuit precisionDrive { 10e3, 47e-12, 1e3, 120e-12, 5e3, 3.9e3, 100.0, 10e3 };
-    // Ibanez TS9: 51k, 51p, 4k7 (+ 47n), TONE B20k, 1k, output 470R / 100k (TS-808: 100R / 10k)
-    static constexpr Circuit ts9 { 51e3, 51e-12, 4.7e3, 0.0, 20e3, 1e3, 470.0, 100e3 };
+    // R11 100R, R14 10k, VOLUME A100k
+    static constexpr Circuit precisionDrive { 10e3, 47e-12, 1e3, 120e-12, 5e3, 3.9e3, 100.0, 10e3, false };
+    // Ibanez TS9: 51k, 51p, 4k7 (+ 47n), TONE B20k, 1k, output 470R / 100k (TS-808: 100R / 10k), LEVEL B100k (tonepad;
+    // a calibrated capture of a real TS9 gives the same output at Level 5 and 10 only with a linear pot)
+    static constexpr Circuit ts9 { 51e3, 51e-12, 4.7e3, 0.0, 20e3, 1e3, 470.0, 100e3, true };
 
     explicit OpAmpDrive (const Circuit& c = precisionDrive) : circ (c) {}
 
@@ -84,7 +86,7 @@ public:
             Rf = rf; Ca = ca; tonePos = a;
             updateCoeffs();
         }
-        volumeGain = taper (std::clamp (volume, 0.0, 1.0));
+        volumeGain = circ.levelLinear ? std::clamp (volume, 0.0, 1.0) : taper (std::clamp (volume, 0.0, 1.0));
     }
 
     double process (double vin)
@@ -176,18 +178,22 @@ private:
     double x1 = 0, x2 = 0, y1 = 0, y2 = 0;
 };
 
-// Horizon Devices Precision Drive: Volume, Drive, Bright, Attack (8-way rotary: the leg cap)
+// Horizon Devices Precision Drive: Volume, Drive, Bright, Attack (the leg cap). The real pedal's Attack has six
+// positions, 470n 330n 100n 68n 47n 33n (Neural DSP's Archetype: Misha Mansoor X, the official model), 1 the fullest
+// and 6 the tightest; NAM captures of a real pedal at Attack 1 / 2 / 3 fit 470n / 330n / 100n best. The Dwarven Hammer
+// clone uses an 8-way switch with 220n and 82n added (lug 1 = 470n ... lug 8 = 33n).
 class PrecisionDrive : public OpAmpDrive
 {
 public:
-    static constexpr double attackCaps[8] = { 33e-9, 47e-9, 68e-9, 82e-9, 100e-9, 220e-9, 330e-9, 470e-9 };
+    static constexpr int numAttack = 6;
+    static constexpr double attackCaps[numAttack] = { 470e-9, 330e-9, 100e-9, 68e-9, 47e-9, 33e-9 };
 
     PrecisionDrive() : OpAmpDrive (precisionDrive) {}
 
-    // drive / bright / volume 0..1, attack 0..7 (0 = tightest, 7 = fullest)
+    // drive / bright / volume 0..1, attack 0..5 = the knob's 1..6 (0 = fullest, 5 = tightest)
     void setControls (double drive, double bright, int attack, double volume)
     {
-        OpAmpDrive::setControls (drive, bright, attackCaps[std::clamp (attack, 0, 7)], volume);
+        OpAmpDrive::setControls (drive, bright, attackCaps[std::clamp (attack, 0, numAttack - 1)], volume);
     }
 };
 

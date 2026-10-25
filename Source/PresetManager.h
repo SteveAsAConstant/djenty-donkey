@@ -3,26 +3,40 @@
 #include "Parameters.h"
 #include "dsp/Preamp5150.h"
 
-// Gain / Master knob curves were recalibrated against a real amp in v0.4 (see Preamp5150.h).
-// States and preset files without this marker are from v0.3: their Gain and Master values are
-// converted so that they keep their sound.
-inline constexpr int kKnobCurvesVersion = 2;
+// Knob scales that changed, so that older states and preset files keep their sound:
+//   1 -> 2 (v0.4): Gain / Master recalibrated against a real amp (see Preamp5150.h); states without the marker are v0.3
+//   2 -> 3 (v0.5): the Precision Drive's Attack as on the real pedal: six positions, 1 = 470n (fullest) ... 6 = 33n;
+//                  before, eight from the Dwarven Hammer clone in reverse (1 = 33n ... 8 = 470n): each old position goes
+//                  to the same capacitor, 82n and 220n (not on the real pedal) to the nearest one (68n, 330n)
+inline constexpr int kKnobCurvesVersion = 3;
 inline constexpr const char* kKnobCurvesAttr = "knobCurves";
 
 inline void upgradeKnobCurves (juce::XmlElement& xml)
 {
-    if (xml.getIntAttribute (kKnobCurvesAttr, 1) >= kKnobCurvesVersion)
+    const int version = xml.getIntAttribute (kKnobCurvesAttr, 1);
+    if (version >= kKnobCurvesVersion)
         return;
-    bool lead = true; // the Gain curve differs per channel (lead pre-gain low end, see Preamp5150.h)
-    for (auto* p : xml.getChildWithTagNameIterator ("PARAM"))
-        if (p->getStringAttribute ("id") == ids::channel)
-            lead = juce::roundToInt (p->getDoubleAttribute ("value")) == vamp::Preamp5150::Red;
-    for (auto* p : xml.getChildWithTagNameIterator ("PARAM"))
+    if (version < 2)
     {
-        const auto id = p->getStringAttribute ("id");
-        const double v = p->getDoubleAttribute ("value") * 0.1;
-        if (id == ids::ampGain) p->setAttribute ("value", 10.0 * vamp::gainKnobFromV03 (v, lead));
-        else if (id == ids::master) p->setAttribute ("value", 10.0 * vamp::masterKnobFromV03 (v));
+        bool lead = true; // the Gain curve differs per channel (lead pre-gain low end, see Preamp5150.h)
+        for (auto* p : xml.getChildWithTagNameIterator ("PARAM"))
+            if (p->getStringAttribute ("id") == ids::channel)
+                lead = juce::roundToInt (p->getDoubleAttribute ("value")) == vamp::Preamp5150::Red;
+        for (auto* p : xml.getChildWithTagNameIterator ("PARAM"))
+        {
+            const auto id = p->getStringAttribute ("id");
+            const double v = p->getDoubleAttribute ("value") * 0.1;
+            if (id == ids::ampGain) p->setAttribute ("value", 10.0 * vamp::gainKnobFromV03 (v, lead));
+            else if (id == ids::master) p->setAttribute ("value", 10.0 * vamp::masterKnobFromV03 (v));
+        }
+    }
+    if (version < 3)
+    {
+        // old 1..8 = 33n 47n 68n 82n 100n 220n 330n 470n -> new 1..6 = 470n 330n 100n 68n 47n 33n
+        static constexpr int newAttack[8] = { 6, 5, 4, 4, 3, 2, 2, 1 };
+        for (auto* p : xml.getChildWithTagNameIterator ("PARAM"))
+            if (p->getStringAttribute ("id") == ids::boostAttack)
+                p->setAttribute ("value", newAttack[juce::jlimit (1, 8, juce::roundToInt (p->getDoubleAttribute ("value"))) - 1]);
     }
     xml.setAttribute (kKnobCurvesAttr, kKnobCurvesVersion);
 }
@@ -162,13 +176,13 @@ private:
             { "Djent Rhythm", {
                 { ids::channel, 2 }, { ids::ampGain, 6.1f }, { ids::bass, 4.5f }, { ids::mid, 6.0f }, { ids::treble, 6.5f },
                 { ids::presence, 5.5f }, { ids::resonance, 4.0f }, { ids::master, 5.1f },
-                { ids::boostOn, 1 }, { ids::boostDrive, 0.0f }, { ids::boostLevel, 9.0f }, { ids::boostTone, 6.0f }, { ids::boostAttack, 2 },
+                { ids::boostOn, 1 }, { ids::boostDrive, 0.0f }, { ids::boostLevel, 9.0f }, { ids::boostTone, 6.0f }, { ids::boostAttack, 5 },
                 { ids::inGateOn, 1 }, { ids::inGateThresh, -50.0f }, { ids::inGateRelease, 15.0f },
                 { ids::gateThresh, -55.0f }, { ids::gateRelease, 60.0f }, { ids::gateLow, 40.0f }, { ids::gateMid, 70.0f }, { ids::gateHigh, 100.0f } } },
             { "Djent Drop -2 (LIVE)", {
                 { ids::channel, 2 }, { ids::ampGain, 6.1f }, { ids::bass, 4.0f }, { ids::mid, 6.0f }, { ids::treble, 6.5f },
                 { ids::presence, 5.5f }, { ids::resonance, 3.5f }, { ids::master, 5.1f },
-                { ids::boostOn, 1 }, { ids::boostDrive, 0.0f }, { ids::boostLevel, 9.0f }, { ids::boostTone, 6.0f }, { ids::boostAttack, 1 },
+                { ids::boostOn, 1 }, { ids::boostDrive, 0.0f }, { ids::boostLevel, 9.0f }, { ids::boostTone, 6.0f }, { ids::boostAttack, 6 },
                 { ids::transpose, -2 }, { ids::transposeMode, 0 },
                 { ids::inGateOn, 1 }, { ids::inGateThresh, -50.0f }, { ids::inGateRelease, 15.0f },
                 { ids::gateThresh, -55.0f }, { ids::gateRelease, 60.0f } } },

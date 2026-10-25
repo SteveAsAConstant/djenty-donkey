@@ -43,7 +43,10 @@ TRANSPOSE    移调 ±12 半音（降调弹奏用）
 COMPRESSOR   压缩
 DRIVE        前级过载踏板，Model 按钮二选一：
              PRECISION：基于 Precision Drive 电路，更紧、增益更高，Attack 选低频松紧
-               经典用法：Drive 0、Volume 8~10、Attack 2~3 → 收紧低频
+               Attack 和真机一样 6 档，数字越大越紧（1 = 470n 最饱满，6 = 33n 最紧）
+               经典用法：Drive 0、Volume 8~10、Attack 4~5 → 收紧低频
+               （v0.5 起 Attack 按真机，旧工程和预设会自动换算到同一个电容；
+                 旧的 82n、220n 两档真机没有，换到最接近的 68n、330n）
              TS9：基于 Ibanez TS9 Tube Screamer 电路，中频凸起、更圆润（没有 Attack）
                经典用法：Drive 0~2、Level 8~10、Tone 5~6
              两个都按原机电路逐个元件模拟，切换时无爆音
