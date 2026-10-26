@@ -7,7 +7,7 @@ if(CMAKE_HOST_APPLE)
     set(CMAKE_OSX_DEPLOYMENT_TARGET "10.13" CACHE STRING "Minimum macOS version")
 endif()
 
-project(DjentyDonkey VERSION 1.0.0)
+project(DjentyDonkey VERSION 1.0.1)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -38,7 +38,7 @@ if(APPLE)
 endif()
 
 juce_add_plugin(DjentyDonkey
-    VERSION 1.0.0
+    VERSION 1.0.1
     COMPANY_NAME "Djenty Donkey"
     BUNDLE_ID com.djentydonkey.djentydonkey
     PLUGIN_MANUFACTURER_CODE Djdk
