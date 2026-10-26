@@ -122,3 +122,22 @@ target_include_directories(comp1176_test PRIVATE Source)
 # The 1176LN model against NAM captures of real 1176s (pass the .nam file; captures are not redistributed)
 add_executable(comp1176_nam tests/comp1176_nam.cpp)
 target_include_directories(comp1176_nam PRIVATE Source tests)
+
+# The whole processor driven like a host / auval (rates, block sizes, layouts, random parameters).
+# -DDD_ASAN=ON builds it with AddressSanitizer (only this test; the plugin is unaffected).
+option(DD_ASAN "Build host_test with AddressSanitizer" OFF)
+juce_add_console_app(host_test PRODUCT_NAME "host_test")
+target_sources(host_test PRIVATE tests/host_test.cpp Source/PluginProcessor.cpp Source/PluginEditor.cpp)
+target_include_directories(host_test PRIVATE Source)
+target_compile_definitions(host_test PRIVATE JUCE_WEB_BROWSER=0 JUCE_USE_CURL=0
+    JucePlugin_Name="Djenty Donkey" JucePlugin_VersionString="${PROJECT_VERSION}")
+target_link_libraries(host_test PRIVATE juce::juce_audio_utils juce::juce_dsp juce::juce_recommended_config_flags)
+if(DD_ASAN)
+    if(MSVC)
+        target_compile_options(host_test PRIVATE /fsanitize=address /Zi)
+        target_link_options(host_test PRIVATE /INCREMENTAL:NO /DEBUG)
+    else()
+        target_compile_options(host_test PRIVATE -fsanitize=address -fno-omit-frame-pointer -g)
+        target_link_options(host_test PRIVATE -fsanitize=address)
+    endif()
+endif()

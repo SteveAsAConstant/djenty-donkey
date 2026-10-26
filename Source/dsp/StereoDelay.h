@@ -14,7 +14,8 @@ public:
         size = (int) (sampleRate * 2.5) + 4;
         bufL.assign ((size_t) size, 0.0f);
         bufR.assign ((size_t) size, 0.0f);
-        delaySamples.reset (sampleRate, 0.2);
+        delaySamples.reset (sampleRate, 0.2); // keeps the current value, in samples of the old rate:
+        snapDelay = true;                     // the next block starts on its target instead of gliding from it
         dampL.set (4500.0, sampleRate);
         dampR.set (4500.0, sampleRate);
         reset();
@@ -30,7 +31,10 @@ public:
 
     void process (float* L, float* R, int numSamples, float timeMs, float feedback, float mix, bool pingPong)
     {
-        delaySamples.setTargetValue (juce::jlimit (1.0f, (float) size - 4.0f, timeMs * 0.001f * (float) sr));
+        const float target = juce::jlimit (1.0f, (float) size - 4.0f, timeMs * 0.001f * (float) sr);
+        if (snapDelay) delaySamples.setCurrentAndTargetValue (target);
+        else delaySamples.setTargetValue (target);
+        snapDelay = false;
 
         for (int i = 0; i < numSamples; ++i)
         {
@@ -61,7 +65,7 @@ private:
     {
         float rp = (float) writePos - delay;
         if (rp < 0.0f) rp += (float) size;
-        const int i0 = (int) rp;
+        const int i0 = juce::jlimit (0, size - 1, (int) rp); // never outside the buffer, whatever the delay
         const int i1 = (i0 + 1) % size;
         const float frac = rp - (float) i0;
         return buf[(size_t) i0] + frac * (buf[(size_t) i1] - buf[(size_t) i0]);
@@ -69,6 +73,7 @@ private:
 
     double sr = 44100.0;
     int size = 1, writePos = 0;
+    bool snapDelay = true;
     std::vector<float> bufL, bufR;
     OnePoleLP dampL, dampR;
     juce::SmoothedValue<float> delaySamples;

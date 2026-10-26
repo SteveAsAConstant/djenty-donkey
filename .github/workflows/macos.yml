@@ -1,4 +1,5 @@
-# macOS build: universal (arm64 + x86_64) VST3 / AU / standalone, DSP fault test, Apple's AU validator, package.
+# macOS build: universal (arm64 + x86_64) VST3 / AU / standalone, DSP fault test, host test (AddressSanitizer),
+# Apple's AU validator, package. DD_ASAN only instruments host_test, not the plugin.
 name: macOS
 
 on:
@@ -13,7 +14,7 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Configure
-        run: cmake -S . -B build-mac -DCMAKE_BUILD_TYPE=Release
+        run: cmake -S . -B build-mac -DCMAKE_BUILD_TYPE=Release -DDD_ASAN=ON
 
       - name: Build
         run: cmake --build build-mac --config Release --parallel "$(sysctl -n hw.ncpu)"
@@ -27,6 +28,9 @@ jobs:
 
       - name: DSP fault recovery test
         run: build-mac/dsp_test fault
+
+      - name: Host test (whole processor, auval's render sequence, AddressSanitizer)
+        run: build-mac/host_test_artefacts/Release/host_test auval 0.5
 
       - name: Validate the Audio Unit (auval)
         run: |
