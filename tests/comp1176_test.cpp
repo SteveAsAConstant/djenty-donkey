@@ -84,6 +84,7 @@ int rateNull();
 int metalStudy();
 int worstBlock();
 int controlStress();
+int hfResponse();
 static double outputForFraction (double frac) { return std::log10 (1.0 + 99.0 * frac) / 2.0; }
 
 static void spiceParity (double fs, bool reference = true)
@@ -220,6 +221,7 @@ int main (int argc, char** argv)
     if (mode == "metal") return metalStudy();
     if (mode == "worst") return worstBlock();
     if (mode == "stress") return controlStress();
+    if (mode == "hf") return hfResponse();
     if (mode == "release") { releaseParity (96000.0, false); return 0; }
     if (mode == "spice" || mode == "all")
     {
@@ -476,4 +478,19 @@ int controlStress()
     std::printf ("control stress: finite %s, output peak %.1f V, failed solves %lld, held samples %lld -> %s\n",
                  finite ? "yes" : "NO", peak, failures, held, finite && held == 0 && peak < 60.0 ? "PASS" : "FAIL");
     return finite && held == 0 ? 0 : 1;
+}
+
+// small-signal frequency response at 384 kHz, pots full CW, G.R. off (factory test 8: -3 dB at ~55 kHz)
+int hfResponse()
+{
+    const double fs = 384000.0;
+    auto level = [&] (double f)
+    {
+        const auto r = run (benchControls (-20.0, 1.0, 1.0, 1.0, Urei1176::r4, false), fs, 0.25, f, 0.01, 0.0, 1e9, 1e9, 1.0, false);
+        return 20.0 * std::log10 (r.rms (0.2, 0.25));
+    };
+    const double ref = level (1000.0);
+    for (double f : { 20.0, 10000.0, 20000.0, 30000.0, 40000.0, 55000.0, 70000.0, 100000.0, 150000.0 })
+        std::printf ("%7.0f Hz: %+6.2f dB\n", f, level (f) - ref);
+    return 0;
 }

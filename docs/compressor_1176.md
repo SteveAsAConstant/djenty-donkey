@@ -5,7 +5,7 @@ v0.6 起，插件的压缩器是 UREI 1176LN Rev D（"blackface"，S/N 1239–23
 - 电路转录：[1176_schematic_notes.md](1176_schematic_notes.md)
 - LTspice 参考：[spice/1176ln_revd.inc](../spice/1176ln_revd.inc)；`spice/1176_*.cir` 按原厂测试程序搭的测试台（静态曲线、Q 偏置、LN 微调、启动、释放、输出级偏置）
 - C++：[Source/dsp/Urei1176.h](../Source/dsp/Urei1176.h)（电路）、[Source/dsp/SemiNetwork.h](../Source/dsp/SemiNetwork.h)（半导体 DK 求解）、[Source/dsp/Comp1176.h](../Source/dsp/Comp1176.h)（插件里的过采样和旋钮）
-- 测试：`comp1176_test`（`spice` / `rates` / `release` / `null` / `metal` / `cpu` / `worst` / `stress`）
+- 测试：`comp1176_test`（`spice` / `rates` / `release` / `null` / `metal` / `cpu` / `worst` / `stress` / `hf`）；`comp1176_nam <采样.nam> fit`：和真机 NAM 采样对比
 
 ## 模型
 
@@ -79,6 +79,35 @@ v0.6 起，插件的压缩器是 UREI 1176LN Rev D（"blackface"，S/N 1239–23
 - **闷音 chug（16 分，120 bpm）**：RELEASE 7 时每个音压缩量摆动 8 dB（明显的"喘"），RELEASE 5 时 3 dB，RELEASE 1 时 2 dB。
 
 建议：降调闷音节奏用 4:1 或 8:1、ATTACK 5–7、RELEASE 3–5、压 3–6 dB——更紧、更齐；RELEASE 7 和"全按"是效果用法（颗粒、喘息感）。后面接高增益箱头时，箱头本身已经很压，1176 主要是让拨弦力度更一致、延音更长。
+
+## 和真机 NAM 采样对比（`comp1176_nam`）
+
+TONE3000 上能下载的两个真机 1176 NAM A2 采样（T3K 许可，只在本地用，不再分发）：
+
+| 采样 | 型号 | 已知设置 |
+|---|---|---|
+| UREI 1176-SF – Fast Control（Tokyo Studio Capture） | 银面板（Rev F 以后：推挽输出级，比率网络不同） | "Fast Control"，其余未标 |
+| 1176A Right（tomheavybeats） | "1176 A"：重压时失真很大、释放更快，像没有 LN 电路的 Rev A | 12:1，最快释放，中等启动 |
+
+两个都没有电平校准（数字满刻度对应多少伏未知），也只"记得"约 130 ms（WaveNet 感受野 6205 个采样），所以只能比静态曲线、启动、失真、小信号频响，释放只看头 80 ms。拟合的是能校准的量：输入电平刻度、输出增益、比率、启动、释放旋钮。
+
+| | 银面板 | 1176A |
+|---|---|---|
+| 最佳拟合 | 4:1，ATTACK 4，RELEASE 7 | 8:1（12:1 只差 0.07 dB），ATTACK 7，RELEASE 7 |
+| 静态曲线（1 kHz，−45…0 dBFS） | 0.60 dB rms | 0.45 dB rms |
+| 启动包络（1 ms 窗，30 ms） | 0.18 dB rms | 1 ms 内都已压到位，两者一致 |
+| 释放（20 dB 降落后 80 ms） | 走势相近（采样有感受野造成的假象） | 采样快：60 ms 回 10 dB，模型 80 ms 回 8 dB |
+| 压缩时的失真（1 kHz） | 采样高 10–25 dB（−10 dBFS：H2 −44.5 / −57.7） | 采样高得多（0 dBFS：H2 −25.6 / −48），符合没有 LN |
+| 小信号频响 | 采样 20 Hz −5.3 dB、20 kHz −1.3 dB；模型平直 | 采样 ±1 dB 起伏（模型误差），模型平直 |
+
+结论：
+- 只调前面板和电平，模型就能贴合两台不同版本的真机到 0.5–0.6 dB rms，启动也对得上。
+- 两个采样在 0 dBFS（门限以上约 20 dB）都比模型少压 1.3–1.6 dB；只有最极端的一个点，NAM 在训练范围边缘也最不可靠，没有据此改电路。
+- 1176A 释放更快、失真大得多，正是没有 LN 网络（没有 C9 的慢尾巴、没有二次谐波抵消）的表现，反过来支持模型的 LN 部分。
+- 银面板压缩时失真比模型高：模型的 LN 抵消对理想场效应管方程是精确的，真机微调后会残留一些；但数值在 NAM 动态误差范围内，没有据此改 R86。
+- 20 kHz 的跌落和 20 Hz 的跌落都更像采样链路（48 kHz 录音和训练，20 Hz 跌得比 1176 规格还多）。模型的 −3 dB 点在约 120 kHz（`comp1176_test hf`），1990 年测试程序写约 55 kHz，但那是运放输入的后期版本，同样没有据此改。
+
+所以 Rev D 的电路参数保持不变。能改变结论的是：有电平校准、注明旋钮设置的 Rev D（或复刻版）录音对。
 
 ## 没有建模 / 待定
 

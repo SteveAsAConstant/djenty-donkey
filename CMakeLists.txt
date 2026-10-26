@@ -1,4 +1,12 @@
 cmake_minimum_required(VERSION 3.22)
+
+# macOS: one universal binary (Apple Silicon + Intel), runs on 10.13 and later.
+# Must be set before project(); override on the command line for a single-arch dev build.
+if(CMAKE_HOST_APPLE)
+    set(CMAKE_OSX_ARCHITECTURES "arm64;x86_64" CACHE STRING "Target architectures")
+    set(CMAKE_OSX_DEPLOYMENT_TARGET "10.13" CACHE STRING "Minimum macOS version")
+endif()
+
 project(DjentyDonkey VERSION 0.6.0)
 
 set(CMAKE_CXX_STANDARD 17)
@@ -23,13 +31,26 @@ if(WIN32)
     FetchContent_MakeAvailable(asiosdk)
 endif()
 
+# Audio Unit (Logic Pro, GarageBand, ...) only exists on macOS
+set(DD_FORMATS VST3 Standalone)
+if(APPLE)
+    list(APPEND DD_FORMATS AU)
+endif()
+
 juce_add_plugin(DjentyDonkey
     VERSION 0.6.0
     COMPANY_NAME "Djenty Donkey"
+    BUNDLE_ID com.djentydonkey.djentydonkey
     PLUGIN_MANUFACTURER_CODE Djdk
     PLUGIN_CODE Djdn
-    FORMATS VST3 Standalone
+    FORMATS ${DD_FORMATS}
     PRODUCT_NAME "Djenty Donkey"
+    AU_MAIN_TYPE kAudioUnitType_Effect
+    # macOS asks the user before an app may record: without this the standalone's guitar input is silent
+    MICROPHONE_PERMISSION_ENABLED TRUE
+    MICROPHONE_PERMISSION_TEXT "Djenty Donkey needs the audio input to hear your guitar."
+    HARDENED_RUNTIME_ENABLED TRUE
+    HARDENED_RUNTIME_OPTIONS com.apple.security.device.audio-input
     IS_SYNTH FALSE
     NEEDS_MIDI_INPUT FALSE
     NEEDS_MIDI_OUTPUT FALSE
@@ -97,3 +118,7 @@ target_link_libraries(amp_path_test PRIVATE juce::juce_dsp juce::juce_recommende
 # The 1176LN model against its LTspice reference and the factory test procedures
 add_executable(comp1176_test tests/comp1176_test.cpp)
 target_include_directories(comp1176_test PRIVATE Source)
+
+# The 1176LN model against NAM captures of real 1176s (pass the .nam file; captures are not redistributed)
+add_executable(comp1176_nam tests/comp1176_nam.cpp)
+target_include_directories(comp1176_nam PRIVATE Source tests)

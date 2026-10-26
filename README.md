@@ -1,6 +1,6 @@
 # Djenty Donkey 🫏
 
-**A component-level high-gain guitar amp plugin** — 5150 / 6505-style preamp solved circuit-by-circuit, Precision Drive– and TS9-style pedals, IR loader and effects. VST3 + standalone for Windows.
+**A component-level high-gain guitar amp plugin** — 5150 / 6505-style preamp solved circuit-by-circuit, Precision Drive– and TS9-style pedals, IR loader and effects. VST3 + standalone for Windows, VST3 + AU + standalone for macOS (Apple Silicon and Intel).
 
 ![Djenty Donkey](docs/screenshot.png)
 
@@ -9,13 +9,22 @@
 
 ## Download
 
-Grab the latest `DjentyDonkey-x.y.z-Windows.zip` from **[Releases](../../releases)**.
+Grab the latest release from **[Releases](../../releases)**.
+
+**Windows** — `DjentyDonkey-x.y.z-Windows.zip`:
 
 - `DjentyDonkey-Setup-x.y.z.exe` — installer (desktop shortcut + VST3)
 - `Portable/` — no install needed
 - No VC++ runtime required
 
 Windows SmartScreen may warn because the exe is not code-signed: click *More info → Run anyway*.
+
+**macOS** (10.13+, universal: Apple Silicon + Intel) — `DjentyDonkey-x.y.z-macOS.zip`:
+
+- `DjentyDonkey-x.y.z.pkg` — installer (app in /Applications, VST3, Audio Unit; each can be unticked)
+- `Portable/` — the bundles to copy by hand (then `xattr -dr com.apple.quarantine <bundle>`)
+
+The package is not notarized: right-click the .pkg → *Open* the first time. The standalone asks for microphone access — allow it, or it cannot hear the guitar.
 
 ## Signal chain
 
@@ -50,7 +59,7 @@ Strum hard and set **Input** so the meter's peak lands in the **green zone (-18 
 
 ## Build from source
 
-Requirements: Windows 10/11 x64, **Visual Studio 2022 Build Tools** (Desktop development with C++), **CMake ≥ 3.22**.
+**Windows** — requirements: Windows 10/11 x64, **Visual Studio 2022 Build Tools** (Desktop development with C++), **CMake ≥ 3.22**.
 JUCE 8.0.4 and the Steinberg ASIO SDK are downloaded automatically by CMake.
 
 ```
@@ -63,6 +72,19 @@ Outputs go to `%USERPROFILE%\vab-build\DjentyDonkey_artefacts\Release\` (short p
 - Tone regression against the frozen v0.3.0 DSP and a high-precision reference: `%USERPROFILE%\vab-build\Release\tone_regress.exe`
 - Package (installer + portable + source zip, needs [Inno Setup 6](https://jrsoftware.org/isinfo.php)):
   `powershell -ExecutionPolicy Bypass -File installer\make_package.ps1`
+
+**macOS** — requirements: Xcode or the Command Line Tools (`xcode-select --install`), **CMake ≥ 3.22** (`brew install cmake`). Builds a universal arm64 + x86_64 binary.
+
+```
+sh build_mac.sh
+```
+
+Outputs go to `build-mac/DjentyDonkey_artefacts/Release/` (`Standalone/`, `VST3/`, `AU/`); tests to `build-mac/` (`build-mac/dsp_test`, ...).
+For a faster single-architecture dev build: `cmake -S . -B build-mac -DCMAKE_OSX_ARCHITECTURES=arm64 -DCMAKE_BUILD_TYPE=Release`.
+
+- Package (.pkg installer + portable + source zip): `sh installer/make_package_mac.sh` (ad-hoc signed; set `CODESIGN_IDENTITY` / `INSTALLER_IDENTITY` for Developer ID signing)
+- CI: `.github/workflows/macos.yml` builds, runs `dsp_test fault` and `auval`, and uploads the package
+
 - LTspice reference netlists: `spice/` (`LTspice.exe -b <file>.cir`)
 
 ## Project layout
@@ -90,8 +112,9 @@ tests/pedal_compare.cpp drive pedals vs NAM captures of real pedals (--fit, --le
 tests/power_compare.cpp power amp vs power-amp-only NAM captures: response, compression, bursts (--probe)
 tests/tone_regress.cpp  null / band-level comparison vs tests/baseline/ (frozen v0.3.0 DSP)
 tests/comp1176_test.cpp the 1176 vs LTspice and the factory specs, metal-guitar study, CPU, control stress
+tests/comp1176_nam.cpp  the 1176 vs NAM captures of real 1176s: static curve, envelopes, harmonics, response; knob / level fit
 spice/                  LTspice reference circuits
-installer/              Inno Setup script + packaging
+installer/              Inno Setup script + Windows / macOS packaging
 ```
 
 ## Roadmap
