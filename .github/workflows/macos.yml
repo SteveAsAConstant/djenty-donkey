@@ -6,10 +6,18 @@ on:
   push:
   pull_request:
   workflow_dispatch:
+    inputs:
+      runner:
+        # GitHub's Apple-silicon Mac runners are sometimes out of capacity (the job is never picked up and fails
+        # after ~15 min): run by hand on another image then. The Intel one builds the same universal binary.
+        description: "macOS runner image"
+        type: choice
+        options: [macos-14, macos-15, macos-15-intel]
+        default: macos-14
 
 jobs:
   build:
-    runs-on: macos-14
+    runs-on: ${{ inputs.runner || 'macos-14' }}
     steps:
       - uses: actions/checkout@v4
 
