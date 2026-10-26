@@ -7,7 +7,7 @@
 //         22.05 kHz / 64, 96 kHz / 137, 48 kHz / 4096, 192 kHz / 4096, 11.025 kHz / 4096, 44.1 kHz / 512,
 //         then mono / stereo layouts and blocks larger than prepared. Default and randomised parameters.
 // random  random layouts, rates, prepared sizes, block sizes (often not the prepared one) and parameters.
-// Every output sample must be finite and bounded. Build with AddressSanitizer for the memory checks
+// Every output sample must be finite and bounded (< 1e4: random settings stack up to ~+45 dBFS). Build with AddressSanitizer for the memory checks
 // (cmake -DDD_ASAN=ON).
 #include <cmath>
 #include <cstdio>
@@ -81,7 +81,9 @@ bool render (juce::AudioProcessor& p, const char* name, double rate, int maxBloc
             }
         done += n;
     }
-    const bool ok = finite && peak < 100.0;
+    // every gain at its maximum (Output +24, Amp Volume +12, overlapping EQ bands, delay feedback 0.95) reaches
+    // ~+45 dBFS legitimately; a runaway goes far past +80 dB or to inf
+    const bool ok = finite && peak < 1e4;
     std::printf ("%-44s %6.0f Hz  max %5d  block %5d  %d-%d  peak %7.3f  %s\n", name, rate, maxBlock, block, numIn,
                  numOut, peak, ok ? "PASS" : "FAIL");
     if (! ok) ++failures;
