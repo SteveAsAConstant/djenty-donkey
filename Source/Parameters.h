@@ -110,9 +110,11 @@ inline juce::AudioProcessorValueTreeState::ParameterLayout createParameterLayout
                                                               juce::StringArray { "Live", "HQ" }, 0));
 
     layout.add (makeBool  (ids::compOn, "Comp On", false));
-    // UREI 1176LN: INPUT (10 = full CW, 0 = 36 dB down), OUTPUT, ATTACK / RELEASE dials (7 = fastest), ratio buttons
-    layout.add (makeFloat (ids::compIn, "Comp Input", 0.0f, 10.0f, 7.0f));
-    layout.add (makeFloat (ids::compOut, "Comp Output", 0.0f, 10.0f, 8.5f));
+    // UREI 1176LN: INPUT (10 = full CW, 0 = 36 dB down), OUTPUT, ATTACK / RELEASE dials (7 = fastest), ratio buttons.
+    // Defaults (since the v1.0.0 update, with the DI in front): bridge-humbucker chugs peaking at -12..-6 dBFS get
+    // ~3..7 dB of gain reduction at 4:1, and OUTPUT 5.3 is unity below the threshold
+    layout.add (makeFloat (ids::compIn, "Comp Input", 0.0f, 10.0f, 5.0f));
+    layout.add (makeFloat (ids::compOut, "Comp Output", 0.0f, 10.0f, 5.3f));
     layout.add (makeFloat (ids::compAtk, "Comp Attack", 1.0f, 7.0f, 5.0f));
     layout.add (makeFloat (ids::compRel, "Comp Release", 1.0f, 7.0f, 5.0f));
     layout.add (std::make_unique<juce::AudioParameterChoice> (juce::ParameterID { ids::compRatioSel, 1 }, "Comp Ratio",

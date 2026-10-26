@@ -146,3 +146,11 @@ endif()
 # (bit-identical, or rounding-level only: tests/golden.cpp)
 add_executable(golden tests/golden.cpp)
 target_include_directories(golden PRIVATE Source)
+
+# The whole plugin's CPU at 48 kHz per buffer size and per stage (plugin_cpu [ir.wav ...]; pin it to a P-core)
+juce_add_console_app(plugin_cpu PRODUCT_NAME "plugin_cpu")
+target_sources(plugin_cpu PRIVATE tests/plugin_cpu.cpp Source/PluginProcessor.cpp Source/PluginEditor.cpp)
+target_include_directories(plugin_cpu PRIVATE Source)
+target_compile_definitions(plugin_cpu PRIVATE JUCE_WEB_BROWSER=0 JUCE_USE_CURL=0
+    JucePlugin_Name="Djenty Donkey" JucePlugin_VersionString="${PROJECT_VERSION}")
+target_link_libraries(plugin_cpu PRIVATE juce::juce_audio_utils juce::juce_dsp juce::juce_recommended_config_flags)

@@ -65,9 +65,12 @@ public:
         return c;
     }
 
-    // The 1176 is a line-level unit: in front of a guitar amp it feeds the amp through a reamp box's pad
-    // (line level -> instrument level), applied to the output (Comp1176)
-    static constexpr double kReampPad = 0.1; // -20 dB
+    // The 1176 is a line-level unit. On a guitar it sits in a reamp loop, as in a studio: a DI box + mic preamp bring
+    // the guitar up to line level in front of it (kDiGain, applied to the input by Comp1176), a reamp box's pad
+    // brings it back to instrument level for the amp (kReampPad, on the output). The two cancel below the threshold;
+    // without the DI gain the guitar reached the 1176 ~20 dB below where it compresses (INPUT had to be near 10).
+    static constexpr double kDiGain = 10.0;   // +20 dB
+    static constexpr double kReampPad = 0.1;  // -20 dB
 
     // tests: LTspice-tight Newton tolerance
     void setReferencePrecision (bool on) { a.setReferencePrecision (on); b.setReferencePrecision (on); c.setReferencePrecision (on); }

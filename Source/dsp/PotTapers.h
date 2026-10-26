@@ -1,10 +1,12 @@
 #pragma once
+#include <algorithm>
 #include <cmath>
 
 namespace vamp
 {
 // Audio-taper (log) pot: 50% rotation -> ~10% resistance
 inline double taperA (double x) { return (std::pow (10.0, 2.0 * x) - 1.0) / 99.0; }
+inline double taperAInverse (double f) { return std::log10 (1.0 + 99.0 * std::max (f, 0.0)) / 2.0; }
 
 // Peavey POT0752 "1M 5% A" (VR1 / VR2 pre-gain, VR8 Resonance), also used for the post-gain (Master) pots:
 // a steeper log taper than taperA, 50% rotation -> ~4.5%. Calibrated against NAM captures of a Peavey 6505 1992

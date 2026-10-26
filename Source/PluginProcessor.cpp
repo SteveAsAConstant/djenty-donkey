@@ -1,6 +1,8 @@
+#include <juce_audio_formats/juce_audio_formats.h>
 #include "PluginProcessor.h"
 #include "PluginEditor.h"
 #include "Parameters.h"
+#include "dsp/CabMatch.h"
 
 VibeAmpProcessor::VibeAmpProcessor()
     : AudioProcessor (BusesProperties()
@@ -74,14 +76,8 @@ void VibeAmpProcessor::prepareToPlay (double sampleRate, int samplesPerBlock)
     amp.prepare (sampleRate, maxBlock);
     cab.prepare (monoSpec);
 
-    // Built-in fallback cabinet (used until the user loads an IR): 4x12-ish curve
-    using T = vamp::Biquad::Type;
-    fallbackCab[0].set (T::highPass, sampleRate, 80.0, 0.7);
-    fallbackCab[1].set (T::peak, sampleRate, 120.0, 1.2, 3.0);
-    fallbackCab[2].set (T::peak, sampleRate, 400.0, 1.0, -3.0);
-    fallbackCab[3].set (T::peak, sampleRate, 2500.0, 1.5, 3.0);
-    fallbackCab[4].set (T::lowPass, sampleRate, 5000.0, 0.9);
-    for (auto& f : fallbackCab) f.reset();
+    // Built-in fallback cabinet (used until the user loads an IR; loaded IRs are matched to its loudness)
+    vamp::setupFallbackCab (fallbackCab, sampleRate);
     for (auto& f : eq) f.reset();
 
     phaser.prepare (stereoSpec);
@@ -328,8 +324,23 @@ void VibeAmpProcessor::loadIR (const juce::File& file)
     if (! file.existsAsFile())
         return;
 
-    cab.loadImpulseResponse (file, juce::dsp::Convolution::Stereo::no, juce::dsp::Convolution::Trim::yes, 0,
-                             juce::dsp::Convolution::Normalise::yes);
+    // The IR's first channel, scaled to the built-in cab's loudness (vamp::cabMatchGain: the amp's spectrum, K-weighted), so
+    // the level does not jump between the built-in cab and IRs or from one IR to another; the tone is untouched.
+    // (JUCE's own normalisation sets every IR to the same energy, which left IRs ~5 dB below the built-in cab and
+    // differing from one another with where their energy lies.)
+    juce::AudioFormatManager formats;
+    formats.registerBasicFormats();
+    std::unique_ptr<juce::AudioFormatReader> reader (formats.createReaderFor (file));
+    if (reader == nullptr || reader->lengthInSamples <= 0 || reader->sampleRate <= 0.0)
+        return;
+    const int len = (int) std::min<juce::int64> (reader->lengthInSamples, (juce::int64) (10.0 * reader->sampleRate));
+    juce::AudioBuffer<float> ir (1, len);
+    reader->read (&ir, 0, len, 0, true, false);
+    const double irRate = reader->sampleRate;
+    ir.applyGain ((float) vamp::cabMatchGain (ir.getReadPointer (0), len, irRate));
+    // Normalise::no: JUCE only rescales for a sample-rate change, which keeps the frequency response
+    cab.loadImpulseResponse (std::move (ir), irRate, juce::dsp::Convolution::Stereo::no, juce::dsp::Convolution::Trim::yes,
+                             juce::dsp::Convolution::Normalise::no);
     {
         const juce::SpinLock::ScopedLockType lock (irLock);
         irPath = file.getFullPathName();

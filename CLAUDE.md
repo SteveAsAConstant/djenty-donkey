@@ -23,7 +23,7 @@ cmake --build %USERPROFILE%\vab-build --config Release
 (`build.bat` configures first; its echo lines still show the old "VibeAmp 515" names.) Build dir is
 `%USERPROFILE%\vab-build` (short path, not under %TEMP%). Targets: `DjentyDonkey_All` (VST3 + standalone),
 `dsp_test`, `tone_regress`, `nam_compare`, `pedal_compare`, `power_compare`, `amp_path_test`, `comp1176_test`, `host_test`,
-`comp1176_nam`. Plugin output: `vab-build\DjentyDonkey_artefacts\Release\{Standalone,VST3}`; tests in `vab-build\Release`.
+`comp1176_nam`, `golden`, `plugin_cpu`. Plugin output: `vab-build\DjentyDonkey_artefacts\Release\{Standalone,VST3}`; tests in `vab-build\Release`.
 
 ## Tests (run after DSP changes)
 
@@ -38,6 +38,9 @@ cmake --build %USERPROFILE%\vab-build --config Release
 - `host_test [auval | random | all]`: the whole processor driven like a host / auval (rates, block sizes, layouts,
   random parameters). Configure with `-DDD_ASAN=ON` for AddressSanitizer (Windows: the VS `bin\Hostx64\x64` dir must
   be on PATH for the ASan DLL); slow under ASan. The macOS CI runs it.
+- `plugin_cpu [ir.wav ...]`: the whole plugin's CPU at 48 kHz / 64-256 buffers, per stage (pin to a P-core; close any
+  running standalone first: it competes for the core). `plugin_cpu levels [ir.wav ...]`: output level with each IR vs
+  the built-in cab (IRs are loudness-matched to it, `dsp/CabMatch.h`).
 - `nam_compare`, `power_compare`, `pedal_compare`, `comp1176_nam`: against NAM captures (pass the .nam path).
 - Captures live in `D:\Downloads From Web\` (6505 lead / rhythm / POW / AMP / PRE, two 1176s). They are T3K-licensed:
   use locally only, never commit, upload or put them in a package.

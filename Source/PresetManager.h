@@ -2,13 +2,17 @@
 #include <juce_audio_processors/juce_audio_processors.h>
 #include "Parameters.h"
 #include "dsp/Preamp5150.h"
+#include "dsp/Urei1176.h"
 
 // Knob scales that changed, so that older states and preset files keep their sound:
 //   1 -> 2 (v0.4): Gain / Master recalibrated against a real amp (see Preamp5150.h); states without the marker are v0.3
 //   2 -> 3 (v0.5): the Precision Drive's Attack as on the real pedal: six positions, 1 = 470n (fullest) ... 6 = 33n;
 //                  before, eight from the Dwarven Hammer clone in reverse (1 = 33n ... 8 = 470n): each old position goes
 //                  to the same capacitor, 82n and 220n (not on the real pedal) to the nearest one (68n, 330n)
-inline constexpr int kKnobCurvesVersion = 3;
+//   3 -> 4 (v1.0.0 update): the 1176 got the DI + preamp in front (Urei1176::kDiGain, +20 dB): the same sound needs the INPUT
+//                  attenuator 20 dB further down, 5.56 of the knob's 0..10 (36 dB). Where the knob runs out (below
+//                  5.56) the rest comes off OUTPUT along its audio taper (such settings hardly compressed before)
+inline constexpr int kKnobCurvesVersion = 4;
 inline constexpr const char* kKnobCurvesAttr = "knobCurves";
 
 inline void upgradeKnobCurves (juce::XmlElement& xml)
@@ -37,6 +41,28 @@ inline void upgradeKnobCurves (juce::XmlElement& xml)
         for (auto* p : xml.getChildWithTagNameIterator ("PARAM"))
             if (p->getStringAttribute ("id") == ids::boostAttack)
                 p->setAttribute ("value", newAttack[juce::jlimit (1, 8, juce::roundToInt (p->getDoubleAttribute ("value"))) - 1]);
+    }
+    if (version < 4)
+    {
+        constexpr double kDiKnob = 10.0 * 20.0 / vamp::Urei1176::kInputRangeDb; // +20 dB on the INPUT dial
+        juce::XmlElement* in = nullptr;
+        juce::XmlElement* out = nullptr;
+        for (auto* p : xml.getChildWithTagNameIterator ("PARAM"))
+        {
+            if (p->getStringAttribute ("id") == ids::compIn) in = p;
+            else if (p->getStringAttribute ("id") == ids::compOut) out = p;
+        }
+        if (in != nullptr)
+        {
+            const double v = in->getDoubleAttribute ("value") - kDiKnob;
+            in->setAttribute ("value", std::max (0.0, v));
+            if (v < 0.0 && out != nullptr)
+            {
+                const double restDb = -v * vamp::Urei1176::kInputRangeDb / 10.0;
+                const double frac = vamp::taperA (out->getDoubleAttribute ("value") / 10.0) * std::pow (10.0, -restDb / 20.0);
+                out->setAttribute ("value", 10.0 * vamp::taperAInverse (frac));
+            }
+        }
     }
     xml.setAttribute (kKnobCurvesAttr, kKnobCurvesVersion);
 }
@@ -201,7 +227,7 @@ private:
                 { ids::channel, 0 }, { ids::ampGain, 5.3f }, { ids::bass, 5.0f }, { ids::mid, 5.0f }, { ids::treble, 6.5f },
                 { ids::presence, 4.0f }, { ids::resonance, 3.0f }, { ids::master, 5.7f },
                 { ids::gateOn, 0 },
-                { ids::compOn, 1 }, { ids::compIn, 7.0f }, { ids::compOut, 8.5f }, { ids::compAtk, 4.0f }, { ids::compRel, 5.0f },
+                { ids::compOn, 1 }, { ids::compIn, 5.0f }, { ids::compOut, 5.3f }, { ids::compAtk, 4.0f }, { ids::compRel, 5.0f },
                 { ids::compRatioSel, 0 },
                 { ids::delayOn, 1 }, { ids::dlTime, 380.0f }, { ids::dlFeedback, 0.25f }, { ids::dlMix, 0.15f },
                 { ids::reverbOn, 1 }, { ids::rvSize, 0.6f }, { ids::rvMix, 0.3f } } },

@@ -1,0 +1,103 @@
+#pragma once
+#include <algorithm>
+#include <cmath>
+#include <complex>
+#include <vector>
+#include "FFT.h"
+#include "Filters.h"
+
+namespace vamp
+{
+// The built-in cabinet, used until an IR is loaded: a 4x12-ish curve
+inline void setupFallbackCab (Biquad (&f)[5], double sampleRate)
+{
+    using T = Biquad::Type;
+    f[0].set (T::highPass, sampleRate, 80.0, 0.7);
+    f[1].set (T::peak, sampleRate, 120.0, 1.2, 3.0);
+    f[2].set (T::peak, sampleRate, 400.0, 1.0, -3.0);
+    f[3].set (T::peak, sampleRate, 2500.0, 1.5, 3.0);
+    f[4].set (T::lowPass, sampleRate, 5000.0, 0.9);
+    for (auto& b : f) b.reset();
+}
+
+// ITU-R BS.1770 K-weighting (its high shelf and RLB high-pass, as specified at 48 kHz): power gain at f (Hz)
+inline double kWeighting (double f)
+{
+    constexpr double fs = 48000.0, pi = 3.14159265358979323846;
+    const std::complex<double> z1 = std::polar (1.0, -2.0 * pi * f / fs), z2 = z1 * z1;
+    auto power = [&] (double b0, double b1, double b2, double a1, double a2)
+    {
+        return std::norm ((b0 + b1 * z1 + b2 * z2) / (1.0 + a1 * z1 + a2 * z2));
+    };
+    double shelf, hp;
+    {
+        const double f0 = 1681.974450955533, g = 3.999843853973347, q = 0.7071752369554196;
+        const double k = std::tan (pi * f0 / fs), vh = std::pow (10.0, g / 20.0), vb = std::pow (vh, 0.4996667741545416);
+        const double a0 = 1.0 + k / q + k * k;
+        shelf = power ((vh + vb * k / q + k * k) / a0, 2.0 * (k * k - vh) / a0, (vh - vb * k / q + k * k) / a0,
+                       2.0 * (k * k - 1.0) / a0, (1.0 - k / q + k * k) / a0);
+    }
+    {
+        const double f0 = 38.13547087602444, q = 0.5003270373238773;
+        const double k = std::tan (pi * f0 / fs), a0 = 1.0 + k / q + k * k;
+        hp = power (1.0, -2.0, 1.0, 2.0 * (k * k - 1.0) / a0, (1.0 - k / q + k * k) / a0);
+    }
+    return shelf * hp;
+}
+
+// The amp's own output spectrum ahead of the cab, the reference signal for matching: power density (dB re 1 kHz)
+// at 1/3-octave centres 20 Hz * 2^(i/3), i = 0..30. Measured from the model (default settings: RED, gain 6, bass 5,
+// mid 5, treble 6, presence / resonance 5, master 3; drop-A chugs 2/3 + a lead line 1/3), smoothed over an octave.
+// A high-gain amp puts far more energy below 200 Hz than pink noise does, which is where cab IRs differ most
+// (a pink reference left bass-heavy IRs ~4 dB loud on chugs).
+inline double ampOutputDensityDb (double f)
+{
+    static constexpr double db[31] = { 17.9, 16.5, 12.1, 12.2, 11.1, 16.3, 18.9, 19.0, 17.3, 8.8, 8.3, 5.3, 4.3, 2.4, 0.8, 0.7,
+                                       1.5, 0.0, -3.5, -7.3, -8.6, -10.0, -11.0, -12.2, -14.9, -15.9, -17.4, -19.2, -20.7, -22.7, -23.9 };
+    const double x = std::clamp (3.0 * std::log2 (std::max (f, 1.0) / 20.0), 0.0, 30.0);
+    const int i = std::min (29, (int) x);
+    return db[i] + (x - i) * (db[i + 1] - db[i]);
+}
+
+// Loudness of a cabinet given as its impulse response h (n samples at rate) for the amp's output spectrum,
+// K-weighted: the sum over 20 Hz .. 20 kHz of |H(f)|^2 K(f) S(f). Arbitrary units: only ratios are used.
+inline double cabLoudness (const float* h, int n, double rate)
+{
+    int size = 1;
+    while (size < std::max (n, 65536)) size <<= 1;
+    FFT fft;
+    fft.prepare (size);
+    std::vector<std::complex<double>> d ((size_t) size);
+    for (int i = 0; i < n; ++i) d[(size_t) i] = h[i];
+    fft.transform (d.data(), false);
+    double sum = 0.0;
+    for (int k = 1; k < size / 2; ++k)
+    {
+        const double f = k * rate / size;
+        if (f < 20.0 || f > 20000.0) continue;
+        sum += std::norm (d[(size_t) k]) * kWeighting (f) * std::pow (10.0, ampOutputDensityDb (f) / 10.0);
+    }
+    return sum;
+}
+
+// The gain that makes a loaded IR (h, n samples at rate) as loud as the built-in cabinet, so switching between
+// them or between IRs keeps the level (for the amp's output spectrum, K-weighted; the tone is untouched)
+inline double cabMatchGain (const float* h, int n, double rate)
+{
+    static const double fallback = []
+    {
+        Biquad f[5];
+        setupFallbackCab (f, 48000.0);
+        std::vector<float> ir (65536);
+        for (size_t i = 0; i < ir.size(); ++i)
+        {
+            float v = i == 0 ? 1.0f : 0.0f;
+            for (auto& b : f) v = b.process (v);
+            ir[i] = v;
+        }
+        return cabLoudness (ir.data(), (int) ir.size(), 48000.0);
+    }();
+    const double l = cabLoudness (h, n, rate);
+    return l > 1e-30 ? std::sqrt (fallback / l) : 1.0;
+}
+} // namespace vamp
