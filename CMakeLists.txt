@@ -93,3 +93,7 @@ target_sources(amp_path_test PRIVATE tests/amp_path_test.cpp)
 target_include_directories(amp_path_test PRIVATE Source tests)
 target_compile_definitions(amp_path_test PRIVATE JUCE_WEB_BROWSER=0 JUCE_USE_CURL=0)
 target_link_libraries(amp_path_test PRIVATE juce::juce_dsp juce::juce_recommended_config_flags)
+
+# The 1176LN model against its LTspice reference and the factory test procedures
+add_executable(comp1176_test tests/comp1176_test.cpp)
+target_include_directories(comp1176_test PRIVATE Source)

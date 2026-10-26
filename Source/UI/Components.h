@@ -115,6 +115,8 @@ public:
         repaint();
     }
 
+    void setTooltip (const juce::String& text) { slider.setTooltip (text); }
+
     void setLabel (const juce::String& name) { label.setText (name, juce::dontSendNotification); }
 
     // greyed out and not editable (a control the current mode does not use)
@@ -334,6 +336,50 @@ private:
 
     std::function<float (int)> source;
     float gains[3] { 1.0f, 1.0f, 1.0f };
+};
+
+// ---------------------------------------------------------------------------
+// Gain reduction of the compressor (dB), as the 1176's meter shows it in GR mode: the bar grows downwards.
+class GainReductionMeter : public juce::Component, public juce::SettableTooltipClient, private juce::Timer
+{
+public:
+    GainReductionMeter (std::function<float()> grSource, juce::Colour accentColour)
+        : source (std::move (grSource)), accent (accentColour)
+    {
+        setTooltip ("Gain reduction (dB), read from the control voltage like the 1176's meter in GR mode.");
+        startTimerHz (30);
+    }
+
+    void paint (juce::Graphics& g) override
+    {
+        auto b = getLocalBounds().reduced (2, 0);
+        g.setFont (font (12.0f, true));
+        g.setColour (colours::text);
+        g.drawText ("GR", b.removeFromTop (16), juce::Justification::centred);
+        g.drawText (juce::String (shown, 1), b.removeFromBottom (16), juce::Justification::centred);
+        b.reduce (0, 6);
+        auto bar = b.toFloat().withSizeKeepingCentre (10.0f, (float) b.getHeight());
+        g.setColour (juce::Colour (0xff101014));
+        g.fillRoundedRectangle (bar, 3.0f);
+        const float n = juce::jlimit (0.0f, 1.0f, shown / kRangeDb);
+        g.setColour (accent);
+        g.fillRoundedRectangle (bar.withHeight (n * bar.getHeight()), 3.0f);
+    }
+
+private:
+    static constexpr float kRangeDb = 20.0f;
+
+    void timerCallback() override
+    {
+        const float gr = source ? source() : 0.0f;
+        // needle-like: quick up, ~300 ms back
+        shown = gr > shown ? gr : shown + 0.1f * (gr - shown);
+        repaint();
+    }
+
+    std::function<float()> source;
+    juce::Colour accent;
+    float shown = 0.0f;
 };
 
 // ---------------------------------------------------------------------------

@@ -4,7 +4,7 @@
 
 ![Djenty Donkey](docs/screenshot.png)
 
-> 5150, 6505, Peavey, EVH, Horizon Devices, Precision Drive, Ibanez and Tube Screamer are trademarks of their respective owners.
+> 5150, 6505, Peavey, EVH, Horizon Devices, Precision Drive, Ibanez, Tube Screamer, UREI, Universal Audio and 1176 are trademarks of their respective owners.
 > They are only used to describe the circuits that inspired this model. This project is not affiliated with or endorsed by them.
 
 ## Download
@@ -20,7 +20,7 @@ Windows SmartScreen may warn because the exe is not code-signed: click *More inf
 ## Signal chain
 
 ```
-Input ─ Gate ─ Transpose ─ Compressor ─┬─ [8x oversampled] ───────────────────────────────┐
+Input ─ Gate ─ Transpose ─ 1176 [2x] ──┬─ [8x oversampled] ───────────────────────────────┐
                                        │  Drive (PD / TS9) → 5150 preamp → tone stack → power│
                                        └──────────────────────────────────────────────────┘
       ─ Cabinet IR ─ 10-band EQ ─ Phaser ─ Delay ─ Reverb ─ Output
@@ -34,14 +34,15 @@ Input ─ Gate ─ Transpose ─ Compressor ─┬─ [8x oversampled] ───
 | **Drive** | Two pedals to choose from, both solved per sample from their schematics (op-amp + diode clipper with a real JRC4558: 100 dB, 3 MHz): **Precision Drive** (6-position *Attack* cap switch as on the real pedal: 1 = 470n fullest … 6 = 33n tightest; circuit from the public PedalPCB "Dwarven Hammer" build doc) and **TS9** (the classic mid hump; tonepad "El Griton" TS-9 values). Both match LTspice within 0.3 dB small-signal; at clipping the fundamental within 0.1 dB and the odd harmonics within 0.6 dB. Against NAM captures of real pedals the Precision Drive matches within ~0.5 dB (small-signal and guitar spectra) and the TS9 within ~1 dB below 5 kHz; see [docs/precision_drive.md](docs/precision_drive.md). Switching models crossfades over 20 ms. |
 | **Power amp** | V3A recovery + long-tail-pair phase inverter + 2×2 6L6GC push-pull + output transformer + 4×12 speaker impedance, solved simultaneously with a nodal DK solver. Presence and Resonance are the real NFB-loop parts (VR9 10k audio taper with C8 ∥ C62, VR8/C12). Flyback diodes, grid current. The 6L6GC model has its datasheet plate resistance (Koren plus an Early term: plate current, gm, rp and screen current within ~1–8 % of the datasheets), and the load is a physical 4×12 of Vintage 30s (Thiele-Small terms from Celestion and a V30-type speaker; box losses fitted within their physical range). Matches LTspice within 0.03 dB small-signal and 0.3 % at clipping, and power-amp-only captures of a real 6505 into three real cabinets within 0.7–0.85 dB rms (160 Hz–5 kHz within ±0.7 dB). |
 | **Supply** | Power transformer + bridge rectifier (as on the factory schematic: the reservoir is topped up only near the mains peaks, so B+ carries 120 Hz ripple and sags from 488 V to ~436 V at full power (1 kHz; deeper on low notes)) and the factory chain (reservoir → screen → phase inverter → preamp rails through R59 4k, R60 22k and R61 10k), every node sagging with the real current of the stages it feeds: the preamp sits at ~301 / 317 V and breathes with the power amp. Matches LTspice. |
+| **Compressor** | A UREI 1176LN Rev D ("blackface") at component level, from the factory schematic: the FET gain-reduction element with the LN distortion-cancelling network, the Q2/Q3/Q14 preamp, the class-A line amp with its output transformer's feedback windings, the full-wave sidechain with the ratio buttons' two switch decks (including all-buttons-in), ATTACK / RELEASE as the real networks. 25 nonlinear devices (BJTs, the JFET, diodes) solved per sample in three coupled DK circuits; matches LTspice within 0.02 dB static and 0.4 mV on the control voltage through attack and release; factory trims set by the factory procedures. See [docs/compressor_1176.md](docs/compressor_1176.md). |
 | **Cab** | Load any `.wav` IR (drag & drop, prev/next in folder) or use the built-in cab. |
 | **3-band gate** | Keyed by the clean input, applied after the amp on LR4 bands (300 Hz / 3 kHz): highs close first/fastest/deepest (kills hiss), lows last/slowest/shallowest (keeps the sustain). |
 | **Transpose** | *LIVE*: waveform-aligned WSOLA, ~6 ms attack latency. *HQ*: phase-vocoder time-stretch + resampling with identity phase locking and transient phase reset, ~43 ms (reported to the host). Both accurate to a few cents. |
 
 Validation against a real amp: 14 lead and 22 rhythm / crunch [NAM](https://github.com/sdatkinson/neural-amp-modeler) captures of the same Peavey 6505 (various gain / EQ settings; both Gain knobs calibrated on them) — with the knobs at the capture's dial positions the odd harmonics match within ~2–3 dB and the knobs' effect on the spectrum within a fraction of a dB. The 1/3-octave spectra differ by ~2 dB on average, mostly one fixed, knob-independent curve. Its high end (+3 dB) turned out to be a circuit error, not the capture chain: a second, independent chain (power-amp-only captures into real 4x12 / 2x12 cabinets) showed the same, and the Presence network was missing C62 and had a linear instead of an audio taper (fixed). The mid deficit heard against them (−2.3 dB around 1 kHz) came mostly from the power stage following the speaker impedance too much (the 6L6 model had ~30× its datasheet plate resistance); with the datasheet tube and a physical speaker it is −1.3…−1.9 dB against those load-box captures and within ±0.7 dB against real cabinets. The model keeps the factory circuit rather than fitting it. See [docs/nam_calibration.md](docs/nam_calibration.md) and [docs/power_amp.md](docs/power_amp.md).
 
-Validation against LTspice: [docs/spice_reference_lead.md](docs/spice_reference_lead.md), [docs/power_amp.md](docs/power_amp.md), [docs/precision_drive.md](docs/precision_drive.md).
-Circuit notes: [docs/5150_schematic_notes.md](docs/5150_schematic_notes.md), [docs/precision_drive.md](docs/precision_drive.md), [docs/gate_and_transpose.md](docs/gate_and_transpose.md).
+Validation against LTspice: [docs/spice_reference_lead.md](docs/spice_reference_lead.md), [docs/power_amp.md](docs/power_amp.md), [docs/precision_drive.md](docs/precision_drive.md), [docs/compressor_1176.md](docs/compressor_1176.md).
+Circuit notes: [docs/5150_schematic_notes.md](docs/5150_schematic_notes.md), [docs/1176_schematic_notes.md](docs/1176_schematic_notes.md), [docs/precision_drive.md](docs/precision_drive.md), [docs/gate_and_transpose.md](docs/gate_and_transpose.md).
 
 ## Setting the input level
 
@@ -76,6 +77,9 @@ Source/
   dsp/DKCircuit.h       nodal DK solver (power amp, coupled preamp stages)
   dsp/PowerAmp5150.h    phase inverter + 6L6 power amp + NFB
   dsp/PrecisionDrive.h  drive pedals (Precision Drive, TS9)
+  dsp/SemiNetwork.h     DK circuit with BJTs / JFETs / diodes, Newton, DC operating point (gmin / source stepping)
+  dsp/Urei1176.h        UREI 1176LN Rev D (three coupled DK circuits)
+  dsp/Comp1176.h        the 1176 in the plugin: oversampling, front-panel controls
   dsp/AmpSim.h          oversampling, power amp, channel trims
   PluginProcessor.*     signal chain, parameters, IR loading
   PluginEditor.*, UI/   interface
@@ -85,6 +89,7 @@ tests/nam_compare.cpp   real-amp comparison with NAM captures (--sweep, --fit, -
 tests/pedal_compare.cpp drive pedals vs NAM captures of real pedals (--fit, --leg-cap)
 tests/power_compare.cpp power amp vs power-amp-only NAM captures: response, compression, bursts (--probe)
 tests/tone_regress.cpp  null / band-level comparison vs tests/baseline/ (frozen v0.3.0 DSP)
+tests/comp1176_test.cpp the 1176 vs LTspice and the factory specs, metal-guitar study, CPU, control stress
 spice/                  LTspice reference circuits
 installer/              Inno Setup script + packaging
 ```

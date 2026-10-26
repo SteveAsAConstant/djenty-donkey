@@ -1,0 +1,32 @@
+* 1176LN Rev D: attack (factory test 14): 20:1, ~10 dB limiting, 2 kHz tone burst 1 ms on after silence
+.include 1176ln_revd.inc
+.param att=0 outpos=0.3 rel=1 gr=1 freq=2k q=0.30677 r30s=180k r86=35 ratio=4 tstep=1e9 stepg=1 jn=1.3
+.param atk=1 lev=0 tb=0.3
+.param amp={0.7746*sqrt(2)*10**(lev/20)}
+.step param atk list 1 0.5 0.0
+.param bdur=20m
+.tran 0 {tb+bdur} 0 1u
+.save V(ctrl) V(vdiff)
+Bdiff vdiff 0 V=V(blu)-V(red)
+.meas tran c0 FIND V(ctrl) AT {tb}
+.meas tran cend FIND V(ctrl) AT {tb+bdur}
+.meas tran t10 WHEN V(ctrl)={c0+0.1*(cend-c0)} CROSS=1
+.meas tran t63 WHEN V(ctrl)={c0+0.632*(cend-c0)} CROSS=1
+.meas tran t90 WHEN V(ctrl)={c0+0.9*(cend-c0)} CROSS=1
+.meas tran pk0 MAX abs(V(vdiff)) FROM {tb} TO {tb+0.25m}
+.meas tran pkend MAX abs(V(vdiff)) FROM {tb+bdur-0.5m} TO {tb+bdur}
+.meas tran c_0p05 FIND V(ctrl) AT {tb+0.05m}
+.meas tran c_0p1 FIND V(ctrl) AT {tb+0.1m}
+.meas tran c_0p15 FIND V(ctrl) AT {tb+0.15m}
+.meas tran c_0p2 FIND V(ctrl) AT {tb+0.2m}
+.meas tran c_0p3 FIND V(ctrl) AT {tb+0.3m}
+.meas tran c_0p5 FIND V(ctrl) AT {tb+0.5m}
+.meas tran c_0p7 FIND V(ctrl) AT {tb+0.7m}
+.meas tran c_1 FIND V(ctrl) AT {tb+1m}
+.meas tran c_1p5 FIND V(ctrl) AT {tb+1.5m}
+.meas tran c_2 FIND V(ctrl) AT {tb+2m}
+.meas tran c_3 FIND V(ctrl) AT {tb+3m}
+.meas tran c_5 FIND V(ctrl) AT {tb+5m}
+.meas tran c_10 FIND V(ctrl) AT {tb+10m}
+.meas tran c_19p9 FIND V(ctrl) AT {tb+19.9m}
+.end

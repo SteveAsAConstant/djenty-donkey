@@ -40,7 +40,17 @@ INPUT GATE   输入门（默认关）：放在箱头前，让闷音 chug 之间�
 TRANSPOSE    移调 ±12 半音（降调弹奏用）
              LIVE：低延迟（约 6~15ms），现场弹奏用
              HQ：和弦最干净，约 43ms 延迟（DAW 会自动补偿），录音用
-COMPRESSOR   压缩
+1176 COMPRESSOR
+             UREI 1176LN（Rev D "黑面板"）元件级模拟，旋钮和真机一样（v0.6 起，取代原来的通用压缩器）
+             Input：推进 1176 的量，越大压得越多（10 = 不衰减，0 = 衰减 36 dB）
+             Output：输出电平（经 -20 dB 的 reamp 衰减进箱头）；Input 7 时 Output 8.5 约等于原音量
+             Attack / Release：1~7，7 最快（真机 Attack 约 20 微秒~0.8 毫秒，Release 50 毫秒~1.1 秒）
+             Ratio：4 / 8 / 12 / 20 比率按钮；比率越高门限也越高（真机如此）
+             ALL：四个按钮一起按下，偏置偏移，非常硬、带颗粒感的压缩
+             GR 表：当前压缩量（dB）
+             金属节奏建议：4 或 8、Attack 5~7、Release 3~5、GR 表 3~6 dB
+             Release 7 + 低音弦会有明显颗粒感和"喘"，这是真机特性，做效果用
+             较吃 CPU（开启时约 15% 单核）；64 采样缓冲下如有爆音请改用 128
 DRIVE        前级过载踏板，Model 按钮二选一：
              PRECISION：基于 Precision Drive 电路，更紧、增益更高，Attack 选低频松紧
                Attack 和真机一样 6 档，数字越大越紧（1 = 470n 最饱满，6 = 33n 最紧）

@@ -16,11 +16,12 @@ inline constexpr const char* gateHigh    = "gateHigh";
 inline constexpr const char* transpose   = "transpose";
 inline constexpr const char* transposeMode = "transposeMode";
 inline constexpr const char* compOn      = "compOn";
-inline constexpr const char* compThresh  = "compThresh";
-inline constexpr const char* compRatio   = "compRatio";
-inline constexpr const char* compAttack  = "compAttack";
-inline constexpr const char* compRelease = "compRelease";
-inline constexpr const char* compMakeup  = "compMakeup";
+// 1176LN front panel (v0.6; the generic compressor's compThresh / compRatio / compAttack / compRelease / compMakeup are gone)
+inline constexpr const char* compIn      = "c1176In";
+inline constexpr const char* compOut     = "c1176Out";
+inline constexpr const char* compAtk     = "c1176Atk";
+inline constexpr const char* compRel     = "c1176Rel";
+inline constexpr const char* compRatioSel = "c1176Ratio";
 inline constexpr const char* boostOn     = "boostOn";
 inline constexpr const char* boostDrive  = "boostDrive";
 inline constexpr const char* boostTone   = "boostTone";
@@ -109,11 +110,13 @@ inline juce::AudioProcessorValueTreeState::ParameterLayout createParameterLayout
                                                               juce::StringArray { "Live", "HQ" }, 0));
 
     layout.add (makeBool  (ids::compOn, "Comp On", false));
-    layout.add (makeFloat (ids::compThresh, "Comp Threshold", -60.0f, 0.0f, -20.0f, " dB"));
-    layout.add (makeFloat (ids::compRatio, "Comp Ratio", 1.0f, 20.0f, 4.0f, ":1", 1, 4.0f));
-    layout.add (makeFloat (ids::compAttack, "Comp Attack", 0.1f, 100.0f, 5.0f, " ms", 1, 10.0f));
-    layout.add (makeFloat (ids::compRelease, "Comp Release", 10.0f, 1000.0f, 100.0f, " ms", 0, 150.0f));
-    layout.add (makeFloat (ids::compMakeup, "Comp Makeup", 0.0f, 24.0f, 0.0f, " dB"));
+    // UREI 1176LN: INPUT (10 = full CW, 0 = 36 dB down), OUTPUT, ATTACK / RELEASE dials (7 = fastest), ratio buttons
+    layout.add (makeFloat (ids::compIn, "Comp Input", 0.0f, 10.0f, 7.0f));
+    layout.add (makeFloat (ids::compOut, "Comp Output", 0.0f, 10.0f, 8.5f));
+    layout.add (makeFloat (ids::compAtk, "Comp Attack", 1.0f, 7.0f, 5.0f));
+    layout.add (makeFloat (ids::compRel, "Comp Release", 1.0f, 7.0f, 5.0f));
+    layout.add (std::make_unique<juce::AudioParameterChoice> (juce::ParameterID { ids::compRatioSel, 1 }, "Comp Ratio",
+                                                              juce::StringArray { "4:1", "8:1", "12:1", "20:1", "All" }, 0));
 
     layout.add (makeBool  (ids::boostOn, "Boost On", false));
     layout.add (makeFloat (ids::boostDrive, "Boost Drive", 0.0f, 10.0f, 0.0f));

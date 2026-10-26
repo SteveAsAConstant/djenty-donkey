@@ -2,6 +2,7 @@
 #include <juce_audio_processors/juce_audio_processors.h>
 #include <juce_dsp/juce_dsp.h>
 #include "dsp/AmpSim.h"
+#include "dsp/Comp1176.h"
 #include "dsp/Filters.h"
 #include "dsp/MultibandGate.h"
 #include "dsp/PitchShifter.h"
@@ -51,6 +52,7 @@ public:
 
     // Noise gate band gains (0..1: low, mid, high) for the UI
     float getGateBandGain (int band) const { return gateBandGain[band].load(); }
+    float getCompGainReduction() const { return compGr.load(); } // dB, the 1176 meter in GR mode
 
     juce::AudioProcessorValueTreeState apvts;
     PresetManager presets;
@@ -66,8 +68,8 @@ private:
     std::atomic<float>* pTransposeMode {};
     std::atomic<float>* pInGateOn {}; std::atomic<float>* pInGateThresh {}; std::atomic<float>* pInGateRelease {};
     std::atomic<float>* pAmpVolume {};
-    std::atomic<float>* pCompOn {}; std::atomic<float>* pCompThresh {}; std::atomic<float>* pCompRatio {};
-    std::atomic<float>* pCompAttack {}; std::atomic<float>* pCompRelease {}; std::atomic<float>* pCompMakeup {};
+    std::atomic<float>* pCompOn {}; std::atomic<float>* pCompIn {}; std::atomic<float>* pCompOut {};
+    std::atomic<float>* pCompAtk {}; std::atomic<float>* pCompRel {}; std::atomic<float>* pCompRatio {};
     std::atomic<float>* pBoostOn {}; std::atomic<float>* pBoostDrive {}; std::atomic<float>* pBoostTone {};
     std::atomic<float>* pBoostLevel {}; std::atomic<float>* pBoostAttack {}; std::atomic<float>* pBoostModel {};
     std::atomic<float>* pChannel {}; std::atomic<float>* pAmpBright {}; std::atomic<float>* pAmpCrunch {}; std::atomic<float>* pAmpNoise {}; std::atomic<float>* pTubeSet {}; std::atomic<float>* pAmpGain {}; std::atomic<float>* pBass {};
@@ -88,14 +90,15 @@ private:
     float lastInput = 0.0f; // last finite input sample (stands in for a non-finite one)
 
     // signal chain
-    juce::dsp::Gain<float> inputGain, compMakeup, outputGain;
+    juce::dsp::Gain<float> inputGain, outputGain;
     vamp::InputGate inputGate;
     bool inGateOn = false;
     float inGateThresh = -50.0f, inGateRelease = 20.0f;
     vamp::MultibandGate gate;
     vamp::MultibandGate::Settings gateSettings;
     vamp::PitchShifter shifter;
-    juce::dsp::Compressor<float> comp;
+    vamp::Comp1176 comp1176; // UREI 1176LN Rev D, component level
+    vamp::Comp1176::Settings compSettings;
     vamp::AmpSim amp;
     vamp::AmpSim::Settings ampSettings;
     juce::dsp::Convolution cab;
@@ -123,6 +126,7 @@ private:
     std::atomic<int> targetLatency { 0 };
     std::atomic<float> inputPeak { 0.0f }, outputPeak { 0.0f };
     std::atomic<float> gateBandGain[3] { { 1.0f }, { 1.0f }, { 1.0f } };
+    std::atomic<float> compGr { 0.0f };
     std::atomic<bool> irLoaded { false };
     mutable juce::SpinLock irLock;
     juce::String irPath;

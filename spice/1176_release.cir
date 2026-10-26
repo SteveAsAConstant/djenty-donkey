@@ -1,0 +1,40 @@
+* 1176LN Rev D: release (factory test 14): 20:1, 2 kHz at ~10 dB limiting, input stepped 20 dB down at tstep
+.include 1176ln_revd.inc
+.param att=0 outpos=0.3 atk=1 gr=1 freq=2k q=0.30677 r30s=180k r86=35 ratio=4 tb=0 bdur=1e9 jn=1.3
+.param rel=1 lev=0 tstep=0.5 stepg=0.1
+.param amp={0.7746*sqrt(2)*10**(lev/20)}
+.step param rel list 0 0.5 1
+.tran 0 5 0 5u
+.save V(ctrl) V(vdiff)
+Bdiff vdiff 0 V=V(blu)-V(red)
+.meas tran c0 FIND V(ctrl) AT {tstep}
+.meas tran cinf FIND V(ctrl) AT 5
+.meas tran t63 WHEN V(ctrl)={cinf+0.368*(c0-cinf)} TD={tstep} CROSS=1
+.meas tran tau PARAM t63-tstep
+.meas tran vbefore RMS V(vdiff) FROM {tstep-10m} TO {tstep}
+.meas tran vend RMS V(vdiff) FROM 4.9 TO 5
+.meas tran c_0p01 FIND V(ctrl) AT {tstep+0.01}
+.meas tran v_0p01 RMS V(vdiff) FROM {tstep+0.01} TO {tstep+0.01+2m}
+.meas tran c_0p03 FIND V(ctrl) AT {tstep+0.03}
+.meas tran v_0p03 RMS V(vdiff) FROM {tstep+0.03} TO {tstep+0.03+2m}
+.meas tran c_0p06 FIND V(ctrl) AT {tstep+0.06}
+.meas tran v_0p06 RMS V(vdiff) FROM {tstep+0.06} TO {tstep+0.06+2m}
+.meas tran c_0p1 FIND V(ctrl) AT {tstep+0.1}
+.meas tran v_0p1 RMS V(vdiff) FROM {tstep+0.1} TO {tstep+0.1+2m}
+.meas tran c_0p2 FIND V(ctrl) AT {tstep+0.2}
+.meas tran v_0p2 RMS V(vdiff) FROM {tstep+0.2} TO {tstep+0.2+2m}
+.meas tran c_0p4 FIND V(ctrl) AT {tstep+0.4}
+.meas tran v_0p4 RMS V(vdiff) FROM {tstep+0.4} TO {tstep+0.4+2m}
+.meas tran c_0p7 FIND V(ctrl) AT {tstep+0.7}
+.meas tran v_0p7 RMS V(vdiff) FROM {tstep+0.7} TO {tstep+0.7+2m}
+.meas tran c_1p0 FIND V(ctrl) AT {tstep+1.0}
+.meas tran v_1p0 RMS V(vdiff) FROM {tstep+1.0} TO {tstep+1.0+2m}
+.meas tran c_1p5 FIND V(ctrl) AT {tstep+1.5}
+.meas tran v_1p5 RMS V(vdiff) FROM {tstep+1.5} TO {tstep+1.5+2m}
+.meas tran c_2 FIND V(ctrl) AT {tstep+2}
+.meas tran v_2 RMS V(vdiff) FROM {tstep+2} TO {tstep+2+2m}
+.meas tran c_3 FIND V(ctrl) AT {tstep+3}
+.meas tran v_3 RMS V(vdiff) FROM {tstep+3} TO {tstep+3+2m}
+.meas tran c_4p4 FIND V(ctrl) AT {tstep+4.4}
+.meas tran v_4p4 RMS V(vdiff) FROM {tstep+4.4} TO {tstep+4.4+2m}
+.end

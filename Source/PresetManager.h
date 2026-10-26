@@ -201,7 +201,8 @@ private:
                 { ids::channel, 0 }, { ids::ampGain, 5.3f }, { ids::bass, 5.0f }, { ids::mid, 5.0f }, { ids::treble, 6.5f },
                 { ids::presence, 4.0f }, { ids::resonance, 3.0f }, { ids::master, 5.7f },
                 { ids::gateOn, 0 },
-                { ids::compOn, 1 }, { ids::compThresh, -24.0f }, { ids::compRatio, 3.0f }, { ids::compMakeup, 4.0f },
+                { ids::compOn, 1 }, { ids::compIn, 7.0f }, { ids::compOut, 8.5f }, { ids::compAtk, 4.0f }, { ids::compRel, 5.0f },
+                { ids::compRatioSel, 0 },
                 { ids::delayOn, 1 }, { ids::dlTime, 380.0f }, { ids::dlFeedback, 0.25f }, { ids::dlMix, 0.15f },
                 { ids::reverbOn, 1 }, { ids::rvSize, 0.6f }, { ids::rvMix, 0.3f } } },
         };

@@ -80,8 +80,7 @@ public:
 
     void setSourceResistance (int k, double rs)
     {
-        sources[(size_t) k].g = 1.0 / rs;
-        dirty = true;
+        if (sources[(size_t) k].g != 1.0 / rs) { sources[(size_t) k].g = 1.0 / rs; dirty = true; }
     }
 
     void addTransformer (std::vector<Winding> w)
@@ -100,6 +99,21 @@ public:
 
     int numPorts() const { return (int) ports.size(); }
     int numInputs() const { return (int) sources.size(); }
+    int numNodesTotal() const { return numNodes; }
+
+    // Element topology, for a DC operating point solved in a second instance of the same circuit (SemiNetwork):
+    // capacitor / inductor / port idx -> its nodes (a, b)
+    int numCaps() const { return (int) caps.size(); }
+    int numInds() const { return (int) inds.size(); }
+    void capNodes (int idx, int& a, int& b) const { a = caps[(size_t) idx].a; b = caps[(size_t) idx].b; }
+    void indNodes (int idx, int& a, int& b) const { a = inds[(size_t) idx].a; b = inds[(size_t) idx].b; }
+    void portNodes (int idx, int& a, int& b) const { a = ports[(size_t) idx].a; b = ports[(size_t) idx].b; }
+    // inductor idx's companion conductance T / 2L (after prepare)
+    double indConductance (int idx) const { return inds[(size_t) idx].gl; }
+
+    // Start inductor idx (addL's return value) carrying current i (a -> b) at zero voltage: the DC steady state of
+    // its trapezoidal companion (i = gl v + ieq, v = 0). Call after prepare().
+    void setIndCurrent (int idx, double i) { z[caps.size() + (size_t) idx] = i; }
 
     void prepare (double sampleRate)
     {
@@ -188,16 +202,22 @@ public:
     // (uses the u passed to the preceding computeP0)
     void finish (const double* iPorts)
     {
+        evalOutputs (iPorts);
+        const int cols = noiseOn ? nz : nzMain;
+        double buf[kMaxStates];
+        matVec (M.data(), numS, cols, nz, z.data(), buf);
+        std::copy (buf, buf + numS, z.begin());
+    }
+
+    // The output nodes for these port currents without advancing the states: a trial solution (finish() commits)
+    void evalOutputs (const double* iPorts)
+    {
         std::copy (iPorts, iPorts + m, z.begin() + numS + numSrc);
         const int cols = noiseOn ? nz : nzMain;
-
         double buf[kMaxStates];
         const int numO = (int) outputs.size();
         matVec (O.data(), numO, cols, nz, z.data(), buf);
         for (int o = 0; o < numO; ++o) x[(size_t) outputs[(size_t) o]] = buf[o];
-
-        matVec (M.data(), numS, cols, nz, z.data(), buf);
-        std::copy (buf, buf + numS, z.begin());
     }
 
     // Only nodes marked as outputs are computed in finish(); nodeV() of any other node is 0.
@@ -424,7 +444,7 @@ private:
 
     }
 
-    static constexpr int kMaxStates = 64; // capacitors + inductors, and output nodes (finish() keeps them on the stack)
+    static constexpr int kMaxStates = 128; // capacitors + inductors, and output nodes (finish() keeps them on the stack)
 
     double T = 1.0 / 192000.0;
     int numNodes = 0, numAux = 0, N = 0, m = 0, numS = 0, numSrc = 0, numNoise = 0, nzMain = 0, nz = 0;

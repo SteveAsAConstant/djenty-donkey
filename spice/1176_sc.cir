@@ -1,0 +1,17 @@
+* 1176LN Rev D: sidechain levels below threshold (ac amplitudes at the rectifier drivers)
+.include 1176ln_revd.inc
+.param att=0 outpos=1 atk=1 rel=1 gr=1 freq=2k q=0.30677 r30s=180k r86=35 tb=0 bdur=1e9 tstep=1e9 stepg=1 jn=1.3
+.param ratio=4 lev=-40
+.param amp={0.7746*sqrt(2)*10**(lev/20)}
+.step param ratio list 1 4
+.tran 0 0.3 0 5u
+.save V(o2) V(scx) V(b7) V(c7) V(e8) V(e10) V(e7) V(c9) V(inp) V(a2) V(a3) V(k)
+.meas tran o2 RMS V(o2) FROM 0.25 TO 0.3
+.meas tran scx RMS V(scx) FROM 0.25 TO 0.3
+.meas tran b7 RMS V(b7) FROM 0.25 TO 0.3
+.meas tran c7 RMS V(c7) FROM 0.25 TO 0.3
+.meas tran e8 RMS V(e8)-16.37 FROM 0.25 TO 0.3
+.meas tran e10 RMS V(e10)-22.46 FROM 0.25 TO 0.3
+.meas tran ph8 FIND V(e8) AT 0.25
+.meas tran ph10 FIND V(e10) AT 0.25
+.end

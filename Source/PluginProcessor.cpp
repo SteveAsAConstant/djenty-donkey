@@ -22,8 +22,8 @@ VibeAmpProcessor::VibeAmpProcessor()
     pTranspose = get (ids::transpose); pTransposeMode = get (ids::transposeMode);
     pInGateOn = get (ids::inGateOn); pInGateThresh = get (ids::inGateThresh); pInGateRelease = get (ids::inGateRelease);
     pAmpVolume = get (ids::ampVolume);
-    pCompOn = get (ids::compOn); pCompThresh = get (ids::compThresh); pCompRatio = get (ids::compRatio);
-    pCompAttack = get (ids::compAttack); pCompRelease = get (ids::compRelease); pCompMakeup = get (ids::compMakeup);
+    pCompOn = get (ids::compOn); pCompIn = get (ids::compIn); pCompOut = get (ids::compOut);
+    pCompAtk = get (ids::compAtk); pCompRel = get (ids::compRel); pCompRatio = get (ids::compRatioSel);
     pBoostOn = get (ids::boostOn); pBoostDrive = get (ids::boostDrive); pBoostTone = get (ids::boostTone);
     pBoostLevel = get (ids::boostLevel); pBoostAttack = get (ids::boostAttack); pBoostModel = get (ids::boostModel);
     pChannel = get (ids::channel); pAmpBright = get (ids::ampBright); pAmpCrunch = get (ids::ampCrunch); pAmpNoise = get (ids::ampNoise); pTubeSet = get (ids::tubeSet); pAmpGain = get (ids::ampGain); pBass = get (ids::bass); pMid = get (ids::mid);
@@ -64,14 +64,13 @@ void VibeAmpProcessor::prepareToPlay (double sampleRate, int samplesPerBlock)
     const juce::dsp::ProcessSpec stereoSpec { sampleRate, (juce::uint32) maxBlock, 2 };
 
     inputGain.prepare (monoSpec);  inputGain.setRampDurationSeconds (0.05);
-    compMakeup.prepare (monoSpec); compMakeup.setRampDurationSeconds (0.05);
     outputGain.prepare (stereoSpec); outputGain.setRampDurationSeconds (0.05);
 
     gate.prepare (sampleRate);
     inputGate.prepare (sampleRate);
 
     shifter.prepare (sampleRate);
-    comp.prepare (monoSpec);
+    comp1176.prepare (sampleRate, maxBlock);
     amp.prepare (sampleRate, maxBlock);
     cab.prepare (monoSpec);
 
@@ -93,7 +92,7 @@ void VibeAmpProcessor::prepareToPlay (double sampleRate, int samplesPerBlock)
     keyDelayBuf.assign (16384, 0.0f);
     keyDelayPos = 0;
 
-    targetLatency = amp.getLatencySamples() + shifter.getReportedLatency();
+    targetLatency = amp.getLatencySamples() + shifter.getReportedLatency() + (compOn ? comp1176.getLatencySamples() : 0);
     setLatencySamples (targetLatency.load());
 }
 
@@ -124,23 +123,29 @@ void VibeAmpProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Mid
     gateSettings.depth[2] = pGateHigh->load() * 0.01f;
 
     shifter.setParams (juce::roundToInt (pTranspose->load()), juce::roundToInt (pTransposeMode->load()));
-    keyDelay = juce::jlimit (0, (int) keyDelayBuf.size() - 1,
-                             juce::roundToInt (pTransposeMode->load()) == vamp::PitchShifter::HQ ? shifter.getAverageDelay() : 0);
 
-    // HQ transpose adds a fixed latency: report it to the host (on the message thread)
-    const int latency = amp.getLatencySamples() + shifter.getReportedLatency();
+    // UREI 1176LN
+    const bool newCompOn = pCompOn->load() > 0.5f;
+    if (newCompOn && ! compOn) comp1176.reset(); // switched in: starts from its settled idle point
+    compOn = newCompOn;
+    compSettings.input = pCompIn->load();
+    compSettings.output = pCompOut->load();
+    compSettings.attack = pCompAtk->load();
+    compSettings.release = pCompRel->load();
+    compSettings.ratio = juce::roundToInt (pCompRatio->load());
+    if (! compOn) compGr.store (0.0f);
+    const int compLatency = compOn ? comp1176.getLatencySamples() : 0;
+    keyDelay = juce::jlimit (0, (int) keyDelayBuf.size() - 1,
+                             (juce::roundToInt (pTransposeMode->load()) == vamp::PitchShifter::HQ ? shifter.getAverageDelay() : 0)
+                                 + compLatency);
+
+    // HQ transpose and the compressor's oversampling add latency: report it to the host (on the message thread)
+    const int latency = amp.getLatencySamples() + shifter.getReportedLatency() + compLatency;
     if (latency != targetLatency.load())
     {
         targetLatency = latency;
         triggerAsyncUpdate();
     }
-
-    compOn = pCompOn->load() > 0.5f;
-    comp.setThreshold (pCompThresh->load());
-    comp.setRatio (pCompRatio->load());
-    comp.setAttack (pCompAttack->load());
-    comp.setRelease (pCompRelease->load());
-    compMakeup.setGainDecibels (pCompMakeup->load());
 
     ampSettings.channel = juce::roundToInt (pChannel->load());
     ampSettings.bright = pAmpBright->load() > 0.5f;
@@ -243,8 +248,8 @@ void VibeAmpProcessor::processChunk (juce::AudioBuffer<float>& buffer, int start
     shifter.process (mono, len);
     if (compOn)
     {
-        comp.process (monoCtx);
-        compMakeup.process (monoCtx);
+        comp1176.process (mono, len, compSettings);
+        compGr.store (comp1176.getGainReductionDb());
     }
 
     // ---- amp (boost lives inside the oversampled amp loop) ----

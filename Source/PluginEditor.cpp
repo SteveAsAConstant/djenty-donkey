@@ -231,12 +231,19 @@ VibeAmpEditor::VibeAmpEditor (VibeAmpProcessor& p) : AudioProcessorEditor (&p), 
         ->setTooltip ("LIVE: ~6-15 ms latency, for playing.  HQ: ~43 ms latency (compensated in DAWs), "
                       "smoothest chords, for recording.");
 
-    compSec = std::make_unique<Section> ("COMPRESSOR", colours::yellow, &s, ids::compOn);
-    compSec->add<Knob> (s, ids::compThresh, "Thresh", colours::yellow);
-    compSec->add<Knob> (s, ids::compRatio, "Ratio", colours::yellow);
-    compSec->add<Knob> (s, ids::compAttack, "Attack", colours::yellow);
-    compSec->add<Knob> (s, ids::compRelease, "Release", colours::yellow);
-    compSec->add<Knob> (s, ids::compMakeup, "Makeup", colours::yellow);
+    compSec = std::make_unique<Section> ("1176 COMPRESSOR", colours::yellow, &s, ids::compOn);
+    compSec->add<Knob> (s, ids::compIn, "Input", colours::yellow)
+        ->setTooltip ("INPUT: drive into the 1176 (10 = full, 0 = 36 dB down). More input = more compression.");
+    compSec->add<Knob> (s, ids::compOut, "Output", colours::yellow)
+        ->setTooltip ("OUTPUT: the 1176's output level (into the amp through a reamp box's -20 dB pad). High settings drive its class-A output stage.");
+    compSec->add<Knob> (s, ids::compAtk, "Attack", colours::yellow)
+        ->setTooltip ("ATTACK: 7 = fastest (~20 us, the pick transient is clamped), 1 = slowest (~0.8 ms, the pick comes through).");
+    compSec->add<Knob> (s, ids::compRel, "Release", colours::yellow)
+        ->setTooltip ("RELEASE: 7 = fastest (~50 ms), 1 = slowest (~1.1 s).");
+    compSec->add<ChoiceButtons> (s, ids::compRatioSel, "Ratio", juce::StringArray { "4", "8", "12", "20", "ALL" }, colours::yellow)
+        ->setTooltip ("Ratio buttons. Higher ratios also have a higher threshold. ALL: all four pressed together "
+                      "(the bias shifts: very hard, aggressive limiting).");
+    compSec->add<GainReductionMeter> ([this] { return proc.getCompGainReduction(); }, colours::yellow);
 
     boostSec = std::make_unique<Section> ("PRECISION DRIVE", colours::clean, &s, ids::boostOn);
     auto* boostModelSel = boostSec->add<ChoiceButtons> (s, ids::boostModel, "Model", juce::StringArray { "PRECISION", "TS9" }, colours::clean);
@@ -381,7 +388,7 @@ void VibeAmpEditor::resized()
     auto row4 = b;
 
     layoutRow (row1, { { inSec.get(), 2.0f }, { inGateSec.get(), 2.0f }, { gateSec.get(), 6.0f },
-                       { pitchSec.get(), 2.2f }, { compSec.get(), 5.0f } });
+                       { pitchSec.get(), 2.2f }, { compSec.get(), 6.0f } });
     layoutRow (row2, { { boostSec.get(), 5.0f }, { ampSec.get(), 8.5f } });
     layoutRow (row3, { { cabSec.get(), 3.0f }, { eqSec.get(), 7.0f } });
     layoutRow (row4, { { phaserSec.get(), 4.0f }, { delaySec.get(), 4.0f },
