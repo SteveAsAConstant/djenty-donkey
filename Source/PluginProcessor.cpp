@@ -9,7 +9,7 @@ VibeAmpProcessor::VibeAmpProcessor()
                           .withInput ("Input", juce::AudioChannelSet::mono(), true)
                           .withOutput ("Output", juce::AudioChannelSet::stereo(), true)),
       apvts (*this, nullptr, "PARAMS", vamp::createParameterLayout()),
-      presets (apvts, [this] (const juce::File& f) { loadIR (f); }, [this] { return getIRPath(); })
+      presets (apvts, [this] (const juce::File& f) { loadIR (f); }, [this] { clearIR(); }, [this] { return getIRPath(); })
 {
     auto get = [this] (const juce::String& id)
     {
@@ -264,6 +264,7 @@ void VibeAmpProcessor::processChunk (juce::AudioBuffer<float>& buffer, int start
     }
 
     // ---- cabinet ----
+    takeIR();
     if (cabOn)
     {
         if (irLoaded.load())
@@ -338,21 +339,42 @@ void VibeAmpProcessor::loadIR (const juce::File& file)
     reader->read (&ir, 0, len, 0, true, false);
     const double irRate = reader->sampleRate;
     ir.applyGain ((float) vamp::cabMatchGain (ir.getReadPointer (0), len, irRate));
-    // Normalise::no: JUCE only rescales for a sample-rate change, which keeps the frequency response
-    cab.loadImpulseResponse (std::move (ir), irRate, juce::dsp::Convolution::Stereo::no, juce::dsp::Convolution::Trim::yes,
-                             juce::dsp::Convolution::Normalise::no);
+    {
+        // to the audio thread (takeIR): a previous IR it has not taken yet is replaced (and freed here)
+        const juce::SpinLock::ScopedLockType lock (irPendingLock);
+        irPending = std::move (ir);
+        irPendingRate = irRate;
+        irPendingSet = true;
+    }
     {
         const juce::SpinLock::ScopedLockType lock (irLock);
         irPath = file.getFullPathName();
     }
-    irLoaded = true;
 }
 
 void VibeAmpProcessor::clearIR()
 {
-    irLoaded = false;
+    {
+        const juce::SpinLock::ScopedLockType lock (irPendingLock);
+        irPendingSet = false; // an IR still on its way is dropped
+        irLoaded = false;
+    }
     const juce::SpinLock::ScopedLockType lock (irLock);
     irPath.clear();
+}
+
+// audio thread: hand a newly loaded IR to cab (wait-free: the buffer moves into JUCE's loader, which builds the
+// engine on its own thread and crossfades to it)
+void VibeAmpProcessor::takeIR()
+{
+    const juce::SpinLock::ScopedTryLockType lock (irPendingLock);
+    if (! lock.isLocked() || ! irPendingSet)
+        return;
+    irPendingSet = false;
+    // Normalise::no: JUCE only rescales for a sample-rate change, which keeps the frequency response
+    cab.loadImpulseResponse (std::move (irPending), irPendingRate, juce::dsp::Convolution::Stereo::no,
+                             juce::dsp::Convolution::Trim::yes, juce::dsp::Convolution::Normalise::no);
+    irLoaded = true;
 }
 
 void VibeAmpProcessor::stepIR (int direction)

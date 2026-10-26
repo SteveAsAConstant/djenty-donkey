@@ -1,21 +1,27 @@
 // The whole plugin (VibeAmpProcessor) driven the way hosts and validators drive it, to catch crashes and
 // out-of-range memory access in the processor itself (prepare / block-size / sample-rate handling):
 //
-//   host_test [auval | random | all] [seconds-per-case=2]
+//   host_test [auval | random | ir | all] [seconds-per-case=2]
 //
 // auval   Apple auval's render sequence: mono in / stereo out, prepare + render at 44.1 kHz / 512,
 //         22.05 kHz / 64, 96 kHz / 137, 48 kHz / 4096, 192 kHz / 4096, 11.025 kHz / 4096, 44.1 kHz / 512,
 //         then mono / stereo layouts and blocks larger than prepared. Default and randomised parameters.
 // random  random layouts, rates, prepared sizes, block sizes (often not the prepared one) and parameters.
+// ir      IRs loaded / cleared from another thread while rendering; user presets restoring their cabinet.
 // Every output sample must be finite and bounded (< 1e4: random settings stack up to ~+45 dBFS). Build with AddressSanitizer for the memory checks
 // (cmake -DDD_ASAN=ON).
+#include <atomic>
+#include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <memory>
 #include <random>
 #include <string>
+#include <thread>
 #include <vector>
+#include <juce_audio_formats/juce_audio_formats.h>
 #include <juce_audio_processors/juce_audio_processors.h>
+#include "PluginProcessor.h"
 
 juce::AudioProcessor* JUCE_CALLTYPE createPluginFilter();
 
@@ -120,6 +126,96 @@ void randomCases (juce::AudioProcessor& p, double seconds, int cases)
         render (p, ("random case " + std::to_string (k + 1)).c_str(), rate, maxBlock, block, numIn, numOut, seconds);
     }
 }
+// a decaying-noise cabinet IR (48 kHz, 8192 samples) written to a temporary .wav
+juce::File writeTestIR (const juce::File& dir, const juce::String& name, double decay)
+{
+    const auto f = dir.getChildFile (name);
+    juce::AudioBuffer<float> ir (1, 8192);
+    for (int i = 0; i < ir.getNumSamples(); ++i) ir.setSample (0, i, (float) (uniform (-1.0, 1.0) * std::exp (-decay * i / 48000.0)));
+    f.deleteFile();
+    std::unique_ptr<juce::OutputStream> out (f.createOutputStream().release());
+    juce::WavAudioFormat wav;
+    std::unique_ptr<juce::AudioFormatWriter> w (wav.createWriterFor (out.get(), 48000.0, 1, 24, {}, 0));
+    if (w == nullptr) return {};
+    out.release(); // owned by the writer
+    w->writeFromAudioSampleBuffer (ir, 0, ir.getNumSamples());
+    return f;
+}
+
+void check (bool ok, const char* what)
+{
+    std::printf ("%-60s %s\n", what, ok ? "PASS" : "FAIL");
+    if (! ok) ++failures;
+}
+
+// IRs loaded and cleared from another thread while the audio thread renders (JUCE's Convolution may only be
+// loaded in step with process(): the processor hands loaded IRs to the audio thread), then user presets restoring
+// their own cabinet (an IR, none, or a file that is gone -> the built-in cab)
+void irCases (juce::AudioProcessor& p, double seconds)
+{
+    std::printf ("== cabinet IRs ==\n");
+    auto& vp = dynamic_cast<VibeAmpProcessor&> (p);
+    const auto dir = juce::File::getSpecialLocation (juce::File::tempDirectory).getChildFile ("dd_host_test_ir");
+    dir.createDirectory();
+    const juce::File irs[] = { writeTestIR (dir, "a.wav", 30.0), writeTestIR (dir, "b.wav", 8.0) };
+    check (irs[0].existsAsFile() && irs[1].existsAsFile(), "test IRs written");
+
+    setDefaults (p);
+    p.releaseResources();
+    p.setRateAndBufferSizeDetails (48000.0, 64);
+    p.prepareToPlay (48000.0, 64);
+    std::atomic<bool> stop { false };
+    int loads = 0;
+    std::thread loader ([&]
+    {
+        std::mt19937 r (42);
+        while (! stop)
+        {
+            const int k = std::uniform_int_distribution<int> (0, 4) (r);
+            if (k == 0) vp.clearIR();
+            else vp.loadIR (irs[k & 1]);
+            ++loads;
+            std::this_thread::sleep_for (std::chrono::microseconds (std::uniform_int_distribution<int> (0, 3000) (r)));
+        }
+    });
+    juce::AudioBuffer<float> buf (2, 64);
+    juce::MidiBuffer midi;
+    double peak = 0.0;
+    bool finite = true;
+    for (int b = 0; b < (int) (seconds * 48000.0 / 64); ++b)
+    {
+        for (int i = 0; i < 64; ++i) { const float v = (float) (0.5 * std::sin (0.0144 * (b * 64 + i))); buf.setSample (0, i, v); buf.setSample (1, i, v); }
+        p.processBlock (buf, midi);
+        for (int c = 0; c < 2; ++c)
+            for (int i = 0; i < 64; ++i) { const float y = buf.getSample (c, i); finite = finite && std::isfinite (y); peak = std::max (peak, (double) std::abs (y)); }
+    }
+    stop = true;
+    loader.join();
+    std::printf ("   %d loads / clears while rendering, peak %.3f\n", loads, peak);
+    check (finite && peak < 1e4 && loads > 100, "IRs loaded from another thread during processing");
+
+    // user presets: each restores the cabinet it was saved with
+    auto& pm = vp.presets;
+    const juce::String none = "zz host_test none", withB = "zz host_test b";
+    vp.clearIR();
+    check (pm.save (none), "save a preset with the built-in cab");
+    vp.loadIR (irs[1]);
+    check (pm.save (withB), "save a preset with IR b");
+    vp.loadIR (irs[0]);
+    pm.load (pm.indexOf (none));
+    check (vp.getIRPath().isEmpty(), "preset saved without an IR -> built-in cab");
+    pm.load (pm.indexOf (withB));
+    check (vp.getIRPath() == irs[1].getFullPathName(), "preset saved with IR b -> IR b");
+    vp.loadIR (irs[0]);
+    irs[1].deleteFile();
+    pm.load (pm.indexOf (withB));
+    check (vp.getIRPath().isEmpty(), "preset whose IR file is gone -> built-in cab");
+    pm.remove (pm.indexOf (none));
+    pm.remove (pm.indexOf (withB));
+    check (pm.indexOf (none) < 0 && pm.indexOf (withB) < 0, "test presets removed");
+    vp.clearIR();
+    dir.deleteRecursively();
+}
 } // namespace
 
 int main (int argc, char** argv)
@@ -141,6 +237,8 @@ int main (int argc, char** argv)
     }
     if (mode == "random" || mode == "all")
         randomCases (*p, seconds * 0.5, 40);
+    if (mode == "ir" || mode == "all")
+        irCases (*p, seconds * 5.0);
 
     std::printf ("\n%d failed\n", failures);
     return failures == 0 ? 0 : 1;

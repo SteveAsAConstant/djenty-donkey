@@ -77,8 +77,9 @@ public:
 
     PresetManager (juce::AudioProcessorValueTreeState& state,
                    std::function<void (const juce::File&)> loadIRFn,
+                   std::function<void()> clearIRFn,
                    std::function<juce::String()> getIRPathFn)
-        : apvts (state), loadIR (std::move (loadIRFn)), getIRPath (std::move (getIRPathFn))
+        : apvts (state), loadIR (std::move (loadIRFn)), clearIR (std::move (clearIRFn)), getIRPath (std::move (getIRPathFn))
     {
         refresh();
     }
@@ -137,9 +138,13 @@ public:
             for (auto* p : xml->getChildWithTagNameIterator ("PARAM"))
                 setParam (p->getStringAttribute ("id"), (float) p->getDoubleAttribute ("value"));
 
-            const juce::File ir (xml->getStringAttribute ("irPath"));
-            if (juce::File::isAbsolutePath (ir.getFullPathName()) && ir.existsAsFile())
-                loadIR (ir);
+            // the preset's own cabinet: its IR, or the built-in cab when it was saved with none or the file is gone
+            // (as a session restores). Factory presets carry no IR and keep the current one.
+            const auto irPath = xml->getStringAttribute ("irPath");
+            if (irPath.isNotEmpty() && juce::File::isAbsolutePath (irPath) && juce::File (irPath).existsAsFile())
+                loadIR (juce::File (irPath));
+            else
+                clearIR();
         }
         currentName = getName (index);
     }
@@ -237,6 +242,7 @@ private:
 
     juce::AudioProcessorValueTreeState& apvts;
     std::function<void (const juce::File&)> loadIR;
+    std::function<void()> clearIR;
     std::function<juce::String()> getIRPath;
     juce::Array<juce::File> userFiles;
     juce::String currentName { "Default" };

@@ -155,6 +155,7 @@ public:
     long long statSamples = 0, statPasses = 0; // samples, and the extra A / C passes of the coupled solve
     const SemiNetwork& netB() const { return b; }
     const SemiNetwork& netC() const { return c; }
+    void testFailRetries (int nA, int nC) { a.testFailRetries = nA; c.testFailRetries = nC; } // tests (SemiNetwork)
 
     // Factory trims (calibrated in LTspice with the same equations, spice/1176_*.cir; docs/1176_schematic_notes.md):
     // "Q" bias R59 wiper position (1.0 dB drop with G.R. off, 2 kHz), R30* (Q6 33 mA: the +30 V rail at 50 mA as on

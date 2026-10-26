@@ -138,6 +138,7 @@ public:
         assert (numS <= kMaxStates && (int) outputs.size() <= kMaxStates); // finish() keeps both on the stack
         x.assign ((size_t) N, 0.0);
         z.assign ((size_t) nz, 0.0);
+        zTrial.assign ((size_t) nz, 0.0);
         p0.assign ((size_t) m, 0.0);
         // rebuild() reuses these (assign to the same size does not reallocate)
         bufA.assign ((size_t) N * N, 0.0);
@@ -181,6 +182,11 @@ public:
         std::copy (zSaved.begin(), zSaved.end(), z.begin());
         std::copy (xSaved.begin(), xSaved.end(), x.begin());
     }
+
+    // Remember / go back to this sample's inputs, port currents and noise (z past the reactive states): a trial
+    // solution to return to when solving the same sample again fails (SemiNetwork::retry; no allocation)
+    void saveTrial() { std::copy (z.begin() + numS, z.end(), zTrial.begin() + numS); }
+    void restoreTrial() { std::copy (zTrial.begin() + numS, zTrial.end(), z.begin() + numS); }
 
     // p0 = P [s; u] for the source values u and the current reactive states
     const std::vector<double>& computeP0 (const double* u)
@@ -601,7 +607,7 @@ private:
     int ldP = 0, ldM = 0, ldO = 0;
     std::vector<double> z;     // [s; u; i]: reactive states, then the inputs and port currents of this sample
     std::vector<double> x, p0; // x: output node voltages (others stay 0)
-    std::vector<double> zSaved, xSaved;
+    std::vector<double> zSaved, xSaved, zTrial;
     std::vector<double> bufA, bufInv, bufAinvNi, bufV; // rebuild work buffers
 };
 

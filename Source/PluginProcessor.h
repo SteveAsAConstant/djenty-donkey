@@ -89,6 +89,8 @@ private:
     juce::AudioBuffer<float> monoBuf, stereoBuf, keyBuf;
     float lastInput = 0.0f; // last finite input sample (stands in for a non-finite one)
 
+    void takeIR(); // audio thread: a newly loaded IR to cab
+
     // signal chain
     juce::dsp::Gain<float> inputGain, outputGain;
     vamp::InputGate inputGate;
@@ -130,6 +132,12 @@ private:
     std::atomic<bool> irLoaded { false };
     mutable juce::SpinLock irLock;
     juce::String irPath;
+    // A loaded IR on its way to the audio thread, which hands it to cab: JUCE's Convolution must be loaded in step
+    // with its process() calls. Guarded by irPendingLock (the audio thread only tries it).
+    juce::SpinLock irPendingLock;
+    juce::AudioBuffer<float> irPending;
+    double irPendingRate = 0.0;
+    bool irPendingSet = false;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (VibeAmpProcessor)
 };

@@ -2,6 +2,7 @@
 #include <algorithm>
 #include <cmath>
 #include <functional>
+#include <limits>
 #include "DKCircuit.h"
 
 namespace vamp
@@ -209,8 +210,9 @@ public:
     // A sample in steps, for circuits solved together with another one (Urei1176): begin() solves this sample's
     // port equations for the sources u and computes the output nodes without advancing the states; retry() solves
     // the same sample again for other source values (from the current solution); commit() advances the states with
-    // the last solution, hold() drops the sample. begin / retry false: no solution (u may then hold the last
-    // accepted sources, as solve() retries a failed sample with them).
+    // the last solution, hold() drops the sample. begin false: no solution (u may then hold the last accepted
+    // sources, as solve() retries a failed sample with them); retry false: no solution for the new u, the previous
+    // one is kept (commit() then advances with it).
     bool begin (double* u)
     {
         for (int k = 0; k < m; ++k)
@@ -231,11 +233,32 @@ public:
         return ok;
     }
 
+    // A failed retry goes back to the solution it started from (the ports, their currents and the circuit's
+    // inputs), so that commit() advances the states with that solution and not with the failed Newton iterate
     bool retry (double* u)
     {
+        double pKeep[kMaxPorts], iKeep[kMaxPorts];
+        std::copy (p, p + m, pKeep);
+        std::copy (cur, cur + m, iKeep);
+        dk.saveTrial();
         iterations = 0;
-        const bool ok = attempt (u, 8);
+        bool ok = attempt (u, 8);
         statIterations += iterations;
+        if (testFailRetries > 0) // tests: a failure that leaves a non-finite iterate behind
+        {
+            --testFailRetries;
+            ok = false;
+            for (int k = 0; k < m; ++k) p[k] = cur[k] = std::numeric_limits<double>::quiet_NaN();
+            dk.computeP0 (u);
+            dk.evalOutputs (cur);
+        }
+        if (! ok)
+        {
+            ++statRetryFailures;
+            std::copy (pKeep, pKeep + m, p);
+            std::copy (iKeep, iKeep + m, cur);
+            dk.restoreTrial();
+        }
         return ok;
     }
 
@@ -264,6 +287,8 @@ public:
 
     long long statSamples = 0, statIterations = 0, statFailures = 0, statHeld = 0;
     long long statMaxIterations = 0, statSlow = 0; // most Newton evaluations in one sample; samples needing the fallbacks
+    long long statRetryFailures = 0;
+    int testFailRetries = 0; // tests: make the next n retries fail
 
 private:
     struct Dev

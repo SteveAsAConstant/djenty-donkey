@@ -33,10 +33,11 @@ cmake --build %USERPROFILE%\vab-build --config Release
   target), one channel switch in detail, the two-core switch split; pin to a P-core (`start /high /affinity 1000`).
 - `golden write <file>` (built from the last commit) / `golden check <file>`: null test for speed work; a change must
   be bit-identical, or rounding-level only (far below the solver's ~-100 dB own error).
-- `comp1176_test [spice | rates | release | null | metal | cpu | worst | stress | hf | all]`: 1176 vs LTspice and the
-  factory test procedures. `worst`: run at real-time priority for meaningful numbers.
-- `host_test [auval | random | all]`: the whole processor driven like a host / auval (rates, block sizes, layouts,
-  random parameters). Configure with `-DDD_ASAN=ON` for AddressSanitizer (Windows: the VS `bin\Hostx64\x64` dir must
+- `comp1176_test [spice | rates | release | null | metal | cpu | worst | stress | hf | retryfail | all]`: 1176 vs
+  LTspice and the factory test procedures. `worst`: run at real-time priority for meaningful numbers. `retryfail`:
+  forced failures in the coupled A / C solve must not reach the states.
+- `host_test [auval | random | ir | all]`: the whole processor driven like a host / auval (rates, block sizes, layouts,
+  random parameters; `ir`: IRs loaded from another thread while rendering, user presets restoring their cab). Configure with `-DDD_ASAN=ON` for AddressSanitizer (Windows: the VS `bin\Hostx64\x64` dir must
   be on PATH for the ASan DLL); slow under ASan. The macOS CI runs it.
 - `plugin_cpu [ir.wav ...]`: the whole plugin's CPU at 48 kHz / 64-256 buffers, per stage (pin to a P-core; close any
   running standalone first: it competes for the core). `plugin_cpu levels [ir.wav ...]`: output level with each IR vs

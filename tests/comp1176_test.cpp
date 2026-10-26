@@ -85,6 +85,7 @@ int metalStudy();
 int worstBlock();
 int controlStress();
 int hfResponse();
+int retryFailure();
 static double outputForFraction (double frac) { return std::log10 (1.0 + 99.0 * frac) / 2.0; }
 
 static void spiceParity (double fs, bool reference = true)
@@ -222,6 +223,7 @@ int main (int argc, char** argv)
     if (mode == "worst") return worstBlock();
     if (mode == "stress") return controlStress();
     if (mode == "hf") return hfResponse();
+    if (mode == "retryfail") return retryFailure();
     if (mode == "release") { releaseParity (96000.0, false); return 0; }
     if (mode == "spice" || mode == "all")
     {
@@ -478,6 +480,42 @@ int controlStress()
     std::printf ("control stress: finite %s, output peak %.1f V, failed solves %lld, held samples %lld -> %s\n",
                  finite ? "yes" : "NO", peak, failures, held, finite && held == 0 && peak < 60.0 ? "PASS" : "FAIL");
     return finite && held == 0 ? 0 : 1;
+}
+
+// A / C retries of the coupled solve forced to fail (leaving a non-finite iterate behind, as a failed Newton can):
+// the failed pass must not reach the capacitor states. Against an undisturbed run the output must stay finite,
+// no sample may be held, and the difference stays small (a failed pass only ends that sample's CTRL iteration early).
+int retryFailure()
+{
+    const double fs = 96000.0;
+    for (int ratio : { 0, (int) Urei1176::rAll })
+    {
+        Urei1176 ref, u;
+        for (auto* x : { &ref, &u }) { x->setControls (Urei1176::fromKnobs (9.0, 8.5, 7.0, 6.0, ratio)); x->prepare (fs); }
+        const int n = (int) (2.0 * fs);
+        double sumRef = 0.0, sumDiff = 0.0, maxDiff = 0.0;
+        bool finite = true;
+        for (int i = 0; i < n; ++i)
+        {
+            if (i % 61 == 0) u.testFailRetries (1, 0);
+            if (i % 67 == 0) u.testFailRetries (0, 1);
+            const double x = pickInput (i / fs), yr = ref.processSample (x), y = u.processSample (x);
+            finite = finite && std::isfinite (y);
+            if (i < n / 10) continue;
+            sumRef += yr * yr;
+            sumDiff += (y - yr) * (y - yr);
+            maxDiff = std::max (maxDiff, std::abs (y - yr));
+        }
+        const long long failed = u.netA().statRetryFailures + u.netC().statRetryFailures;
+        const long long held = u.netA().statHeld + u.netB().statHeld + u.netC().statHeld;
+        const double errDb = 10.0 * std::log10 ((sumDiff + 1e-300) / sumRef);
+        const bool pass = finite && held == 0 && failed > 100 && errDb < -40.0;
+        std::printf ("retry failures, %s: %lld failed passes (A %lld C %lld), finite %s, held %lld, difference %.1f dB"
+                     " (peak %.2g V) -> %s\n", ratio == 0 ? "4:1" : "ALL", failed, u.netA().statRetryFailures,
+                     u.netC().statRetryFailures, finite ? "yes" : "NO", held, errDb, maxDiff, pass ? "PASS" : "FAIL");
+        if (! pass) return 1;
+    }
+    return 0;
 }
 
 // small-signal frequency response at 384 kHz, pots full CW, G.R. off (factory test 8: -3 dB at ~55 kHz)
