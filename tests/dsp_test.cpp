@@ -1,9 +1,12 @@
 // Offline checks of the component-level DSP against the LTspice reference runs.
 // Build target: dsp_test (no JUCE needed).
+#include <algorithm>
 #include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
+#include <functional>
+#include <memory>
 #include <string>
 #include <vector>
 #include "dsp/FFT.h"
@@ -13,6 +16,7 @@
 #include "dsp/PowerAmp5150.h"
 #include "dsp/Preamp5150.h"
 #include "dsp/PrecisionDrive.h"
+#include "dsp/Urei1176.h"
 
 using namespace vamp;
 
@@ -601,6 +605,651 @@ static void cpuModules()
     }
 }
 
+// ---- Hardware target: 8-sample blocks (dsp_test block8) ----
+// Cost of each 8-sample host block at 48 kHz (deadline 166.7 us), per module, as the plugin runs them: the amp at 8x
+// (64 samples a block) with AmpSim's knob smoothing, every-4th-step matrix rebuilds and channel crossfade (AmpCore
+// mirrors AmpSim::process without JUCE's oversampling filters, DC block and volume), the 1176 at 2x (16 samples).
+// Each case is rendered kRuns times from the same freshly prepared state and the fastest run is kept per block: the
+// model is deterministic, so this drops OS interruptions but keeps its own spikes (matrix rebuilds, Newton fallbacks).
+// Every module gets the same guitar DI generated at its own rate (no resampling filters between them).
+namespace block8
+{
+constexpr double kBase = 48000.0, kOs = 8 * kBase, kCompRate = 2 * kBase, kSeconds = 4.0;
+constexpr int kBlock = 8, kOsBlock = 64, kCompBlock = 16, kRuns = 5;
+constexpr double kDeadlineUs = 1e6 * kBlock / kBase;
+constexpr double kChannelPost[3] = { 54.0, 1.0, 1.0 }; // AmpSim.h
+volatile double sink = 0;
+
+// AmpSim::process per host block (stepKnobs / applyKnobs as there)
+struct AmpCore
+{
+    static constexpr int kKnobs = 10, kControlInterval = 32, kHeavyEvery = 4;
+    static constexpr int kHeavy[3] = { 0, 5, 6 }; // Gain, Presence, Resonance
+
+    PrecisionDrive drive;
+    TubeScreamer9 ts9;
+    Preamp5150 preamp;
+    PowerAmp5150 power;
+    double knob[kKnobs] {}, knobTarget[kKnobs] {}, knobFrom[kKnobs] {}, heavyApplied[3] {}, knobCoef = 1.0;
+    double modelMix = 0.0, modelStep = 1e-4;
+    int heavyPhase = 0, controlPhase = 0, boostAttack = 3;
+    bool knobsSet = false, firstBlock = true, lastBoostOn = false;
+
+    void prepare()
+    {
+        drive.prepare (kOs);
+        ts9.prepare (kOs);
+        modelStep = 1.0 / (0.02 * kOs);
+        preamp.setChannelTrims (kChannelPost[0], kChannelPost[1], kChannelPost[2]);
+        preamp.prepare (kOs);
+        power.prepare (kOs);
+        auto settle = [this] (double seconds) { for (int i = 0; i < (int) (kOs * seconds); ++i) processAmp5150 (preamp, power, 0.0, 1.0); };
+        power.beginSupplySettle();
+        for (int pass = 0; pass < 3; ++pass)
+        {
+            settle (0.1);
+            power.resetSupplyAverage();
+            settle (0.1);
+            power.applySupplyDC();
+        }
+        settle (0.15);
+        power.endSupplySettle();
+        knobCoef = 1.0 - std::exp (-kControlInterval / (20e-3 * kOs));
+    }
+
+    // x: kOsBlock samples at 8x; target: Gain, Bass, Mid, Treble, Master, Presence, Resonance, boost Drive, Bright, Level
+    double block (const double* x, const double* target, int channel, bool boostOn, int boostModel)
+    {
+        if (firstBlock) preamp.setModeNow (channel);
+        else preamp.setMode (channel);
+        firstBlock = false;
+        if (boostOn && ! lastBoostOn)
+        {
+            drive.setControls (knob[7], knob[8], boostAttack, knob[9]);
+            ts9.setControls (knob[7], knob[8], knob[9]);
+        }
+        lastBoostOn = boostOn;
+        const double modelTarget = boostModel == 1 ? 1.0 : 0.0;
+        std::copy (knobTarget, knobTarget + kKnobs, knobFrom);
+        std::copy (target, target + kKnobs, knobTarget);
+        if (! knobsSet)
+        {
+            std::copy (target, target + kKnobs, knob);
+            std::copy (target, target + kKnobs, knobFrom);
+            knobsSet = true;
+            applyKnobs (boostOn, true);
+        }
+        auto pedals = [&] (double v)
+        {
+            if (! boostOn) return v;
+            if (modelMix != modelTarget)
+                modelMix = modelTarget > modelMix ? std::min (modelTarget, modelMix + modelStep) : std::max (modelTarget, modelMix - modelStep);
+            const double w = 0.5 - 0.5 * std::cos (kPi * modelMix);
+            return (1.0 - w) * drive.process (v) + w * ts9.process (v);
+        };
+        // two-core split (Preamp5150::runAhead): the pedals first (they do not depend on the amp), then the circuits
+        // fading out, solved ahead on last block's rails ("core B", timed on its own), then the rest per sample.
+        // Knobs must be still: the circuits solved ahead would miss control updates within the block.
+        double vpre[kOsBlock];
+        aheadUs = 0.0;
+        if (twoCore)
+            for (int i = 0; i < kOsBlock; ++i) vpre[i] = pedals (x[i]);
+        double acc = 0;
+        for (int i = 0; i < kOsBlock; ++i)
+        {
+            if (twoCore && i % aheadChunk == 0 && preamp.fading()) // core B: the next aheadChunk samples (the lag)
+            {
+                const auto t0 = std::chrono::steady_clock::now();
+                preamp.runAhead (vpre + i, aheadChunk);
+                aheadUs += std::chrono::duration<double, std::micro> (std::chrono::steady_clock::now() - t0).count();
+            }
+            if (++controlPhase >= kControlInterval)
+            {
+                controlPhase = 0;
+                stepKnobs (boostOn, (double) (i + 1) / kOsBlock);
+            }
+            const double v = twoCore ? vpre[i] : pedals (x[i]);
+            out[i] = processAmp5150 (preamp, power, v, 1.0);
+            acc += out[i];
+        }
+        return acc;
+    }
+
+    bool twoCore = false;  // set before the first block (with preamp.enableRunAhead)
+    int aheadChunk = kOsBlock; // samples solved ahead at a time = the rail lag (a divisor of kOsBlock)
+    double aheadUs = 0.0;  // the last block's run-ahead ("core B") time
+    double out[kOsBlock] {}; // the last block's speaker volts
+
+    void stepKnobs (bool boostOn, double frac)
+    {
+        bool moving = false;
+        for (int k = 0; k < kKnobs; ++k)
+        {
+            const double t = knobFrom[k] + frac * (knobTarget[k] - knobFrom[k]), d = t - knob[k];
+            if (d == 0.0) continue;
+            knob[k] = std::abs (d) < 1e-5 ? t : knob[k] + knobCoef * d;
+            moving = true;
+        }
+        const bool heavyStep = ++heavyPhase >= kHeavyEvery;
+        if (heavyStep) heavyPhase = 0;
+        bool heavyPending = false;
+        for (int k : kHeavy) heavyPending = heavyPending || heavyApplied[k == 0 ? 0 : k - 4] != knob[k];
+        if (moving || (heavyStep && heavyPending))
+            applyKnobs (boostOn, heavyStep);
+    }
+
+    void applyKnobs (bool boostOn, bool heavy)
+    {
+        if (heavy)
+            for (int k : kHeavy) heavyApplied[k == 0 ? 0 : k - 4] = knob[k];
+        preamp.setControls (heavyApplied[0], knob[1], knob[2], knob[3], knob[4]);
+        power.setControls (heavyApplied[1], heavyApplied[2]);
+        if (boostOn)
+        {
+            drive.setControls (knob[7], knob[8], boostAttack, knob[9]);
+            ts9.setControls (knob[7], knob[8], knob[9]);
+        }
+    }
+};
+
+// automation of one amp case at time t (s): knob targets, channel, drive on / model
+struct AmpState
+{
+    double target[10] = { 0.6, 0.5, 0.5, 0.6, 0.3, 0.5, 0.5, 0.0, 0.5, 0.7 }; // AmpSim::Settings defaults
+    int channel = Preamp5150::Red;
+    bool boostOn = false;
+    int boostModel = 0;
+};
+using Automation = std::function<void (double t, AmpState&)>;
+
+// 0..1..0 over period p (s)
+inline double tri (double t, double p) { const double f = std::fmod (t / p, 1.0); return 1.0 - std::abs (2.0 * f - 1.0); }
+
+// drive on, every knob turning at its own rate (Master kept moderate). Spelled out: the same as a loop over k in a
+// lambda crashes MSVC 14.44's optimizer (C1001).
+void everyKnob (double t, AmpState& s)
+{
+    s.boostOn = true;
+    static constexpr double period[10] = { 0.5, 0.63, 0.76, 0.89, 0.8, 1.15, 1.28, 1.41, 1.54, 1.67 };
+    double* k = s.target;
+    k[0] = tri (t, period[0]); k[1] = tri (t, period[1]); k[2] = tri (t, period[2]); k[3] = tri (t, period[3]);
+    k[4] = 0.1 + 0.5 * tri (t, period[4]);
+    k[5] = tri (t, period[5]); k[6] = tri (t, period[6]); k[7] = tri (t, period[7]); k[8] = tri (t, period[8]);
+    k[9] = tri (t, period[9]);
+}
+
+using Step = std::function<void (int)>; // processes host block b
+
+// the first 10 ms (60 blocks: the first block resets the channel and applies every knob, caches are cold) are left
+// out of the statistics and the first block is shown on its own
+constexpr int kSkipBlocks = 60;
+
+void report (const char* name, const std::vector<double>& all, double rawMax)
+{
+    const std::vector<double> best (all.begin() + kSkipBlocks, all.end());
+    auto s = best;
+    std::sort (s.begin(), s.end());
+    double sum = 0;
+    for (double v : s) sum += v;
+    const auto at = [&] (double q) { return s[(size_t) std::min ((double) s.size() - 1, q * (double) s.size())]; };
+    const auto worst = std::max_element (best.begin(), best.end());
+    int over = 0;
+    for (double v : s) over += v > kDeadlineUs;
+    std::printf ("%-38s %6.1f %6.1f %6.1f %7.1f %5.0f%%  %6.3f s %7.1f %6d %7.1f\n", name, sum / (double) s.size(), at (0.99),
+                 at (0.999), *worst, 100.0 * *worst / kDeadlineUs, (double) (worst - best.begin() + kSkipBlocks) * kBlock / kBase, rawMax,
+                 over, all[0]);
+}
+
+void runCase (const char* name, int numBlocks, const std::function<Step()>& make)
+{
+    using clk = std::chrono::steady_clock;
+    std::vector<double> best ((size_t) numBlocks, 1e30);
+    double rawMax = 0;
+    for (int r = 0; r < kRuns; ++r)
+    {
+        Step step = make(); // freshly prepared state, outside the timing
+        for (int b = 0; b < numBlocks; ++b)
+        {
+            const auto t0 = clk::now();
+            step (b);
+            const double us = std::chrono::duration<double, std::micro> (clk::now() - t0).count();
+            best[(size_t) b] = std::min (best[(size_t) b], us);
+            rawMax = std::max (rawMax, us);
+        }
+    }
+    report (name, best, rawMax);
+}
+
+// (plain functions capturing pointers: nested lambdas capturing references crash MSVC 14.44 here)
+void runAmpCase (const char* name, int numBlocks, const double* x, Automation automate)
+{
+    runCase (name, numBlocks, [x, automate] {
+        auto amp = std::make_shared<AmpCore>();
+        amp->prepare();
+        return Step ([amp, x, automate] (int b) {
+            AmpState st;
+            automate ((double) b * kBlock / kBase, st);
+            sink = sink + amp->block (x + (size_t) b * kOsBlock, st.target, st.channel, st.boostOn, st.boostModel);
+        });
+    });
+}
+
+using CompControls = std::function<Urei1176::Controls (double t)>;
+void runCompCase (const char* name, int numBlocks, const double* x, CompControls controls, bool everyBlock)
+{
+    runCase (name, numBlocks, [x, controls, everyBlock] {
+        auto m = std::make_shared<Urei1176>(); m->setControls (controls (0.0)); m->prepare (kCompRate);
+        return Step ([m, x, controls, everyBlock] (int b) {
+            if (everyBlock) m->setControls (controls ((double) b * kBlock / kBase)); // Comp1176: when a knob changed
+            double a = 0;
+            for (int i = 0; i < kCompBlock; ++i) a += m->processSample (x[(size_t) (b * kCompBlock + i)]);
+            sink = sink + a;
+        });
+    });
+}
+
+// One channel switch in detail (dsp_test switch8): the full amp's cost per block around the switch, against the same
+// run without it (fastest of kRuns per block both), and the setMode() call on its own (the incoming circuit takes
+// over the outgoing one's state). The fade runs 20 ms = 120 blocks.
+void switchProfile()
+{
+    using clk = std::chrono::steady_clock;
+    const double secs = 1.5;
+    const auto diOs = guitarDI (kOs, secs);
+    const int numBlocks = (int) (kBase * secs) / kBlock, fadeBlocks = (int) (0.02 * kBase) / kBlock;
+    struct Case { const char* name; double at; int from, to; bool gainMoved; bool prebuild = false; };
+    const Case cases[] = {
+        { "RED -> BLUE at a chug's attack",             1.0,   Preamp5150::Red,   Preamp5150::Blue,  false },
+        { "RED -> BLUE 60 ms into a chug",              1.06,  Preamp5150::Red,   Preamp5150::Blue,  false },
+        { "RED -> BLUE in the idle hiss",               0.8,   Preamp5150::Red,   Preamp5150::Blue,  false },
+        { "RED -> CLEAN at a chug's attack",            1.0,   Preamp5150::Red,   Preamp5150::Clean, false },
+        { "CLEAN -> RED at a chug's attack",            1.0,   Preamp5150::Clean, Preamp5150::Red,   false },
+        { "RED -> BLUE at attack, Gain moved on RED",   1.0,   Preamp5150::Red,   Preamp5150::Blue,  true },
+        // the incoming circuit's deferred matrix rebuild done 10 blocks ahead (DKCircuit::ensureBuilt)
+        { "  same, BLUE's matrices built ahead",         1.0,   Preamp5150::Red,   Preamp5150::Blue,  true,  true },
+        { "RED -> BLUE at attack, built ahead",          1.0,   Preamp5150::Red,   Preamp5150::Blue,  false, true },
+        { "RED -> BLUE in idle hiss, built ahead",       0.8,   Preamp5150::Red,   Preamp5150::Blue,  false, true },
+        { "CLEAN -> RED at attack, built ahead",         1.0,   Preamp5150::Clean, Preamp5150::Red,   false, true },
+    };
+    std::printf ("\n== One channel switch, full amp at 8x, 8-sample blocks (us; deadline %.1f us; fade %d blocks) ==\n",
+                 kDeadlineUs, fadeBlocks);
+    std::printf ("%-42s %8s %8s %8s %8s %8s %8s %8s\n", "", "setMode", "block 0", "+extra", "fade avg", "+extra",
+                 "fade max", "base max");
+    for (const auto& c : cases)
+    {
+        const int sb = (int) (c.at * kBase) / kBlock;
+        auto incoming = [&] (AmpCore& a) -> DKCircuit& {
+            return c.to == Preamp5150::Red ? a.preamp.lead.net.dk : c.to == Preamp5150::Blue ? a.preamp.blue.net.dk : a.preamp.clean.net.dk; };
+        double tBuild = 0;
+        auto render = [&] (bool doSwitch, std::vector<double>& t, double& tSet)
+        {
+            t.assign ((size_t) numBlocks, 1e30);
+            tSet = 1e30;
+            for (int r = 0; r < kRuns; ++r)
+            {
+                AmpCore amp;
+                amp.prepare();
+                for (int b = 0; b < numBlocks; ++b)
+                {
+                    AmpState st;
+                    st.channel = doSwitch && b >= sb ? c.to : c.from;
+                    if (c.gainMoved && b * kBlock >= (int) (0.5 * kBase)) st.target[0] = 0.8; // smoothed over ~20 ms
+                    if (doSwitch && c.prebuild && b == sb - 10)
+                    {
+                        const auto tb = clk::now();
+                        incoming (amp).ensureBuilt();
+                        tBuild = std::chrono::duration<double, std::micro> (clk::now() - tb).count();
+                    }
+                    const auto t0 = clk::now();
+                    if (b > 0) amp.preamp.setMode (st.channel); // block() calls it again: a no-op then
+                    const auto t1 = clk::now();
+                    sink = sink + amp.block (diOs.data() + (size_t) b * kOsBlock, st.target, st.channel, st.boostOn, st.boostModel);
+                    const auto t2 = clk::now();
+                    t[(size_t) b] = std::min (t[(size_t) b], std::chrono::duration<double, std::micro> (t2 - t0).count());
+                    if (doSwitch && b == sb) tSet = std::min (tSet, std::chrono::duration<double, std::micro> (t1 - t0).count());
+                }
+            }
+        };
+        std::vector<double> sw, base;
+        double tSet = 0, unused = 0;
+        render (true, sw, tSet);
+        render (false, base, unused);
+        double fadeSum = 0, baseSum = 0, fadeMax = 0, baseMax = 0;
+        for (int b = sb; b < sb + fadeBlocks; ++b)
+        {
+            fadeSum += sw[(size_t) b]; baseSum += base[(size_t) b];
+            fadeMax = std::max (fadeMax, sw[(size_t) b]); baseMax = std::max (baseMax, base[(size_t) b]);
+        }
+        std::printf ("%-42s %8.2f %8.1f %+8.1f %8.1f %+8.1f %8.1f %8.1f", c.name, tSet, sw[(size_t) sb],
+                     sw[(size_t) sb] - base[(size_t) sb], fadeSum / fadeBlocks, (fadeSum - baseSum) / fadeBlocks, fadeMax, baseMax);
+        if (c.prebuild) std::printf ("   (rebuild ahead: %.1f us)", tBuild);
+        std::printf ("\n");
+        if (&c == &cases[0])
+        {
+            std::printf ("   per block from the switch (switched / without):");
+            for (int b = sb - 2; b < sb + 8; ++b) std::printf (" %.0f/%.0f", sw[(size_t) b], base[(size_t) b]);
+            std::printf (" ... last fade block %.0f/%.0f, after %.0f/%.0f\n", sw[(size_t) (sb + fadeBlocks - 1)],
+                         base[(size_t) (sb + fadeBlocks - 1)], sw[(size_t) (sb + fadeBlocks + 1)], base[(size_t) (sb + fadeBlocks + 1)]);
+        }
+    }
+    std::printf ("block 0 = the block with the switch (+extra: vs the same block without it); fade avg / max over the 20 ms "
+                 "fade; base max = the same blocks without the switch\n");
+
+    // Newton work of the incoming (BLUE) and outgoing (RED) circuits per block after RED -> BLUE
+    for (double at : { 1.0, 0.8 })
+    {
+        const int sb = (int) (at * kBase) / kBlock;
+        AmpCore amp;
+        amp.prepare();
+        auto& in = amp.preamp.blue.net;
+        auto& out = amp.preamp.lead.net;
+        std::printf ("\nRED -> BLUE at %.2f s, Newton iterations per sample in block (BLUE incoming / RED outgoing; "
+                     "* = fallback restarts):\n  ", at);
+        double inLate = 0, outLate = 0;
+        int lateBlocks = 0;
+        for (int b = 0; b < sb + fadeBlocks; ++b)
+        {
+            AmpState st;
+            st.channel = b >= sb ? Preamp5150::Blue : Preamp5150::Red;
+            const long long i0 = in.statIterations, s0 = in.statSamples, f0 = in.statRetries + in.statFailures;
+            const long long o0 = out.statIterations, os0 = out.statSamples;
+            sink = sink + amp.block (diOs.data() + (size_t) b * kOsBlock, st.target, st.channel, st.boostOn, st.boostModel);
+            if (b < sb) continue;
+            const double itIn = (double) (in.statIterations - i0) / std::max (1LL, in.statSamples - s0);
+            const double itOut = (double) (out.statIterations - o0) / std::max (1LL, out.statSamples - os0);
+            const long long fb = in.statRetries + in.statFailures - f0;
+            if (b < sb + 6) std::printf ("b%d %.2f/%.2f%s  ", b - sb, itIn, itOut, fb > 0 ? "*" : "");
+            else if (b >= sb + 10) { inLate += itIn; outLate += itOut; ++lateBlocks; }
+        }
+        std::printf ("... blocks 10-119 avg %.2f/%.2f\n", inLate / lateBlocks, outLate / lateBlocks);
+    }
+}
+
+// The two-core split of a switch (dsp_test twocore): the fading-out circuit solved a block ahead on the rails of the
+// block before (Preamp5150::runAhead) against the exact per-sample coupling. Sound: null test of the speaker volts
+// (8x, so ultrasonics included), with the solver's own tolerance (reference precision vs normal) as the floor. Cost
+// per fade block: core A = incoming circuit + tone stack + power amp, core B = the circuit(s) fading out; two cores
+// ~ max (A + one sample of B, B) (core A waits for B's first sample, then B stays ahead), sync overhead not included.
+void twoCoreTest()
+{
+    using clk = std::chrono::steady_clock;
+    const auto diOs = guitarDI (kOs, kSeconds);
+    const int numBlocks = (int) (kBase * kSeconds) / kBlock;
+    struct Case { const char* name; Automation automate; };
+    const Case cases[] = {
+        { "RED <-> BLUE every 0.25 s", [] (double t, AmpState& s) { s.channel = (int) (t / 0.25) % 2 == 0 ? Preamp5150::Red : Preamp5150::Blue; } },
+        { "RED <-> BLUE, Gain 10", [] (double t, AmpState& s) { s.target[0] = 1.0; s.channel = (int) (t / 0.25) % 2 == 0 ? Preamp5150::Red : Preamp5150::Blue; } },
+        { "RED <-> BLUE + Precision Drive", [] (double t, AmpState& s) { s.boostOn = true; s.target[7] = 0.6;
+                                                                         s.channel = (int) (t / 0.25) % 2 == 0 ? Preamp5150::Red : Preamp5150::Blue; } },
+        { "RED -> BLUE -> CLEAN cycle", [] (double t, AmpState& s) {
+              const int c[3] = { Preamp5150::Red, Preamp5150::Blue, Preamp5150::Clean }; s.channel = c[(int) (t / 0.25) % 3]; } },
+    };
+    auto db = [] (double r) { return 20.0 * std::log10 (std::max (r, 1e-30)); };
+
+    std::printf ("\n== Two-core channel switch: fading-out circuit one block (8 samples) ahead on the rails of the block before ==\n");
+    std::printf ("sound: residual vs the exact render, dB re the signal (whole render RMS / worst 20 ms window RMS / peak); "
+                 "floor = solver tolerance (reference precision vs normal)\n");
+    std::printf ("%-32s %26s %26s\n", "", "run-ahead residual", "solver floor");
+    struct Cost { double serialAvg, serialMax, aMax, bMax, twoAvg, twoMax; int serialOver, twoOver, fadeBlocks; };
+    std::vector<Cost> costs;
+    for (const auto& c : cases)
+    {
+        // render: 0 exact, 1 run-ahead, 2 exact at reference precision; per block times when timed
+        auto render = [&] (int kind, std::vector<double>& y, std::vector<double>* total, std::vector<double>* ahead,
+                           std::vector<char>* fade)
+        {
+            AmpCore amp;
+            if (kind == 2) amp.preamp.setReferencePrecision (true);
+            amp.prepare();
+            if (kind == 1) { amp.twoCore = true; amp.preamp.enableRunAhead (true); }
+            y.assign ((size_t) numBlocks * kOsBlock, 0.0);
+            for (int b = 0; b < numBlocks; ++b)
+            {
+                AmpState st;
+                c.automate ((double) b * kBlock / kBase, st);
+                const auto t0 = clk::now();
+                if (b > 0) amp.preamp.setMode (st.channel); // as block() does: so fading() is known before it
+                const bool f = amp.preamp.fading();
+                sink = sink + amp.block (diOs.data() + (size_t) b * kOsBlock, st.target, st.channel, st.boostOn, st.boostModel);
+                const double us = std::chrono::duration<double, std::micro> (clk::now() - t0).count();
+                std::copy (amp.out, amp.out + kOsBlock, y.begin() + (ptrdiff_t) b * kOsBlock);
+                if (total) (*total)[(size_t) b] = std::min ((*total)[(size_t) b], us);
+                if (ahead) (*ahead)[(size_t) b] = std::min ((*ahead)[(size_t) b], amp.aheadUs);
+                if (fade) (*fade)[(size_t) b] = f;
+            }
+        };
+        std::vector<double> exact, lag, ref;
+        std::vector<double> tExact ((size_t) numBlocks, 1e30), tLag ((size_t) numBlocks, 1e30), tAhead ((size_t) numBlocks, 1e30);
+        std::vector<char> fade ((size_t) numBlocks, 0);
+        for (int r = 0; r < kRuns; ++r)
+        {
+            render (0, exact, &tExact, nullptr, &fade);
+            render (1, lag, &tLag, &tAhead, nullptr);
+        }
+        render (2, ref, nullptr, nullptr, nullptr);
+
+        auto nullStats = [&] (const std::vector<double>& a, const std::vector<double>& b, double& whole, double& win, double& peak)
+        {
+            double s2 = 0, r2 = 0, sp = 0, rp = 0, worstWin = 0;
+            const size_t winLen = (size_t) (0.02 * kOs);
+            double w2 = 0;
+            for (size_t i = 0; i < a.size(); ++i)
+            {
+                const double d = a[i] - b[i];
+                s2 += a[i] * a[i]; r2 += d * d;
+                sp = std::max (sp, std::abs (a[i])); rp = std::max (rp, std::abs (d));
+                w2 += d * d;
+                if ((i + 1) % winLen == 0) { worstWin = std::max (worstWin, w2 / (double) winLen); w2 = 0; }
+            }
+            const double sigRms = std::sqrt (s2 / (double) a.size());
+            whole = db (std::sqrt (r2 / (double) a.size()) / sigRms);
+            win = db (std::sqrt (worstWin) / sigRms);
+            peak = db (rp / sp);
+        };
+        double lw, lwin, lp, fw, fwin, fp;
+        nullStats (exact, lag, lw, lwin, lp);
+        nullStats (exact, ref, fw, fwin, fp);
+        std::printf ("%-32s %7.1f %7.1f %7.1f    %7.1f %7.1f %7.1f\n", c.name, lw, lwin, lp, fw, fwin, fp);
+
+        Cost k {};
+        for (int b = kSkipBlocks; b < numBlocks; ++b)
+        {
+            if (! fade[(size_t) b]) continue;
+            const double B = tAhead[(size_t) b], A = tLag[(size_t) b] - B, two = std::max (A + B / kOsBlock, B);
+            k.serialAvg += tExact[(size_t) b]; k.serialMax = std::max (k.serialMax, tExact[(size_t) b]);
+            k.aMax = std::max (k.aMax, A); k.bMax = std::max (k.bMax, B);
+            k.twoAvg += two; k.twoMax = std::max (k.twoMax, two);
+            k.serialOver += tExact[(size_t) b] > kDeadlineUs; k.twoOver += two > kDeadlineUs;
+            ++k.fadeBlocks;
+        }
+        k.serialAvg /= std::max (1, k.fadeBlocks); k.twoAvg /= std::max (1, k.fadeBlocks);
+        costs.push_back (k);
+    }
+
+    std::printf ("\ncost of the fade blocks (us; deadline %.1f us; fastest of %d runs per block):\n", kDeadlineUs, kRuns);
+    std::printf ("%-32s %16s %10s %10s %10s %16s %16s\n", "", "1 core avg / max", "core A max", "core B max", "", "2 cores avg / max",
+                 "over: 1 / 2 core");
+    for (size_t i = 0; i < costs.size(); ++i)
+    {
+        const auto& k = costs[i];
+        std::printf ("%-32s %7.1f / %6.1f %10.1f %10.1f %10s %7.1f / %6.1f %8d / %d of %d\n", cases[i].name, k.serialAvg, k.serialMax,
+                     k.aMax, k.bMax, "", k.twoAvg, k.twoMax, k.serialOver, k.twoOver, k.fadeBlocks);
+    }
+
+    // Where the residual is, and how it scales with the lag: audio band only (4th-order Butterworth low-pass at
+    // 20 kHz on both renders), RMS during the fades, in the 100 ms after each, and later; dB re the whole signal's RMS
+    std::printf ("\nrun-ahead residual by rail lag, audio band (<20 kHz), dB re signal RMS: whole / in fades / 0-100 ms after / "
+                 "later / peak re signal peak\n");
+    auto renderLag = [&] (const Automation& automate, int chunk, std::vector<double>& y, std::vector<char>& fade)
+    {
+        AmpCore amp;
+        amp.prepare();
+        if (chunk > 0) { amp.twoCore = true; amp.aheadChunk = chunk; amp.preamp.enableRunAhead (true); }
+        y.assign ((size_t) numBlocks * kOsBlock, 0.0);
+        fade.assign ((size_t) numBlocks, 0);
+        for (int b = 0; b < numBlocks; ++b)
+        {
+            AmpState st;
+            automate ((double) b * kBlock / kBase, st);
+            if (b > 0) amp.preamp.setMode (st.channel);
+            fade[(size_t) b] = amp.preamp.fading();
+            sink = sink + amp.block (diOs.data() + (size_t) b * kOsBlock, st.target, st.channel, st.boostOn, st.boostModel);
+            std::copy (amp.out, amp.out + kOsBlock, y.begin() + (ptrdiff_t) b * kOsBlock);
+        }
+        // audio band: two RBJ low-pass biquads (Q 0.5412, 1.3066) at 20 kHz
+        for (double q : { 0.5412, 1.3066 })
+        {
+            const double w0 = 2.0 * kPi * 20000.0 / kOs, al = std::sin (w0) / (2.0 * q), cs = std::cos (w0), a0 = 1.0 + al;
+            const double b0 = (1.0 - cs) / 2.0 / a0, b1 = (1.0 - cs) / a0, a1 = -2.0 * cs / a0, a2 = (1.0 - al) / a0;
+            double x1 = 0, x2 = 0, y1 = 0, y2 = 0;
+            for (auto& v : y)
+            {
+                const double o = b0 * v + b1 * x1 + b0 * x2 - a1 * y1 - a2 * y2;
+                x2 = x1; x1 = v; y2 = y1; y1 = o; v = o;
+            }
+        }
+    };
+    for (int ci : { 0, 1 })
+    {
+        std::vector<double> exact, lag;
+        std::vector<char> fade, unused;
+        renderLag (cases[ci].automate, 0, exact, fade);
+        for (int chunk : { 1, 8, 64 })
+        {
+            renderLag (cases[ci].automate, chunk, lag, unused);
+            double s2 = 0, sp = 0, rp = 0, rIn = 0, rAfter = 0, rLater = 0;
+            long long nIn = 0, nAfter = 0, nLater = 0;
+            int sinceFade = 1 << 30;
+            const int skip = kSkipBlocks * kOsBlock;
+            for (size_t i = (size_t) skip; i < exact.size(); ++i)
+            {
+                const size_t b = i / kOsBlock;
+                if (fade[b]) sinceFade = 0; else if (i % kOsBlock == 0) sinceFade += kOsBlock;
+                const double d = exact[i] - lag[i];
+                s2 += exact[i] * exact[i];
+                sp = std::max (sp, std::abs (exact[i])); rp = std::max (rp, std::abs (d));
+                if (fade[b]) { rIn += d * d; ++nIn; }
+                else if (sinceFade < (int) (0.1 * kOs)) { rAfter += d * d; ++nAfter; }
+                else { rLater += d * d; ++nLater; }
+            }
+            const double sig = std::sqrt (s2 / (double) (exact.size() - (size_t) skip));
+            auto rel = [&] (double r2, long long n) { return n > 0 ? db (std::sqrt (r2 / (double) n) / sig) : -999.0; };
+            std::printf ("%-26s lag %2d samples (%5.1f us): %7.1f %7.1f %7.1f %7.1f   peak %7.1f\n", cases[ci].name, chunk,
+                         1e6 * chunk / kOs, rel (rIn + rAfter + rLater, nIn + nAfter + nLater), rel (rIn, nIn), rel (rAfter, nAfter),
+                         rel (rLater, nLater), db (rp / sp));
+        }
+    }
+}
+
+void run()
+{
+    const auto diOs = guitarDI (kOs, kSeconds), diComp = guitarDI (kCompRate, kSeconds), di = guitarDI (kBase, kSeconds);
+    const int numBlocks = (int) (kBase * kSeconds) / kBlock;
+    std::vector<float> diF (di.size());
+    for (size_t i = 0; i < di.size(); ++i) diF[i] = (float) di[i];
+    const double* xOs = diOs.data();
+    const double* xComp = diComp.data();
+
+    std::printf ("\n== 8-sample blocks at 48 kHz: cost per block (us; deadline %.1f us; fastest of %d runs per block) ==\n",
+                 kDeadlineUs, kRuns);
+    std::printf ("amp at 8x (64 samples / block, no oversampling filters), 1176 at 2x (16 samples / block)\n");
+    std::printf ("%-38s %6s %6s %6s %7s %6s  %8s %7s %6s %7s\n", "", "avg", "p99", "p99.9", "max", "of dl", "max at", "raw max", "over",
+                 "1st");
+
+    // single modules, knobs still
+    runCase ("Precision Drive", numBlocks, [&] {
+        auto pd = std::make_shared<PrecisionDrive>(); pd->prepare (kOs); pd->setControls (0.5, 0.5, 3, 0.7);
+        return Step ([pd, &diOs] (int b) { double a = 0; for (int i = 0; i < kOsBlock; ++i) a += pd->process (diOs[(size_t) (b * kOsBlock + i)]); sink = sink + a; });
+    });
+    runCase ("TS9", numBlocks, [&] {
+        auto ts = std::make_shared<TubeScreamer9>(); ts->prepare (kOs); ts->setControls (0.5, 0.5, 0.7);
+        return Step ([ts, &diOs] (int b) { double a = 0; for (int i = 0; i < kOsBlock; ++i) a += ts->process (diOs[(size_t) (b * kOsBlock + i)]); sink = sink + a; });
+    });
+    const char* preNames[] = { "Preamp CLEAN", "Preamp BLUE", "Preamp RED" };
+    for (int mode : { 0, 1, 2 })
+        runCase (preNames[mode], numBlocks, [&, mode] {
+            auto pre = std::make_shared<Preamp5150>(); pre->prepare (kOs); pre->setModeNow (mode); pre->setControls (0.7, 0.5, 0.5, 0.6, 0.5);
+            return Step ([pre, &diOs] (int b) { double a = 0; for (int i = 0; i < kOsBlock; ++i) a += pre->process (diOs[(size_t) (b * kOsBlock + i)]); sink = sink + a; });
+        });
+    {
+        // the power amp on the RED preamp's output, so its operating point is realistic
+        std::vector<double> pv (diOs.size());
+        {
+            Preamp5150 pre; pre.prepare (kOs); pre.setModeNow (Preamp5150::Red); pre.setControls (0.7, 0.5, 0.5, 0.6, 0.5);
+            for (size_t i = 0; i < pv.size(); ++i) pv[i] = pre.process (diOs[i]);
+        }
+        runCase ("Power amp (after RED)", numBlocks, [&] {
+            auto pa = std::make_shared<PowerAmp5150>(); pa->setControls (0.5, 0.5); pa->prepare (kOs);
+            return Step ([pa, &pv] (int b) { double a = 0; for (int i = 0; i < kOsBlock; ++i) a += pa->process (pv[(size_t) (b * kOsBlock + i)]); sink = sink + a; });
+        });
+    }
+
+    // the full amp as AmpSim runs it, with automation
+    auto ampCase = [&] (const char* name, Automation automate) { runAmpCase (name, numBlocks, diOs.data(), automate); };
+    ampCase ("AMP RED, knobs still", [] (double, AmpState&) {});
+    ampCase ("AMP RED + Precision Drive", [] (double, AmpState& s) { s.boostOn = true; });
+    ampCase ("AMP RED, Gain turning", [] (double t, AmpState& s) { s.target[0] = 0.2 + 0.8 * tri (t, 1.0); });
+    ampCase ("AMP RED, Presence + Resonance turning", [] (double t, AmpState& s) { s.target[5] = tri (t, 0.7); s.target[6] = tri (t, 1.1); });
+    ampCase ("AMP RED, Bass + Mid + Treble turning", [] (double t, AmpState& s) {
+        s.target[1] = tri (t, 0.9); s.target[2] = tri (t, 1.3); s.target[3] = tri (t, 0.6); });
+    ampCase ("AMP RED, Master turning", [] (double t, AmpState& s) { s.target[4] = 0.1 + 0.5 * tri (t, 0.8); });
+    ampCase ("AMP RED + drive, every knob turning", everyKnob);
+    ampCase ("AMP channel RED <-> BLUE every 0.25 s", [] (double t, AmpState& s) {
+        s.channel = (int) (t / 0.25) % 2 == 0 ? Preamp5150::Red : Preamp5150::Blue; });
+    ampCase ("AMP channel RED -> BLUE -> CLEAN cycle", [] (double t, AmpState& s) {
+        const int c[3] = { Preamp5150::Red, Preamp5150::Blue, Preamp5150::Clean };
+        s.channel = c[(int) (t / 0.25) % 3]; });
+    ampCase ("AMP drive PD <-> TS9 every 0.25 s", [] (double t, AmpState& s) { s.boostOn = true; s.boostModel = (int) (t / 0.25) % 2; });
+
+    // the 1176 at 2x
+    auto compCase = [&] (const char* name, CompControls controls, bool everyBlock) {
+        runCompCase (name, numBlocks, diComp.data(), controls, everyBlock);
+    };
+    compCase ("1176 IN 7, atk/rel 5, 4:1", [] (double) { return Urei1176::fromKnobs (7, 8.5, 5, 5, 0); }, false);
+    compCase ("1176 IN 10, atk/rel 7, ALL", [] (double) { return Urei1176::fromKnobs (10, 8.5, 7, 7, 4); }, false);
+    compCase ("1176 Input + Attack + Release turning", [] (double t) {
+        return Urei1176::fromKnobs (3 + 7 * tri (t, 0.9), 8.5, 1 + 6 * tri (t, 0.7), 1 + 6 * tri (t, 1.1), 1); }, true);
+
+    // 48 kHz modules
+    runCase ("3-band gate", numBlocks, [&] {
+        auto g = std::make_shared<MultibandGate>(); g->prepare (kBase);
+        auto buf = std::make_shared<std::vector<float>> (diF);
+        auto key = std::make_shared<std::vector<float>> (diF);
+        return Step ([g, buf, key] (int b) { MultibandGate::Settings st; g->process (buf->data() + b * kBlock, key->data() + b * kBlock, kBlock, st); });
+    });
+    for (int mode : { (int) PitchShifter::Live, (int) PitchShifter::HQ })
+        runCase (mode == PitchShifter::Live ? "Transpose LIVE (-2 st)" : "Transpose HQ (-2 st)", numBlocks, [&, mode] {
+            auto ps = std::make_shared<PitchShifter>(); ps->prepare (kBase); ps->setParams (-2, mode);
+            auto buf = std::make_shared<std::vector<float>> (diF);
+            return Step ([ps, buf] (int b) { ps->process (buf->data() + b * kBlock, kBlock); });
+        });
+
+    // what one core would have to do: LIVE transpose + 1176 + amp with drive and every knob turning + gate
+    runCase ("CHAIN: transpose+1176+amp+gate, knobs", numBlocks, [&] {
+        auto ps = std::make_shared<PitchShifter>(); ps->prepare (kBase); ps->setParams (-2, PitchShifter::Live);
+        auto m = std::make_shared<Urei1176>(); m->setControls (Urei1176::fromKnobs (7, 8.5, 5, 5, 0)); m->prepare (kCompRate);
+        auto amp = std::make_shared<AmpCore>(); amp->prepare();
+        auto g = std::make_shared<MultibandGate>(); g->prepare (kBase);
+        auto buf = std::make_shared<std::vector<float>> (diF);
+        auto key = std::make_shared<std::vector<float>> (diF);
+        return Step ([=] (int b) {
+            ps->process (buf->data() + b * kBlock, kBlock);
+            double a = 0;
+            for (int i = 0; i < kCompBlock; ++i) a += m->processSample (xComp[(size_t) (b * kCompBlock + i)]);
+            AmpState st;
+            everyKnob ((double) b * kBlock / kBase, st);
+            a += amp->block (xOs + (size_t) b * kOsBlock, st.target, st.channel, st.boostOn, st.boostModel);
+            MultibandGate::Settings gs;
+            g->process (buf->data() + b * kBlock, key->data() + b * kBlock, kBlock, gs);
+            sink = sink + a;
+        });
+    });
+    std::printf ("\nof dl = max as %% of the deadline; max at = where the slowest block is; raw max = slowest single block "
+                 "of all runs (incl. OS interruptions); over = blocks past the deadline (fastest-run times); 1st = the first "
+                 "block (channel reset, every knob applied), left out of the other columns with the rest of the first 10 ms\n");
+}
+} // namespace block8
+
 static void transposeTests()
 {
     constexpr double tfs = 48000.0;
@@ -1072,6 +1721,9 @@ int main (int argc, char** argv)
     if (argc > 1 && std::string (argv[1]) == "tubes") { tubeSetTests(); return 0; }
     if (argc > 1 && std::string (argv[1]) == "fault") return faultRecoveryTests() ? 0 : 1;
     if (argc > 1 && std::string (argv[1]) == "cpu") { cpuModules(); return 0; }
+    if (argc > 1 && std::string (argv[1]) == "block8") { block8::run(); return 0; }
+    if (argc > 1 && std::string (argv[1]) == "switch8") { block8::switchProfile(); return 0; }
+    if (argc > 1 && std::string (argv[1]) == "twocore") { block8::twoCoreTest(); return 0; }
     if (argc > 1 && std::string (argv[1]) == "tables") { tubeTableAccuracy(); return 0; }
     if (argc > 1 && std::string (argv[1]) == "tube") { pentodeDatasheet(); return 0; }
     if (argc > 1 && std::string (argv[1]) == "chain") { chainLevels(); return 0; }

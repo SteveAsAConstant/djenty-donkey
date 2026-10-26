@@ -1,5 +1,6 @@
 ﻿#pragma once
 #include <algorithm>
+#include <vector>
 #include <cmath>
 #include "LinearNetwork.h"
 #include "FullPreamp5150.h"
@@ -282,11 +283,16 @@ public:
             const double s = 0.5 - 0.5 * std::cos (kPi * (double) fadePos / (double) fadeLen); // 0 -> 1
             x = 0.0;
             double rs = 0.0;
+            aheadCur = aheadPos < aheadN ? aheadPos++ : -1;
             for (int c = 0; c < kPaths; ++c)
             {
                 const bool running = w[c] > 0.0 || c == path;
                 w[c] = fadePos >= fadeLen ? (c == path ? 1.0 : 0.0) : w0[c] * (1.0 - s) + (c == path ? s : 0.0);
-                if (running) x += w[c] * runPath (c, vin) * trim[c]; // a fading-out channel runs to the end
+                if (running) // a fading-out channel runs to the end
+                {
+                    const double y = aheadCur >= 0 && aheadRun[c] ? aheadOut[(size_t) (c * kAheadHist + aheadCur)] : runPath (c, vin);
+                    x += w[c] * y * trim[c];
+                }
                 rs += w[c] * sourceR (c);
             }
             if (fadePos % 32 == 1 || fadePos == fadeLen) // the tone stack's source impedance slides with the fade
@@ -312,9 +318,52 @@ public:
         blueOff.setReferencePrecision (on);
     }
 
+    // ---- Two-core split of a channel-switch fade (test hook: dsp_test switch8; off unless enabled) ----
+    // During a fade a second core could solve the circuits fading out a whole block ahead of the first core, if they
+    // run on the supply rails of the block before (the power amp on the first core has not computed this block's
+    // yet). enableRunAhead() keeps a rail history; runAhead (vin, n) then solves those circuits for the next n samples
+    // (n <= the samples since enabling) and process() / railCurrents() take their outputs and draws from it.
+    // Without runAhead() calls, everything stays the exact per-sample coupling.
+    void enableRunAhead (bool on)
+    {
+        aheadOn = on;
+        hist1.assign (kAheadHist, 0.0); hist2.assign (kAheadHist, 0.0);
+        aheadOut.assign (kPaths * kAheadHist, 0.0); aheadI1.assign (kPaths * kAheadHist, 0.0); aheadI2.assign (kPaths * kAheadHist, 0.0);
+        histPos = histFilled = aheadN = aheadPos = 0;
+        aheadCur = -1;
+    }
+    bool fading() const { return fadePos < fadeLen; }
+
+    void runAhead (const double* vin, int n)
+    {
+        aheadN = aheadPos = 0;
+        if (! aheadOn || fadePos >= fadeLen) return;
+        n = std::min ({ n, fadeLen - fadePos, histFilled });
+        for (int c = 0; c < kPaths; ++c)
+        {
+            aheadRun[c] = c != path && w[c] > 0.0; // fading out: runs to the end of the fade
+            if (! aheadRun[c]) continue;
+            for (int k = 0; k < n; ++k)
+            {
+                const int h = (histPos - n + k + kAheadHist) % kAheadHist; // the same sample of the block before
+                setPathRails (c, hist1[(size_t) h], hist2[(size_t) h]);
+                const size_t j = (size_t) (c * kAheadHist + k);
+                aheadOut[j] = runPath (c, vin[k]);
+                pathCurrents (c, aheadI1[j], aheadI2[j]);
+            }
+        }
+        aheadN = n;
+    }
+
     // Supply rails V1+ / V2+ for the next sample (from PowerAmp5150's supply chain)
     void setRails (double v1, double v2)
     {
+        if (aheadOn)
+        {
+            hist1[(size_t) histPos] = v1; hist2[(size_t) histPos] = v2;
+            histPos = (histPos + 1) % kAheadHist;
+            histFilled = std::min (histFilled + 1, kAheadHist);
+        }
         lead.setRails (v1, v2);
         blue.setRails (v1, v2);
         clean.setRails (v1);
@@ -333,7 +382,13 @@ public:
                 if (w[c] > 0.0)
                 {
                     double o1, o2;
-                    pathCurrents (c, o1, o2);
+                    if (aheadCur >= 0 && aheadRun[c])
+                    {
+                        o1 = aheadI1[(size_t) (c * kAheadHist + aheadCur)];
+                        o2 = aheadI2[(size_t) (c * kAheadHist + aheadCur)];
+                    }
+                    else
+                        pathCurrents (c, o1, o2);
                     i1 += w[c] * o1;
                     i2 += w[c] * o2;
                 }
@@ -432,6 +487,16 @@ private:
     double lastPreampOut = 0.0;
     double idleI1V2A = 0.0, idleI2Late = 0.0; // CLEAN: rail draw of the bypassed stages
     bool noise = false;
+
+    // run-ahead split (enableRunAhead): rails of the last kAheadHist samples, and per circuit the outputs / rail
+    // currents of the block solved ahead (aheadCur: index of the sample in process(), -1 outside a run-ahead block)
+    static constexpr int kAheadHist = 512;
+    bool aheadOn = false;
+    std::vector<double> hist1, hist2, aheadOut, aheadI1, aheadI2; // aheadOut etc.: [path * kAheadHist + k]
+    int histPos = 0, histFilled = 0, aheadN = 0, aheadPos = 0, aheadCur = -1;
+    bool aheadRun[kPaths] {};
+
+    void setPathRails (int p, double v1, double v2) { if (p == PClean) clean.setRails (v1); else full (p).setRails (v1, v2); }
 
     LinearNetwork<8> toneStack;
     int tsSrc = 0, tsTrebUp = 0, tsTrebLo = 0, tsBass = 0, tsMidUp = 0, tsMidLo = 0;

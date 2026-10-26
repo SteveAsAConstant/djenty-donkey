@@ -3,6 +3,7 @@
 #include <cassert>
 #include <cmath>
 #include <vector>
+#include "Simd.h"
 
 namespace vamp
 {
@@ -147,6 +148,11 @@ public:
         P.assign ((size_t) m * nz, 0.0); // over all of z, zero in the port-current columns
         M.assign ((size_t) numS * nz, 0.0);
         O.assign (outputs.size() * (size_t) nz, 0.0);
+        // the same column by column (per-sample products, matVecT), rows padded to a multiple of 4 (the AVX loads)
+        ldP = (m + 3) & ~3; ldM = (numS + 3) & ~3; ldO = ((int) outputs.size() + 3) & ~3;
+        Pt.assign ((size_t) nz * ldP, 0.0);
+        Mt.assign ((size_t) nz * ldM, 0.0);
+        Ot.assign ((size_t) nz * ldO, 0.0);
         dirty = true;
         reset();
     }
@@ -188,10 +194,10 @@ public:
             for (int k = 0; k < numSrc; ++k) if (noiseAmp[(size_t) k] > 0.0) zu[k] += noiseAmp[(size_t) k] * noiseUniform();
             double* zn = z.data() + nzMain;
             for (int k = 0; k < numNoise; ++k) zn[k] = noiseAmp[(size_t) (numSrc + k)] * noiseUniform();
-            matVec (P.data(), m, nz, nz, z.data(), p0.data()); // (the port-current columns of P are 0)
+            matVecT (Pt.data(), ldP, m, nz, z.data(), p0.data()); // (the port-current columns of P are 0)
         }
         else
-            matVec (P.data(), m, numS + numSrc, nz, z.data(), p0.data());
+            matVecT (Pt.data(), ldP, m, numS + numSrc, z.data(), p0.data());
         return p0;
     }
 
@@ -205,7 +211,7 @@ public:
         evalOutputs (iPorts);
         const int cols = noiseOn ? nz : nzMain;
         double buf[kMaxStates];
-        matVec (M.data(), numS, cols, nz, z.data(), buf);
+        matVecT (Mt.data(), ldM, numS, cols, z.data(), buf);
         std::copy (buf, buf + numS, z.begin());
     }
 
@@ -216,7 +222,8 @@ public:
         const int cols = noiseOn ? nz : nzMain;
         double buf[kMaxStates];
         const int numO = (int) outputs.size();
-        matVec (O.data(), numO, cols, nz, z.data(), buf);
+        if (numO <= 2) matVec (O.data(), numO, cols, nz, z.data(), buf); // one or two dot products: by row
+        else matVecT (Ot.data(), ldO, numO, cols, z.data(), buf);
         for (int o = 0; o < numO; ++o) x[(size_t) outputs[(size_t) o]] = buf[o];
     }
 
@@ -225,6 +232,10 @@ public:
     void markOutput (int node) { outputs.push_back (node); dirty = true; }
 
     void markDirty() { dirty = true; }
+
+    // the matrix rebuild computeP0() would do next, ahead of time (allocation-free; the same matrices either way)
+    bool isDirty() const { return dirty; }
+    void ensureBuilt() { if (dirty) rebuild(); }
 
 private:
     struct Res { int a, b; double g; bool noisy; };
@@ -269,7 +280,124 @@ public:
         }
     }
 
+    // out = A v with A stored column by column: At[j * ld + r] = A[r][j] (ld a multiple of 4, the pad rows 0). Up to
+    // 16 rows at a time in eight 2-wide registers (32 in eight 4-wide AVX registers where the CPU has AVX) across all
+    // columns: eight independent sums, so the adds overlap instead of waiting on each other (a tail computes and
+    // drops the pad rows). Each row is still summed in column order with a separate multiply and add, so the result
+    // is bit-identical to matVec (and the plain loop) on every path.
+    static void matVecT (const double* At, int ld, int rows, int cols, const double* v, double* out)
+    {
+#if VAMP_SIMD_SSE2
+        if (vampHasAvx()) { matVecTAvx (At, ld, rows, cols, v, out); return; }
+#endif
+#if VAMP_SIMD_SSE2 || VAMP_SIMD_NEON
+        for (int r = 0; r < rows; r += 16)
+        {
+            const int pairs = std::min (8, (rows - r + 1) / 2);
+            double* o = out + r;
+            double tmp[16];
+            const bool tail = r + 2 * pairs > rows; // an odd count: the last pair's pad row goes to tmp
+            switch (pairs)
+            {
+                case 8: tileT<8> (At + r, ld, cols, v, tail ? tmp : o); break;
+                case 7: tileT<7> (At + r, ld, cols, v, tail ? tmp : o); break;
+                case 6: tileT<6> (At + r, ld, cols, v, tail ? tmp : o); break;
+                case 5: tileT<5> (At + r, ld, cols, v, tail ? tmp : o); break;
+                case 4: tileT<4> (At + r, ld, cols, v, tail ? tmp : o); break;
+                case 3: tileT<3> (At + r, ld, cols, v, tail ? tmp : o); break;
+                case 2: tileT<2> (At + r, ld, cols, v, tail ? tmp : o); break;
+                default: tileT<1> (At + r, ld, cols, v, tail ? tmp : o); break;
+            }
+            if (tail) std::copy (tmp, tmp + (rows - r), o);
+        }
+#else
+        for (int r = 0; r < rows; ++r)
+        {
+            double s = 0.0;
+            for (int j = 0; j < cols; ++j) s += At[(size_t) j * ld + r] * v[j];
+            out[r] = s;
+        }
+#endif
+    }
+
+#if VAMP_SIMD_SSE2 || VAMP_SIMD_NEON
+#if VAMP_SIMD_SSE2
+    // matVecT with 4-wide AVX registers, up to 32 rows at a time
+    VAMP_AVX_FN static void matVecTAvx (const double* At, int ld, int rows, int cols, const double* v, double* out)
+    {
+        for (int r = 0; r < rows; r += 32)
+        {
+            const int quads = std::min (8, (rows - r + 3) / 4);
+            double* o = out + r;
+            double tmp[32];
+            const bool tail = r + 4 * quads > rows; // the pad rows of the last quad go to tmp
+            double* dst = tail ? tmp : o;
+            switch (quads)
+            {
+                case 8: tileAvx<8> (At + r, ld, cols, v, dst); break;
+                case 7: tileAvx<7> (At + r, ld, cols, v, dst); break;
+                case 6: tileAvx<6> (At + r, ld, cols, v, dst); break;
+                case 5: tileAvx<5> (At + r, ld, cols, v, dst); break;
+                case 4: tileAvx<4> (At + r, ld, cols, v, dst); break;
+                case 3: tileAvx<3> (At + r, ld, cols, v, dst); break;
+                case 2: tileAvx<2> (At + r, ld, cols, v, dst); break;
+                default: tileAvx<1> (At + r, ld, cols, v, dst); break;
+            }
+            if (tail) for (int k = 0; k < rows - r; ++k) o[k] = tmp[k];
+        }
+        _mm256_zeroupper(); // back to SSE code without the transition penalty
+    }
+
+    // 4 Q rows of matVecTAvx, all columns
+    template <int Q>
+    VAMP_AVX_FN static inline void tileAvx (const double* At, int ld, int cols, const double* v, double* out)
+    {
+        __m256d s[Q];
+        for (int k = 0; k < Q; ++k) s[k] = _mm256_setzero_pd();
+        for (int j = 0; j < cols; ++j, At += ld)
+        {
+            const __m256d vj = _mm256_set1_pd (v[j]);
+            for (int k = 0; k < Q; ++k) s[k] = _mm256_add_pd (s[k], _mm256_mul_pd (_mm256_loadu_pd (At + 4 * k), vj));
+        }
+        for (int k = 0; k < Q; ++k) _mm256_storeu_pd (out + 4 * k, s[k]);
+    }
+#endif
+
+    // 2 P rows of matVecT, all columns
+    template <int P>
+    static inline void tileT (const double* At, int ld, int cols, const double* v, double* out)
+    {
+  #if VAMP_SIMD_SSE2
+        __m128d s[P];
+        for (int k = 0; k < P; ++k) s[k] = _mm_setzero_pd();
+        for (int j = 0; j < cols; ++j, At += ld)
+        {
+            const __m128d vj = _mm_set1_pd (v[j]);
+            for (int k = 0; k < P; ++k) s[k] = _mm_add_pd (s[k], _mm_mul_pd (_mm_loadu_pd (At + 2 * k), vj));
+        }
+        for (int k = 0; k < P; ++k) _mm_storeu_pd (out + 2 * k, s[k]);
+  #else
+        float64x2_t s[P];
+        for (int k = 0; k < P; ++k) s[k] = vdupq_n_f64 (0.0);
+        for (int j = 0; j < cols; ++j, At += ld)
+        {
+            const float64x2_t vj = vdupq_n_f64 (v[j]);
+            for (int k = 0; k < P; ++k) s[k] = vaddq_f64 (s[k], vmulq_f64 (vld1q_f64 (At + 2 * k), vj));
+        }
+        for (int k = 0; k < P; ++k) vst1q_f64 (out + 2 * k, s[k]);
+  #endif
+    }
+#endif
+
 private:
+    // row-major A (rows x cols) -> At column by column with leading dimension ld (the pad rows stay 0)
+    static void transpose (const std::vector<double>& A, int rows, int cols, std::vector<double>& At, int ld)
+    {
+        for (int r = 0; r < rows; ++r)
+            for (int j = 0; j < cols; ++j)
+                At[(size_t) j * ld + r] = A[(size_t) r * cols + j];
+    }
+
     static void stamp (std::vector<double>& A, int n, int a, int b, double g)
     {
         if (a >= 0) A[(size_t) a * n + a] += g;
@@ -396,6 +524,10 @@ private:
             for (int j = 0; j < nz; ++j)
                 O[o * (size_t) nz + j] = nodeRow (outputs[o], j);
 
+        transpose (P, m, nz, Pt, ldP);
+        transpose (M, numS, nz, Mt, ldM);
+        transpose (O, (int) outputs.size(), nz, Ot, ldO);
+
         // thermal noise per sample, white up to Nyquist (one-sided density 4kT R, i.e. variance 2kT R fs), as uniform
         // samples of the same variance: a series voltage for a noisy source, a parallel current for a resistor
         {
@@ -465,6 +597,8 @@ private:
     std::vector<int> outputs;
 
     std::vector<double> K, P, M, O;
+    std::vector<double> Pt, Mt, Ot; // P, M, O column by column (rows padded to ldP / ldM / ldO): the per-sample products
+    int ldP = 0, ldM = 0, ldO = 0;
     std::vector<double> z;     // [s; u; i]: reactive states, then the inputs and port currents of this sample
     std::vector<double> x, p0; // x: output node voltages (others stay 0)
     std::vector<double> zSaved, xSaved;

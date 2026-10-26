@@ -5,6 +5,7 @@
 #include <vector>
 #include "FFT.h"
 #include "Filters.h"
+#include "Simd.h"
 
 namespace vamp
 {
@@ -31,6 +32,8 @@ public:
         int size = 1;
         while (size < sweep + search + 4 * xfade + corrLen + 64) size <<= 1;
         buf.assign ((size_t) size, 0.0f);
+        seg.assign ((size_t) (search + corrLen + 4), 0.0); // startSplice work buffers
+        ref.assign ((size_t) (corrLen / 2 + 2), 0.0);
         mask = size - 1;
         setSemitones (semis, true);
         reset();
@@ -110,20 +113,78 @@ private:
         const int hi = step > 0.0 ? dMin + search : dMax;
         const int refStart = w - (int) std::floor (dA);
 
+        // The reference window (every 2nd sample, as doubles) and its energy, once: the same for every candidate.
+        // Candidate d's window starts at w - d; all of them lie in one straight run seg[] from w - hi on, so
+        // candidate d's sample m is seg[hi - d + m] (no ring-buffer masking in the inner loop).
+        const int nRef = (corrLen + 1) / 2;
+        double xx = 0.0;
+        for (int k = 0; k < nRef; ++k)
+        {
+            const double a = buf[(size_t) ((refStart + 2 * k) & mask)];
+            ref[(size_t) k] = a;
+            xx += a * a;
+        }
+        const int span = hi - lo + corrLen;
+        for (int k = 0; k < span; ++k) seg[(size_t) k] = buf[(size_t) ((w - hi + k) & mask)];
+
+        // xy and yy per candidate, each summed over m in the same order as one candidate at a time (four
+        // candidates side by side: the results are bit-identical, the sums no longer wait on each other)
         double best = -2.0;
         int bestD = step > 0.0 ? dMin : dMax;
-        for (int d = lo; d <= hi; ++d)
+        auto consider = [&] (int d, double xy, double yy)
         {
-            const int candStart = w - d;
-            double xy = 0.0, xx = 0.0, yy = 0.0;
-            for (int m = 0; m < corrLen; m += 2)
-            {
-                const double a = buf[(size_t) ((refStart + m) & mask)];
-                const double b = buf[(size_t) ((candStart + m) & mask)];
-                xy += a * b; xx += a * a; yy += b * b;
-            }
             const double c = xy / std::sqrt (xx * yy + 1e-20);
             if (c > best) { best = c; bestD = d; }
+        };
+        int d = lo;
+#if VAMP_SIMD_SSE2 || VAMP_SIMD_NEON
+        for (; d + 3 <= hi; d += 4)
+        {
+            // lanes: (d+1, d) and (d+3, d+2): seg[o - 1], seg[o] with o = hi - d + 2k
+            const double* s0 = seg.data() + (hi - d - 1);
+            const double* s1 = seg.data() + (hi - d - 3);
+  #if VAMP_SIMD_SSE2
+            __m128d xy0 = _mm_setzero_pd(), yy0 = xy0, xy1 = xy0, yy1 = xy0;
+            for (int k = 0; k < nRef; ++k)
+            {
+                const __m128d a = _mm_set1_pd (ref[(size_t) k]);
+                const __m128d b0 = _mm_loadu_pd (s0 + 2 * k), b1 = _mm_loadu_pd (s1 + 2 * k);
+                xy0 = _mm_add_pd (xy0, _mm_mul_pd (a, b0)); yy0 = _mm_add_pd (yy0, _mm_mul_pd (b0, b0));
+                xy1 = _mm_add_pd (xy1, _mm_mul_pd (a, b1)); yy1 = _mm_add_pd (yy1, _mm_mul_pd (b1, b1));
+            }
+            double xyv[4], yyv[4];
+            _mm_storeu_pd (xyv, xy0); _mm_storeu_pd (xyv + 2, xy1);
+            _mm_storeu_pd (yyv, yy0); _mm_storeu_pd (yyv + 2, yy1);
+  #else
+            float64x2_t xy0 = vdupq_n_f64 (0.0), yy0 = xy0, xy1 = xy0, yy1 = xy0;
+            for (int k = 0; k < nRef; ++k)
+            {
+                const float64x2_t a = vdupq_n_f64 (ref[(size_t) k]);
+                const float64x2_t b0 = vld1q_f64 (s0 + 2 * k), b1 = vld1q_f64 (s1 + 2 * k);
+                xy0 = vaddq_f64 (xy0, vmulq_f64 (a, b0)); yy0 = vaddq_f64 (yy0, vmulq_f64 (b0, b0));
+                xy1 = vaddq_f64 (xy1, vmulq_f64 (a, b1)); yy1 = vaddq_f64 (yy1, vmulq_f64 (b1, b1));
+            }
+            double xyv[4], yyv[4];
+            vst1q_f64 (xyv, xy0); vst1q_f64 (xyv + 2, xy1);
+            vst1q_f64 (yyv, yy0); vst1q_f64 (yyv + 2, yy1);
+  #endif
+            // lane order (d+1, d, d+3, d+2) -> ascending d, as the scalar search
+            consider (d, xyv[1], yyv[1]);
+            consider (d + 1, xyv[0], yyv[0]);
+            consider (d + 2, xyv[3], yyv[3]);
+            consider (d + 3, xyv[2], yyv[2]);
+        }
+#endif
+        for (; d <= hi; ++d)
+        {
+            const double* s = seg.data() + (hi - d);
+            double xy = 0.0, yy = 0.0;
+            for (int k = 0; k < nRef; ++k)
+            {
+                const double b = s[2 * k];
+                xy += ref[(size_t) k] * b; yy += b * b;
+            }
+            consider (d, xy, yy);
         }
 
         dB = (double) bestD + (dA - std::floor (dA)); // keep the fractional phase
@@ -147,6 +208,7 @@ private:
 
     double fs = 48000.0;
     std::vector<float> buf;
+    std::vector<double> seg, ref; // the candidate windows / the reference window of a splice search
     int mask = 0, w = 0;
     int corrLen = 240, sweep = 960, search = 768, xfade = 384, dMin = 256, dMax = 1216;
     int semis = 0, fadePos = 0;

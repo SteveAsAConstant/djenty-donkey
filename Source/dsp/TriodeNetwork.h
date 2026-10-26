@@ -2,6 +2,7 @@
 #include <algorithm>
 #include <cmath>
 #include "DKCircuit.h"
+#include "PortSolve.h"
 #include "TriodeStage.h"
 #include "TubeNoise.h"
 
@@ -110,14 +111,14 @@ public:
             ++iterations;
             evalDevices (i, d);
 
-            double J[M][M + 1], maxF = 0.0;
+            double rhs[M], maxF = 0.0; // -F
             for (int r = 0; r < M; ++r)
             {
                 double Ki = 0.0;
                 for (int k = 0; k < M; ++k) Ki += K[(size_t) r * M + k] * i[k];
                 const double F = p[r] - p0[(size_t) r] - Ki;
                 maxF = std::max (maxF, std::abs (F) * (r % 2 == 0 ? 1.0 : 10.0)); // grids 10x stricter
-                J[r][M] = -F;
+                rhs[r] = -F;
             }
             if (damped)
             {
@@ -133,16 +134,10 @@ public:
             }
             const bool converged = maxF < resTol; // the final step is still applied (error ~ residual^2)
 
-            for (int r = 0; r < M; ++r)
-                for (int t = 0; t < NT; ++t)
-                {
-                    const int c0 = 2 * t, c1 = c0 + 1; // plate current depends on both ports, grid current on c1
-                    J[r][c0] = (r == c0 ? 1.0 : 0.0) - K[(size_t) r * M + c0] * d[c0][0];
-                    J[r][c1] = (r == c1 ? 1.0 : 0.0) - K[(size_t) r * M + c0] * d[c0][1] - K[(size_t) r * M + c1] * d[c1][1];
-                }
-
+            // (I - K D) dp = -F over the conducting ports only (plate current depends on both ports, grid current
+            // on the grid's: PortSolve.h)
             double dp[M];
-            if (! solveLinear (J, dp)) return converged;
+            if (! solvePortStep<M> (K.data(), d, rhs, dp)) return converged;
 
             double maxStep = 0.0;
             for (int k = 0; k < M; ++k)
@@ -312,35 +307,6 @@ private:
             i[pk] = ip; d[pk][0] = dvpk; d[pk][1] = dvgk;
             i[gk] = ig; d[gk][0] = 0.0;  d[gk][1] = dig;
         }
-    }
-
-    // Gaussian elimination with partial pivoting
-    static bool solveLinear (double (&m)[M][M + 1], double (&x)[M])
-    {
-        double invPivot[M];
-        for (int col = 0; col < M; ++col)
-        {
-            int piv = col;
-            for (int r = col + 1; r < M; ++r)
-                if (std::abs (m[r][col]) > std::abs (m[piv][col])) piv = r;
-            if (std::abs (m[piv][col]) < 1e-300) return false;
-            if (piv != col)
-                for (int j = 0; j <= M; ++j) std::swap (m[col][j], m[piv][j]);
-            invPivot[col] = 1.0 / m[col][col];
-            for (int r = col + 1; r < M; ++r)
-            {
-                const double f = m[r][col] * invPivot[col];
-                if (f == 0.0) continue;
-                for (int j = col; j <= M; ++j) m[r][j] -= f * m[col][j];
-            }
-        }
-        for (int r = M - 1; r >= 0; --r)
-        {
-            double s = m[r][M];
-            for (int j = r + 1; j < M; ++j) s -= m[r][j] * x[j];
-            x[r] = s * invPivot[r];
-        }
-        return true;
     }
 
     void restoreIdle()

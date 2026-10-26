@@ -2,6 +2,7 @@
 #include <algorithm>
 #include <cmath>
 #include "DKCircuit.h"
+#include "PortSolve.h"
 #include "PotTapers.h"
 #include "Supply5150.h"
 #include "TriodeStage.h"
@@ -35,7 +36,7 @@ struct KorenPentode
     static Screen screenTerms (double vg2k)
     {
         // scale = 2/kg1 (vg2k/kp)^ex; vg2k <= 0 -> no plate current (as Koren's E1 <= 0)
-        return { vg2k, 1.0 / vg2k, vg2k > 0.0 ? 2.0 / kg1 * std::pow (vg2k / kp, ex) : 0.0 };
+        return { vg2k, 1.0 / vg2k, vg2k > 0.0 ? 2.0 / kg1 * std::exp (ex * std::log (vg2k / kp)) : 0.0 };
     }
 
     // plate current of ONE tube and its derivatives w.r.t. Vpk and Vg1k
@@ -110,8 +111,8 @@ struct KorenPentode
         const double b = vg2k / mu + vg1k;
         const double x = kp * (1.0 / mu + vg1k / vg2k);
         const double sp = x > 30.0 ? x : (x < -30.0 ? std::exp (x) : std::log1p (std::exp (x)));
-        const double base = 2.0 / kg1 * std::pow (vg2k / kp * sp, ex);
-        return currentScale * ((b > 0.0 ? std::pow (b, ex) / kg2 : 0.0) + base * (1.5707963267948966 - std::atan (vpk / kvb)));
+        const double base = 2.0 / kg1 * std::exp (ex * std::log (vg2k / kp * sp)); // pow (., ex), faster (log (0) -> 0)
+        return currentScale * ((b > 0.0 ? std::exp (ex * std::log (b)) / kg2 : 0.0) + base * (1.5707963267948966 - std::atan (vpk / kvb)));
     }
 };
 
@@ -412,34 +413,24 @@ public:
             ++iterations;
             evalDevices (i, d);
 
-            double J[kPorts][kPorts + 1], maxF = 0.0;
+            double rhs[kPorts], maxF = 0.0; // -F
             for (int r = 0; r < kPorts; ++r)
             {
                 double Ki = 0.0;
                 for (int k = 0; k < kPorts; ++k) Ki += K[(size_t) r * kPorts + k] * i[k];
                 const double F = p[r] - p0[(size_t) r] - Ki;
                 maxF = std::max (maxF, std::abs (F) * (r % 2 == 0 ? 1.0 : 10.0)); // grids 10x stricter
-                J[r][kPorts] = -F;
+                rhs[r] = -F;
             }
             // converged: plates < 0.1 mV, grids < 0.01 mV. The final Newton step is still applied (a linear
             // solve, no tube evaluation): the error drops from ~residual to ~residual^2. v0.3.0 returned
             // before it, which biased the small-signal response by up to 0.3 dB at low frequencies.
             const bool converged = maxF < resTol;
 
-            for (int r = 0; r < kPorts; ++r)
-            {
-                const double* Kr = &K[(size_t) r * kPorts];
-                for (int dv = 0; dv < kDevices; ++dv)
-                {
-                    const int c0 = 2 * dv, c1 = c0 + 1;
-                    // port c0 = plate (current depends on c0, c1), port c1 = grid (depends on c1 only)
-                    J[r][c0] = (r == c0 ? 1.0 : 0.0) - Kr[c0] * d[c0][0];
-                    J[r][c1] = (r == c1 ? 1.0 : 0.0) - Kr[c0] * d[c0][1] - Kr[c1] * d[c1][1];
-                }
-            }
-
+            // (I - K D) dp = -F over the conducting ports only: port 2t = plate (current depends on 2t, 2t+1),
+            // port 2t+1 = grid (depends on itself only); PortSolve.h
             double dp[kPorts];
-            if (! solve (J, dp)) return converged;
+            if (! solvePortStep<kPorts> (K.data(), d, rhs, dp)) return converged;
 
             // Step limit, the same for plates and grids. Grid current and the flyback diodes are softplus
             // knees (linear beyond the knee), so an overshoot corrects itself on the next step. A tighter
@@ -630,36 +621,6 @@ private:
             i[pk] = 2.0 * ip - idio; d[pk][0] = 2.0 * dvpk + didio; d[pk][1] = 2.0 * dvg1;
             i[gk] = 2.0 * ig;        d[gk][0] = 0.0;                d[gk][1] = 2.0 * dig;
         }
-    }
-
-    // Gaussian elimination with partial pivoting; one division per pivot
-    static bool solve (double (&m)[kPorts][kPorts + 1], double (&x)[kPorts])
-    {
-        constexpr int n = kPorts;
-        double invPivot[n];
-        for (int col = 0; col < n; ++col)
-        {
-            int piv = col;
-            for (int r = col + 1; r < n; ++r)
-                if (std::abs (m[r][col]) > std::abs (m[piv][col])) piv = r;
-            if (std::abs (m[piv][col]) < 1e-300) return false;
-            if (piv != col)
-                for (int j = 0; j <= n; ++j) std::swap (m[col][j], m[piv][j]);
-            invPivot[col] = 1.0 / m[col][col];
-            for (int r = col + 1; r < n; ++r)
-            {
-                const double f = m[r][col] * invPivot[col];
-                if (f == 0.0) continue;
-                for (int j = col; j <= n; ++j) m[r][j] -= f * m[col][j];
-            }
-        }
-        for (int r = n - 1; r >= 0; --r)
-        {
-            double s = m[r][n];
-            for (int j = r + 1; j < n; ++j) s -= m[r][j] * x[j];
-            x[r] = s * invPivot[r];
-        }
-        return true;
     }
 
     // V3B (cathode follower to the effects loop, plate on V2+; signal not modelled, it is linear at normal Master

@@ -29,7 +29,10 @@ cmake --build %USERPROFILE%\vab-build --config Release
 
 - `tone_regress`: must stay at 0 failed (null against the frozen baseline).
 - `dsp_test [cpu | fault | noise | tubes | tube | chain | power | transpose | ingate | tables]`: LTspice comparisons,
-  fault recovery, CPU per module.
+  fault recovery, CPU per module. `dsp_test block8 | switch8 | twocore`: cost per 8-sample block at 48 kHz (hardware
+  target), one channel switch in detail, the two-core switch split; pin to a P-core (`start /high /affinity 1000`).
+- `golden write <file>` (built from the last commit) / `golden check <file>`: null test for speed work; a change must
+  be bit-identical, or rounding-level only (far below the solver's ~-100 dB own error).
 - `comp1176_test [spice | rates | release | null | metal | cpu | worst | stress | hf | all]`: 1176 vs LTspice and the
   factory test procedures. `worst`: run at real-time priority for meaningful numbers.
 - `host_test [auval | random | all]`: the whole processor driven like a host / auval (rates, block sizes, layouts,

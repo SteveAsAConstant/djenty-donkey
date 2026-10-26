@@ -449,8 +449,46 @@ private:
         return maxF;
     }
 
+    // the same for NP ports (fixed size)
+    template <int NP, typename P0>
+    double residualN (const P0& p0, const double (&i)[kMaxPorts], double (&F)[kMaxPorts]) const
+    {
+        const auto& K = dk.getK();
+        double maxF = 0.0;
+        for (int r = 0; r < NP; ++r)
+        {
+            double Ki = 0.0;
+            for (int k = 0; k < NP; ++k) Ki += K[(size_t) r * NP + k] * i[k];
+            F[r] = p[r] - p0[(size_t) r] - Ki;
+            const double a = std::abs (F[r]);
+            if (! (a <= maxF)) maxF = a; // NaN propagates (std::max would drop it)
+        }
+        return maxF;
+    }
+
+    // Newton, dispatched to a fixed-size instance per port count (the same operations, unrolled)
     template <typename P0>
     bool newton (const P0& p0, int maxIt)
+    {
+        switch (m)
+        {
+            case 1: return newtonN<1> (p0, maxIt);
+            case 2: return newtonN<2> (p0, maxIt);
+            case 3: return newtonN<3> (p0, maxIt);
+            case 4: return newtonN<4> (p0, maxIt);
+            case 5: return newtonN<5> (p0, maxIt);
+            case 6: return newtonN<6> (p0, maxIt);
+            case 7: return newtonN<7> (p0, maxIt);
+            case 8: return newtonN<8> (p0, maxIt);
+            case 9: return newtonN<9> (p0, maxIt);
+            case 10: return newtonN<10> (p0, maxIt);
+            case 11: return newtonN<11> (p0, maxIt);
+            default: return newtonN<12> (p0, maxIt);
+        }
+    }
+
+    template <int NP, typename P0>
+    bool newtonN (const P0& p0, int maxIt)
     {
         const auto& K = dk.getK();
         auto& i = cur;
@@ -460,32 +498,32 @@ private:
         {
             ++iterations;
             evalDevices (i, d);
-            const double maxF = residual (p0, i, F);
+            const double maxF = residualN<NP> (p0, i, F);
             if (! std::isfinite (maxF)) return false;
             if (maxF < resTol) return true;
 
             double J[kMaxPorts][kMaxPorts + 1];
-            for (int r = 0; r < m; ++r)
+            for (int r = 0; r < NP; ++r)
             {
-                for (int c = 0; c < m; ++c) J[r][c] = r == c ? 1.0 : 0.0;
-                J[r][m] = -F[r];
+                for (int c = 0; c < NP; ++c) J[r][c] = r == c ? 1.0 : 0.0;
+                J[r][NP] = -F[r];
             }
             for (int n = 0; n < numDevs; ++n)
             {
                 const Dev& v = devs[n];
                 const int c0 = v.p0, c1 = v.p1;
-                for (int r = 0; r < m; ++r)
+                for (int r = 0; r < NP; ++r)
                 {
-                    const double k0 = K[(size_t) r * m + c0];
+                    const double k0 = K[(size_t) r * NP + c0];
                     if (c1 < 0) { J[r][c0] -= k0 * d[c0][0]; continue; }
-                    const double k1 = K[(size_t) r * m + c1];
+                    const double k1 = K[(size_t) r * NP + c1];
                     J[r][c0] -= k0 * d[c0][0] + k1 * d[c1][0];
                     J[r][c1] -= k0 * d[c0][1] + k1 * d[c1][1];
                 }
             }
             double dp[kMaxPorts];
-            if (! solveLinear (J, dp)) return false;
-            std::copy (p, p + m, pOld);
+            if (! solveLinearN<NP> (J, dp)) return false;
+            std::copy (p, p + NP, pOld);
             applyStep (dp);
             // Quadratic convergence: after a full (unlimited) step this small the remaining error is ~step^2, so it
             // is accepted without evaluating the devices again; the currents move along their linearisation.
@@ -493,7 +531,7 @@ private:
             {
                 double maxDp = 0.0;
                 bool limited = false;
-                for (int k = 0; k < m; ++k)
+                for (int k = 0; k < NP; ++k)
                 {
                     const double s = p[k] - pOld[k];
                     limited = limited || std::abs (s - dp[k]) > 1e-12 + 1e-9 * std::abs (dp[k]); // (p + dp) - p is not exactly dp
@@ -566,29 +604,50 @@ private:
         return false;
     }
 
+    // dispatched to a fixed-size instance per port count (the same operations, unrolled)
     bool solveLinear (double (&a)[kMaxPorts][kMaxPorts + 1], double (&x)[kMaxPorts]) const
     {
+        switch (m)
+        {
+            case 1:  return solveLinearN<1> (a, x);
+            case 2:  return solveLinearN<2> (a, x);
+            case 3:  return solveLinearN<3> (a, x);
+            case 4:  return solveLinearN<4> (a, x);
+            case 5:  return solveLinearN<5> (a, x);
+            case 6:  return solveLinearN<6> (a, x);
+            case 7:  return solveLinearN<7> (a, x);
+            case 8:  return solveLinearN<8> (a, x);
+            case 9:  return solveLinearN<9> (a, x);
+            case 10: return solveLinearN<10> (a, x);
+            case 11: return solveLinearN<11> (a, x);
+            default: return solveLinearN<12> (a, x);
+        }
+    }
+
+    template <int n>
+    static bool solveLinearN (double (&a)[kMaxPorts][kMaxPorts + 1], double (&x)[kMaxPorts])
+    {
         double invPivot[kMaxPorts];
-        for (int col = 0; col < m; ++col)
+        for (int col = 0; col < n; ++col)
         {
             int piv = col;
-            for (int r = col + 1; r < m; ++r)
+            for (int r = col + 1; r < n; ++r)
                 if (std::abs (a[r][col]) > std::abs (a[piv][col])) piv = r;
             if (std::abs (a[piv][col]) < 1e-300) return false;
             if (piv != col)
-                for (int j = 0; j <= m; ++j) std::swap (a[col][j], a[piv][j]);
+                for (int j = 0; j <= n; ++j) std::swap (a[col][j], a[piv][j]);
             invPivot[col] = 1.0 / a[col][col];
-            for (int r = col + 1; r < m; ++r)
+            for (int r = col + 1; r < n; ++r)
             {
                 const double f = a[r][col] * invPivot[col];
                 if (f == 0.0) continue;
-                for (int j = col; j <= m; ++j) a[r][j] -= f * a[col][j];
+                for (int j = col; j <= n; ++j) a[r][j] -= f * a[col][j];
             }
         }
-        for (int r = m - 1; r >= 0; --r)
+        for (int r = n - 1; r >= 0; --r)
         {
-            double s = a[r][m];
-            for (int j = r + 1; j < m; ++j) s -= a[r][j] * x[j];
+            double s = a[r][n];
+            for (int j = r + 1; j < n; ++j) s -= a[r][j] * x[j];
             x[r] = s * invPivot[r];
         }
         return true;

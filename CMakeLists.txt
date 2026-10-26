@@ -141,3 +141,8 @@ if(DD_ASAN)
         target_link_options(host_test PRIVATE -fsanitize=address)
     endif()
 endif()
+
+# Golden render for speed work: golden write <file> from the last commit, golden check <file> after the change
+# (bit-identical, or rounding-level only: tests/golden.cpp)
+add_executable(golden tests/golden.cpp)
+target_include_directories(golden PRIVATE Source)
