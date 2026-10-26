@@ -57,7 +57,7 @@ cmake --build %USERPROFILE%\vab-build --config Release
 ## Commits and releases
 
 - Commit trailer: `Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>`.
-- Work happens on the local branch `release/v0.5.0-beta`; `main` is fast-forwarded to it. Push only `main`
+- Work happens on the local branch `dev`; `main` is fast-forwarded to it. Push only `main`
   (never the working branch).
 - Release only when the user asks (or gives explicit approval). Steps:
   1. Version in three places: `CMakeLists.txt` (project and juce_add_plugin), `installer/DjentyDonkey.iss`
