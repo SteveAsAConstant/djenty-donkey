@@ -47,8 +47,11 @@ for b in "$WORK/app/$APP" "$WORK/vst3/$VST3" "$WORK/au/root/$AU"; do codesign --
 component_pkg() # <root> <id> <install location> <out> [scripts dir]
 {
     pkgbuild --analyze --root "$1" "$WORK/components.plist" >/dev/null
-    # never "relocate" into an older copy found elsewhere on the disk
-    /usr/libexec/PlistBuddy -c "Set :0:BundleIsRelocatable false" "$WORK/components.plist"
+    # never "relocate" into an older copy found elsewhere on the disk (pkgbuild lists no bundle for a .vst3:
+    # nothing to relocate there)
+    if /usr/libexec/PlistBuddy -c "Print :0" "$WORK/components.plist" >/dev/null 2>&1; then
+        /usr/libexec/PlistBuddy -c "Set :0:BundleIsRelocatable false" "$WORK/components.plist"
+    fi
     if [ -n "$5" ]; then
         pkgbuild --root "$1" --component-plist "$WORK/components.plist" --identifier "$2" --version "$VERSION" \
                  --install-location "$3" --scripts "$5" "$4"
