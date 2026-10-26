@@ -1,0 +1,46 @@
+# macOS build: universal (arm64 + x86_64) VST3 / AU / standalone, DSP fault test, Apple's AU validator, package.
+name: macOS
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure
+        run: cmake -S . -B build-mac -DCMAKE_BUILD_TYPE=Release
+
+      - name: Build
+        run: cmake --build build-mac --config Release --parallel "$(sysctl -n hw.ncpu)"
+
+      - name: Universal binaries
+        run: |
+          ART="build-mac/DjentyDonkey_artefacts/Release"
+          lipo -archs "$ART/Standalone/Djenty Donkey.app/Contents/MacOS/Djenty Donkey"
+          lipo -archs "$ART/VST3/Djenty Donkey.vst3/Contents/MacOS/Djenty Donkey"
+          lipo -archs "$ART/AU/Djenty Donkey.component/Contents/MacOS/Djenty Donkey"
+
+      - name: DSP fault recovery test
+        run: build-mac/dsp_test fault
+
+      - name: Validate the Audio Unit (auval)
+        run: |
+          mkdir -p ~/Library/Audio/Plug-Ins/Components
+          cp -R "build-mac/DjentyDonkey_artefacts/Release/AU/Djenty Donkey.component" ~/Library/Audio/Plug-Ins/Components/
+          codesign --force --sign - ~/Library/Audio/Plug-Ins/Components/"Djenty Donkey.component"
+          killall -9 AudioComponentRegistrar 2>/dev/null || true
+          auval -a | grep -i djenty
+          auval -strict -v aufx Djdn Djdk
+
+      - name: Package
+        run: sh installer/make_package_mac.sh
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: DjentyDonkey-macOS
+          path: dist/DjentyDonkey-*-macOS.zip
