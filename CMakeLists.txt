@@ -147,6 +147,10 @@ endif()
 add_executable(golden tests/golden.cpp)
 target_include_directories(golden PRIVATE Source)
 
+# Cycles per phase of the amp's solves (VAMP_PROFILE counters, Source/dsp/Profile.h)
+add_executable(solve_profile tests/solve_profile.cpp)
+target_include_directories(solve_profile PRIVATE Source)
+
 # The whole plugin's CPU at 48 kHz per buffer size and per stage (plugin_cpu [ir.wav ...]; pin it to a P-core)
 juce_add_console_app(plugin_cpu PRODUCT_NAME "plugin_cpu")
 target_sources(plugin_cpu PRIVATE tests/plugin_cpu.cpp Source/PluginProcessor.cpp Source/PluginEditor.cpp)

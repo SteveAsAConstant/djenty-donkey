@@ -87,6 +87,7 @@ public:
     {
         SemiNetwork dc;
         dc.numDevs = 0;
+        dc.testDampedOnly = testDampedDC;
         builder (dc);
         const int nn = dc.dk.numNodesTotal();
         std::vector<int> gminR;
@@ -215,12 +216,15 @@ public:
     // one is kept (commit() then advances with it).
     bool begin (double* u)
     {
+        // The predictor extrapolates the last step, limited like a Newton step (pnjlim): unlimited, it can throw a
+        // junction far past its knee as a rectifier turns on, and Newton then fails from there (the 1176's CR2 / CR3)
+        double step[kMaxPorts] {};
         for (int k = 0; k < m; ++k)
         {
-            const double c = p[k];
-            if (usePredictor) p[k] += c - pPrev[k];
-            pPrev[k] = c;
+            step[k] = p[k] - pPrev[k];
+            pPrev[k] = p[k];
         }
+        if (usePredictor) applyStepImpl (step);
         iterations = 0;
         const bool ok = attempt (u, 8);
         predictorScore = 0.9 * predictorScore + 0.1 * (iterations <= 2 ? 1.0 : 0.0);
@@ -288,7 +292,11 @@ public:
     long long statSamples = 0, statIterations = 0, statFailures = 0, statHeld = 0;
     long long statMaxIterations = 0, statSlow = 0; // most Newton evaluations in one sample; samples needing the fallbacks
     long long statRetryFailures = 0;
-    int testFailRetries = 0; // tests: make the next n retries fail
+    long long statDamped = 0;      // solves that reached the line-search Newton (both plain attempts failed)
+    int testFailRetries = 0;       // tests: make the next n retries fail
+    bool testDampedOnly = false;   // tests: the plain Newton attempts fail at once, so every solve goes through the
+                                   // line-search fallback (newtonDamped)
+    bool testDampedDC = false;     // tests: likewise for the DC operating point's solves (initDC; set before prepare)
 
 private:
     struct Dev
@@ -310,11 +318,32 @@ private:
         bool ok = newton (p0, firstIts) && finite();
         if (! ok)
         {
+            if (diag) diagNote (p0);
             std::copy (pPrev, pPrev + m, p);
+            const int it0 = iterations;
+            diagFallback = diag;
             ok = newton (p0, 60) && finite();
+            diagFallback = false;
+            if (diag) diagFallbackIts += iterations - it0;
+        }
+        if (! ok && bank && *bank <= 0)
+        {
+            // iteration bank empty: the last iterate is kept when it nearly solves the sample (as an unconverged
+            // tube solve in TriodeNetwork), otherwise the sample is dropped (states held). No backtracking fallbacks.
+            evalDevices (cur, dcur);
+            double F[kMaxPorts];
+            if (! (finite() && residual (p0, cur, F) <= kBankAcceptResidual)) { ++statBankHolds; return false; }
+            ++statBankAccepts;
+            ok = true;
         }
         if (! ok)
+        {
+            // the line-search Newton, from the last sample's solution again (the plain Newton that failed from there may
+            // have left p anywhere, even non-finite); it needs a start with a finite residual
+            ++statDamped;
+            std::copy (pPrev, pPrev + m, p);
             ok = newtonDamped (p0, 300) && finite();
+        }
         if (! ok)
         {
             statFailures++;
@@ -426,6 +455,54 @@ private:
     // apply the Newton step dp to p with junction limiting; returns the largest (unlimited) step
     double applyStep (const double (&dp)[kMaxPorts])
     {
+        if (diagFallback) // tests: which ports' steps get limited while the fallback Newton runs
+        {
+            double q[kMaxPorts];
+            std::copy (p, p + m, q);
+            const double r = applyStepImpl (dp);
+            for (int k = 0; k < m; ++k)
+                if (std::abs ((p[k] - q[k]) - dp[k]) > 1e-9 + 1e-6 * std::abs (dp[k])) ++diagLimited[k];
+            ++diagSteps;
+            return r;
+        }
+        return applyStepImpl (dp);
+    }
+
+public:
+    // Iteration bank (real-time bound): when set, every Newton evaluation takes one from *bank and Newton stops when
+    // it is empty; the owner refills it per sample up to a cap, so a block's work is bounded (Urei1176). nullptr:
+    // unlimited, as before.
+    int* bank = nullptr;
+    long long statBankAccepts = 0, statBankHolds = 0; // samples ended by an empty bank: kept / dropped
+    static constexpr double kBankAcceptResidual = 1e-2;
+
+    // ---- Convergence diagnostics (tests; off unless diag is set) ----
+    // A first Newton attempt that fails: the port with the largest residual then (diagWorst), and in the fallback
+    // Newton from the last sample's solution the steps that the junction limiting cut short, per port (diagLimited)
+    bool diag = false;
+    long long diagFirstFails = 0, diagFallbackIts = 0, diagSteps = 0;
+    long long diagWorst[kMaxPorts] {}, diagLimited[kMaxPorts] {};
+    int numPorts() const { return m; }
+    // device owning port k (index in add order) and its type (0 BJT, 1 JFET, 2 diode); -1 if none
+    int portDevice (int k) const { for (int n = 0; n < numDevs; ++n) if (devs[n].p0 == k || devs[n].p1 == k) return n; return -1; }
+    int deviceType (int n) const { return (int) devs[n].type; }
+    bool portIsSecond (int k) const { const int n = portDevice (k); return n >= 0 && devs[n].p1 == k; }
+
+private:
+    bool diagFallback = false;
+    template <typename P0>
+    void diagNote (const P0& p0)
+    {
+        ++diagFirstFails;
+        double F[kMaxPorts];
+        residual (p0, cur, F);
+        int w = 0;
+        for (int k = 1; k < m; ++k) if (std::abs (F[k]) > std::abs (F[w])) w = k;
+        ++diagWorst[w];
+    }
+
+    double applyStepImpl (const double (&dp)[kMaxPorts])
+    {
         double maxStep = 0.0;
         for (int n = 0; n < numDevs; ++n)
         {
@@ -495,6 +572,7 @@ private:
     template <typename P0>
     bool newton (const P0& p0, int maxIt)
     {
+        if (testDampedOnly) return false; // tests: every solve through the line-search fallback
         switch (m)
         {
             case 1: return newtonN<1> (p0, maxIt);
@@ -521,6 +599,7 @@ private:
         double F[kMaxPorts], pOld[kMaxPorts];
         for (int it = 0; it < maxIt; ++it)
         {
+            if (bank && (*bank)-- <= 0) { *bank = 0; return false; }
             ++iterations;
             evalDevices (i, d);
             const double maxF = residualN<NP> (p0, i, F);
@@ -578,30 +657,33 @@ private:
         return false;
     }
 
-    // backtracking Newton: a step that makes the residual worse is halved (DC solves, last-resort fallback)
+    // Line-search Newton: the fallback once both plain Newton attempts have failed, and the DC operating point's
+    // last resort. The junction-limited Newton step, backtracked along itself (t = 1, 1/2, 1/4 ...) until the
+    // residual's 2-norm decreases sufficiently (Armijo on f = |F|^2 / 2, as Dennis-Schnabel / Kelley): the Newton
+    // direction is a descent direction of f, so a decreasing step exists whenever J is right, and near the
+    // solution the full step is taken (quadratic convergence, as the plain Newton). A step that still does not
+    // decrease f at 2^-24 of itself means a local minimum of f that is no root, or no descent direction: the solve
+    // fails rather than wandering on. (A plain "halve while the max residual grows" search cannot do this job: a
+    // full step past a junction's knee makes the residual grow by orders of magnitude, so it accepts only tiny
+    // fractions of each step and crawls.) maxIt counts device evaluations. Starts from p, whose residual must be
+    // finite; on failure p is wherever the search was (the callers restore their own start).
     template <typename P0>
     bool newtonDamped (const P0& p0, int maxIt)
     {
+        constexpr double kArmijo = 1e-4;
         const auto& K = dk.getK();
         auto& i = cur;
         auto& d = dcur;
-        double F[kMaxPorts], pOld[kMaxPorts];
-        double lastF = 1e300;
-        int halvings = 0;
-        for (int it = 0; it < maxIt; ++it)
+        double F[kMaxPorts], pOld[kMaxPorts], pFull[kMaxPorts];
+        auto sumSq = [this] (const double (&v)[kMaxPorts]) { double s = 0.0; for (int k = 0; k < m; ++k) s += v[k] * v[k]; return s; };
+        if (bank && (*bank)-- <= 0) { *bank = 0; return false; }
+        ++iterations;
+        evalDevices (i, d);
+        double maxF = residual (p0, i, F);
+        if (! std::isfinite (maxF)) return false;
+        double f = sumSq (F);
+        for (int it = 1; it < maxIt;)
         {
-            ++iterations;
-            evalDevices (i, d);
-            const double maxF = residual (p0, i, F);
-            if (! std::isfinite (maxF) || (maxF > lastF && halvings < 30))
-            {
-                for (int k = 0; k < m; ++k) p[k] = 0.5 * (pOld[k] + p[k]);
-                ++halvings;
-                continue;
-            }
-            halvings = 0;
-            lastF = maxF;
-            std::copy (p, p + m, pOld);
             if (maxF < resTol) return true;
 
             double J[kMaxPorts][kMaxPorts + 1];
@@ -624,7 +706,53 @@ private:
                 }
             }
             double dp[kMaxPorts];
+            if (! solveLinear (J, dp)) return false; // singular Jacobian: no step to take
+            std::copy (p, p + m, pOld);
             applyStep (dp);
+            std::copy (p, p + m, pFull); // the junction-limited step's end
+
+            // 1. along the junction-limited step as the plain Newton takes it (t = 1 is accepted wherever the plain
+            //    Newton would have converged from here), backtracked a few times;
+            // 2. if that gives no decrease (a junction's step was cut short while the rest of the step assumed it
+            //    whole: the combination need not be a descent direction), the whole Newton step scaled uniformly to
+            //    the fraction the most limited junction got, backtracked as far as it takes. That is a scaled Newton
+            //    direction, so a descent direction of f: the junction moves exactly as far as the limiting allows
+            //    and the rest of the circuit follows it consistently.
+            bool accepted = false;
+            bool limited = false;
+            double t = 1.0;
+            for (int phase = 0; phase < 2 && ! accepted; ++phase)
+            {
+                if (phase == 1)
+                {
+                    double t0 = 1.0;
+                    for (int k = 0; k < m; ++k)
+                        if (dp[k] != 0.0) t0 = std::min (t0, std::abs (pFull[k] - pOld[k]) / std::abs (dp[k]));
+                    limited = t0 < 1.0;
+                    if (limited) // the scaled Newton step from the most limited junction's fraction
+                    {
+                        t = std::max (t0, 1e-9);
+                        for (int k = 0; k < m; ++k) p[k] = pOld[k] + t * dp[k];
+                    } // else: nothing was limited, the step is the Newton step already: backtrack further along it
+                }
+                for (int ls = 0; ls < (phase == 0 ? 4 : 30) && it < maxIt; ++ls)
+                {
+                    if (bank && (*bank)-- <= 0) { *bank = 0; return false; }
+                    ++iterations;
+                    ++it;
+                    evalDevices (i, d);
+                    const double mf = residual (p0, i, F);
+                    if (std::isfinite (mf))
+                    {
+                        const double fn = sumSq (F);
+                        if (fn <= f * (1.0 - 2.0 * kArmijo * t)) { f = fn; maxF = mf; accepted = true; break; }
+                    }
+                    t *= 0.5;
+                    if (phase == 1 && limited) for (int k = 0; k < m; ++k) p[k] = pOld[k] + t * dp[k];
+                    else for (int k = 0; k < m; ++k) p[k] = pOld[k] + t * (pFull[k] - pOld[k]);
+                }
+            }
+            if (! accepted) return false;
         }
         return false;
     }

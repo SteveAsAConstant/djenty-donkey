@@ -138,6 +138,9 @@ public:
         idleI2Late = dcPlateCurrent (vb2, 220e3, 1.82e3) + dcPlateCurrent (vb2, 220e3, 2.2e3) + dcPlateCurrent (vb2, 100e3, 2.2e3);
         fadeLen = std::max (1, (int) (switchFadeMs * 1e-3 * fs));
         fadePos = fadeLen; // no switch in progress
+        dipHalf = std::max (1, (int) (0.5 * switchDipMs * 1e-3 * fs));
+        dipPos = 2 * dipHalf; // no relay dip in progress
+        pending = -1;
         path = pathOf (mode);
         for (int c = 0; c < kPaths; ++c) w[c] = w0[c] = c == path ? 1.0 : 0.0;
         toneStack.setR (tsSrc, sourceR (path));
@@ -183,6 +186,8 @@ public:
         path = pathOf (mode);
         resetPath (path);
         fadePos = fadeLen;
+        dipPos = 2 * dipHalf;
+        pending = -1;
         for (int c = 0; c < kPaths; ++c) w[c] = w0[c] = c == path ? 1.0 : 0.0;
         toneStack.setR (tsSrc, sourceR (path));
     }
@@ -198,8 +203,16 @@ public:
     // BRIGHT (rhythm) is on by default: BLUE was calibrated with it (docs/nam_calibration.md)
     bool bright = true;
 
-    // channel-switch crossfade length (takes effect at the next prepare)
-    double switchFadeMs = 20.0;
+    // channel-switch crossfade length (takes effect at the next prepare). 0 = relay switch as in the amp: one set of
+    // tubes, rewired at once; the new circuit takes over every shared part's state (warmFrom) and only it runs, so
+    // a switch costs no more than a single channel. > 0: the old two-circuit crossfade (tests).
+    double switchFadeMs = 0.0;
+
+    // Relay switch (switchFadeMs 0): the preamp output dips to zero over half of switchDipMs, the circuits are
+    // swapped at the bottom, and the new channel comes back over the other half. Without it, the jump from the old
+    // channel's waveform to the new one's (levels apart by the channel trims) is a click; the dip stands for the relay
+    // contacts in transit, when the path is open. 0 = a hard swap. Takes effect at the next prepare.
+    double switchDipMs = 4.0;
 
     // all 0..1 knob positions
     void setControls (double preGain, double bass, double mid, double treble, double post)
@@ -297,6 +310,14 @@ public:
             }
             if (fadePos % 32 == 1 || fadePos == fadeLen) // the tone stack's source impedance slides with the fade
                 toneStack.setR (tsSrc, rs);
+        }
+        else if (dipPos < 2 * dipHalf) // relay dip (switchPath): out, swap at the bottom, back in
+        {
+            if (dipPos == dipHalf && pending >= 0) { swapPath (pending); pending = -1; }
+            const double g = dipPos < dipHalf ? 0.5 + 0.5 * std::cos (kPi * (double) dipPos / (double) dipHalf)
+                                              : 0.5 - 0.5 * std::cos (kPi * (double) (dipPos - dipHalf) / (double) dipHalf);
+            ++dipPos;
+            x = runPath (path, vin) * trim[path] * g;
         }
         else
             x = runPath (path, vin) * trim[path];
@@ -409,6 +430,30 @@ private:
     // to circuit p, crossfaded from whatever runs now (see setMode)
     void switchPath (int p)
     {
+        if (switchFadeMs <= 0.0 && switchDipMs > 0.0 && ! fresh)
+        {
+            // relay switch with a dip: the swap waits for the bottom of the dip. A new request mid-dip turns it
+            // around from the level of the moment (fading out again, or back in on the circuit that still runs).
+            const bool dipping = dipPos < 2 * dipHalf;
+            if (! dipping) { if (p != path) { pending = p; dipPos = 0; } return; }
+            if (dipPos < dipHalf) // fading out: still on path
+            {
+                if (p == path) { pending = -1; dipPos = 2 * dipHalf - dipPos; } // back in from here
+                else pending = p;
+            }
+            else if (p != path) // fading in on path: out again from here
+            {
+                pending = p;
+                dipPos = 2 * dipHalf - dipPos;
+            }
+            return;
+        }
+        swapPath (p);
+    }
+
+    // the circuits rewired to p: at once (relay) or crossfaded over switchFadeMs (see setMode)
+    void swapPath (int p)
+    {
         if (p == path) return;
         if (fresh) { path = p; resetPath (p); for (int c = 0; c < kPaths; ++c) w[c] = w0[c] = c == p ? 1.0 : 0.0;
                      toneStack.setR (tsSrc, sourceR (p)); return; } // no audio since prepare(): nothing to fade from
@@ -418,8 +463,15 @@ private:
             for (int c = 0; c < kPaths; ++c) if (c != p && w[c] > w[from]) from = c;
             enterPath (p, from);
         }
-        std::copy (std::begin (w), std::end (w), std::begin (w0));
         path = p;
+        if (switchFadeMs <= 0.0) // relay switch: the same tubes rewired at once, no second circuit runs
+        {
+            for (int c = 0; c < kPaths; ++c) w[c] = w0[c] = c == p ? 1.0 : 0.0;
+            fadePos = fadeLen;
+            toneStack.setR (tsSrc, sourceR (p));
+            return;
+        }
+        std::copy (std::begin (w), std::end (w), std::begin (w0));
         fadePos = 0;
     }
 
@@ -480,6 +532,7 @@ private:
     bool crunch = true;           // the CRUNCH switch (BLUE)
     int path = PRed;              // the circuit that runs (fading in, during a switch)
     int fadeLen = 1, fadePos = 1; // channel-switch crossfade (fadePos >= fadeLen: none in progress)
+    int dipHalf = 1, dipPos = 2, pending = -1; // relay dip: samples per half, position (>= 2 dipHalf: none), circuit to swap to
     double w[kPaths] { 0.0, 0.0, 1.0, 0.0 }, w0[kPaths] { 0.0, 0.0, 1.0, 0.0 }; // circuit weights now / at the fade start
     bool fresh = false;           // prepared, no audio yet: setMode() switches at once
     double trim[kPaths] { 1.0, 1.0, 1.0, 1.0 };

@@ -23,25 +23,35 @@ cmake --build %USERPROFILE%\vab-build --config Release
 (`build.bat` configures first; its echo lines still show the old "VibeAmp 515" names.) Build dir is
 `%USERPROFILE%\vab-build` (short path, not under %TEMP%). Targets: `DjentyDonkey_All` (VST3 + standalone),
 `dsp_test`, `tone_regress`, `nam_compare`, `pedal_compare`, `power_compare`, `amp_path_test`, `comp1176_test`, `host_test`,
-`comp1176_nam`, `golden`, `plugin_cpu`. Plugin output: `vab-build\DjentyDonkey_artefacts\Release\{Standalone,VST3}`; tests in `vab-build\Release`.
+`comp1176_nam`, `golden`, `plugin_cpu`, `solve_profile`. Plugin output: `vab-build\DjentyDonkey_artefacts\Release\{Standalone,VST3}`; tests in `vab-build\Release`.
 
 ## Tests (run after DSP changes)
 
 - `tone_regress`: must stay at 0 failed (null against the frozen baseline).
-- `dsp_test [cpu | fault | noise | tubes | tube | chain | power | transpose | ingate | tables]`: LTspice comparisons,
+- `dsp_test [cpu | fault | noise | tubes | tube | chain | power | transpose | ingate | tables | portsolve]`: LTspice comparisons,
   fault recovery, CPU per module. `dsp_test block8 | switch8 | twocore`: cost per 8-sample block at 48 kHz (hardware
   target), one channel switch in detail, the two-core switch split; pin to a P-core (`start /high /affinity 1000`).
+  `block8 <n>`: the same with n-sample blocks. `costs`: one 8-sample block split per stage. `iter8 [comp]`: Newton
+  evaluations per sample / block in the amp (or the 1176), worst samples and why. `solve_profile` (own target, built
+  with VAMP_PROFILE, `Source/dsp/Profile.h`): rdtsc cycles per phase of the tube solves; compare phases, not totals.
+  `portsolve`: the port step's AVX version (PortSolve.h, off by default: measured slower at these sizes) stays
+  bit-identical to the scalar one on random circuits.
 - `golden write <file>` (built from the last commit) / `golden check <file>`: null test for speed work; a change must
   be bit-identical, or rounding-level only (far below the solver's ~-100 dB own error).
-- `comp1176_test [spice | rates | release | null | metal | cpu | worst | stress | hf | retryfail | all]`: 1176 vs
+- `comp1176_test [spice | rates | release | null | metal | cpu | worst | stress | hf | retryfail | damped | all]`: 1176 vs
   LTspice and the factory test procedures. `worst`: run at real-time priority for meaningful numbers. `retryfail`:
-  forced failures in the coupled A / C solve must not reach the states.
+  forced failures in the coupled A / C solve must not reach the states. `damped`: the line-search Newton fallback
+  (SemiNetwork::newtonDamped) forced on every solve and on the DC operating point must reproduce the plain path.
 - `host_test [auval | random | ir | all]`: the whole processor driven like a host / auval (rates, block sizes, layouts,
   random parameters; `ir`: IRs loaded from another thread while rendering, user presets restoring their cab). Configure with `-DDD_ASAN=ON` for AddressSanitizer (Windows: the VS `bin\Hostx64\x64` dir must
   be on PATH for the ASan DLL); slow under ASan. The macOS CI runs it.
 - `plugin_cpu [ir.wav ...]`: the whole plugin's CPU at 48 kHz / 64-256 buffers, per stage (pin to a P-core; close any
   running standalone first: it competes for the core). `plugin_cpu levels [ir.wav ...]`: output level with each IR vs
   the built-in cab (IRs are loudness-matched to it, `dsp/CabMatch.h`).
+- `amp_path_test [knobs | switch | boost [dir] | render <dir> | sustain | prepare]`: the plugin's amp path (AmpSim):
+  aliasing and tone vs an ideal path, knob zipper noise, channel switches (relay, relay + 4 ms dip as in the plugin,
+  the old 20 ms crossfade; `render <dir>`: the same as WAVs from a played riff, for listening), the drive pedal switch (`boost`: only the
+  selected pedal runs; the other starts from rest when faded in, checked against both always running; `dir`: WAVs).
 - `nam_compare`, `power_compare`, `pedal_compare`, `comp1176_nam`: against NAM captures (pass the .nam path).
 - Captures live in `D:\Downloads From Web\` (6505 lead / rhythm / POW / AMP / PRE, two 1176s). They are T3K-licensed:
   use locally only, never commit, upload or put them in a package.

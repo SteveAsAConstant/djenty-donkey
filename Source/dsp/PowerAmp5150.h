@@ -7,6 +7,7 @@
 #include "Supply5150.h"
 #include "TriodeStage.h"
 #include "TubeSet.h"
+#include "Profile.h"
 
 namespace vamp
 {
@@ -114,6 +115,19 @@ struct KorenPentode
         const double base = 2.0 / kg1 * std::exp (ex * std::log (vg2k / kp * sp)); // pow (., ex), faster (log (0) -> 0)
         return currentScale * ((b > 0.0 ? std::exp (ex * std::log (b)) / kg2 : 0.0) + base * (1.5707963267948966 - std::atan (vpk / kvb)));
     }
+
+    // The same with the screen terms of the solve and the plate model's softplus^ex table (the per-sample path:
+    // 2/kg1 (vg2k/kp sp)^ex = scale * sp^ex, so four exp / log calls fewer; the table's error is the plate model's)
+    inline double screen (double vpk, double vg1k, const Screen& s) const
+    {
+        if (exact) return screen (vpk, vg1k, s.vg2k);
+        if (s.vg2k <= 0.0) return 0.0;
+        const double b = s.vg2k * (1.0 / mu) + vg1k;
+        double G, dG;
+        softplusPow().eval (kp * (1.0 / mu) + kp * vg1k * s.inv, G, dG);
+        return currentScale * ((b > 0.0 ? std::exp (ex * std::log (b)) * (1.0 / kg2) : 0.0)
+                               + s.scale * G * (1.5707963267948966 - std::atan (vpk * (1.0 / kvb))));
+    }
 };
 
 inline void gridCurrentR (double vgk, double rgk, double& ig, double& dIg)
@@ -170,7 +184,9 @@ public:
     static constexpr double k6L6Cin = 10e-12, k6L6Cgp = 0.6e-12; // 6L6GC input and grid-to-plate capacitance
     static constexpr double kRscreenTube = 100.0;  // R203 / R205 / R207 / R209: each 6L6's own screen resistor
 
-    PowerAmp5150()
+    // diagnostics: also compute the PI cathode, the output and PI plates and V3A's plate every sample (getPIcathode
+    // etc.; tests). Without it only the speaker node is computed (DKCircuit::evalOutputs) and they read 0.
+    explicit PowerAmp5150 (bool diagnostics = false) : diag (diagnostics)
     {
         auto n = [this] { return dk.addNode(); };
         using D = DKCircuit;
@@ -255,12 +271,9 @@ public:
             cSpkM = dk.addC (nSp2, G, cmes);
         }
 
-        dk.markOutput (nS);  // speaker
-        dk.markOutput (nK);  // diagnostics
-        dk.markOutput (nO1);
-        dk.markOutput (nPA);
-        dk.markOutput (nPB);
-        dk.markOutput (nP3);
+        dk.markOutput (nS); // speaker
+        if (diag)
+            for (int node : { nK, nO1, nPA, nPB, nP3 }) dk.markOutput (node);
 
         // nonlinear ports: (plate, grid) per device, plate current depends on both, grid current on the grid only
         dk.addPort (nPB, nK); dk.addPort (nGB, nK);   // V4B
@@ -380,6 +393,7 @@ public:
     // input: volts at the master (post-gain) pot wiper. output: volts across the speaker
     double process (double vin)
     {
+        VAMP_PROF (prof::kPowProcess);
         if (! std::isfinite (vin)) vin = lastIn; // a lost input sample: the smallest disturbance (see TriodeStage)
 
         double u[8] {};
@@ -389,7 +403,7 @@ public:
         u[srcBias1] = u[srcBias2] = vBias;
         u[srcB] = supply.plate;
 
-        const auto& p0 = dk.computeP0 (u);
+        const auto& p0 = [&] () -> const auto& { VAMP_PROF (prof::kPowP0); return dk.computeP0 (u); }();
         // each side's screen: the supply node minus its own 100 ohm resistor's drop (last sample's screen current; a few
         // volts at most), constant during the Newton solve
         for (int t = 0; t < 2; ++t) screenNow[t] = KorenPentode::screenTerms (supply.screen - kRscreenTube * ig2Tube[t]);
@@ -430,7 +444,9 @@ public:
             // (I - K D) dp = -F over the conducting ports only: port 2t = plate (current depends on 2t, 2t+1),
             // port 2t+1 = grid (depends on itself only); PortSolve.h
             double dp[kPorts];
-            if (! solvePortStep<kPorts> (K.data(), d, rhs, dp)) return converged;
+            bool stepOk;
+            { VAMP_PROF (prof::kPowStep); stepOk = solvePortStep<kPorts> (K.data(), d, rhs, dp, stepCache, dk.getKVersion()); }
+            if (! stepOk) return converged;
 
             // Step limit, the same for plates and grids. Grid current and the flyback diodes are softplus
             // knees (linear beyond the knee), so an overshoot corrects itself on the next step. A tighter
@@ -479,7 +495,7 @@ public:
         if (testCorrupt > 0) { --testCorrupt; converged = false; for (int k = 0; k < kPorts; ++k) p[k] += 300.0; }
         if (! converged) statFailures++;
         lastConverged = converged;
-        for (int k = 0; k < kPorts; ++k) lastP0[k] = p0[(size_t) k];
+        if (diag) for (int k = 0; k < kPorts; ++k) lastP0[k] = p0[(size_t) k];
 
         if (! converged)
             evalDevices (i, d);
@@ -499,7 +515,9 @@ public:
             if (! std::isfinite (sum)) return true;
             return ! conv && ! (residual (p0, K, i) <= kAcceptResidual && plausible());
         };
-        if (bad (converged))
+        bool badSolve;
+        { VAMP_PROF (prof::kPowCheck); badSolve = bad (converged); }
+        if (badSolve)
         {
             ++statRetries;
             u[srcIn] = lastIn;
@@ -519,11 +537,13 @@ public:
         }
         heldRun = 0;
         lastIn = u[srcIn];
-        dk.finish (i);
+        { VAMP_PROF (prof::kPowFinish); dk.finish (i); }
 
         // ---- power supply: the whole chain sags with this sample's currents (Supply5150) ----
+        {
+        VAMP_PROF (prof::kPowSupply);
         const double iPlates = i[4] + i[6];
-        for (int t = 0; t < 2; ++t) ig2Tube[t] = side6L6[t].screen (p[4 + 2 * t], p[5 + 2 * t], screenNow[t].vg2k);
+        for (int t = 0; t < 2; ++t) ig2Tube[t] = side6L6[t].screen (p[4 + 2 * t], p[5 + 2 * t], screenNow[t]);
         const double iScreens = 2.0 * (ig2Tube[0] + ig2Tube[1]);
         const double iPI = i[0] + i[2];            // V4B + V4A plates (R46, R58 from V3+)
         const double iV2 = preI2 + i[8] + cathodeFollowerCurrent(); // + V3A plate
@@ -536,6 +556,7 @@ public:
         else
             supply.step (T, iPlates, iScreens, iPI, iV2, preI1);
 
+        }
         return dk.nodeV (nS);
     }
 
@@ -555,16 +576,17 @@ public:
         for (auto& t : devTriode) t.exact = on;
         for (auto& t : side6L6) t.exact = on;
     }
-    double lastP0[kPorts] {};
+    double lastP0[kPorts] {}; // the last sample's p0 (diagnostics only)
     double getPort (int k) const { return p[k]; }
-    double getV3a() const { return dk.nodeV (nP3); }
-
     double getSupplyVoltage() const { return supply.plate; }
     double getBiasVoltage() const { return vBias; }
+    // node voltages: 0 unless constructed with diagnostics
+    double getV3a() const { return dk.nodeV (nP3); }
     double getPlate1() const { return dk.nodeV (nO1); }
     double getPIcathode() const { return dk.nodeV (nK); }
     double getPIplateA() const { return dk.nodeV (nPA); }
     double getPIplateB() const { return dk.nodeV (nPB); }
+    const DKCircuit& circuit() const { return dk; } // tests (dsp_test costs)
 
 private:
     // largest port-equation residual (V, grids weighted 10x) of the state p with device currents i
@@ -591,6 +613,7 @@ private:
 
     void evalDevices (double (&i)[kPorts], double (&d)[kPorts][2])
     {
+        VAMP_PROF (prof::kPowEval);
         for (int pk : { 0, 2, 8 }) // V4B, V4A, V3A
         {
             const int gk = pk + 1;
@@ -671,6 +694,7 @@ private:
     bool acceptSmallStep = true;
 
     DKCircuit dk;
+    PortStepCache<kPorts> stepCache; // K entries of the conducting ports (solvePortStep)
     KorenTriode triode;          // nominal: V3B (cathode follower, DC only)
     KorenPentode tube;           // nominal: sets the fixed bias (findBias)
     KorenTriode devTriode[3];    // V4B, V4A, V3A (each its own tube: setTubeVariation)
@@ -693,6 +717,7 @@ private:
     double railIdle[3] { 449.9, 322.1, 305.7 };
     double preI1 = kPreampIdleI1, preI2 = kPreampIdleI2, cfIk = 1.25e-3;
     bool supplyFrozen = false;
+    bool diag = false; // diagnostic node outputs and lastP0 (constructor)
     double avgI[5] {}; long long avgN = 0;
     int heldRun = 0, maxHeldRun = 352; // consecutive dropped samples; beyond the limit -> restoreIdle()
     bool usePredictor = true;

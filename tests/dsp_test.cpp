@@ -5,6 +5,7 @@
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <functional>
 #include <memory>
 #include <string>
@@ -12,6 +13,7 @@
 #include "dsp/FFT.h"
 #include "dsp/MultibandGate.h"
 #include "dsp/PitchShifter.h"
+#include "dsp/PortSolve.h"
 #include "dsp/Amp5150.h"
 #include "dsp/PowerAmp5150.h"
 #include "dsp/Preamp5150.h"
@@ -234,7 +236,7 @@ static void powerAmpTests()
 {
     std::printf ("\n== power amp: idle operating point ==\n");
     {
-        PowerAmp5150 pa;
+        PowerAmp5150 pa (true); // diagnostics: the node voltages below
         pa.setControls (0.0, 0.0); // as spice/5150_power_amp.cir run 1 (VR8 is in the tail's DC path)
         pa.prepare (fs);
         for (int i = 0; i < (int) (fs * 0.2); ++i) pa.process (0.0);
@@ -324,7 +326,7 @@ static void powerAmpTests()
 
 static void powerAmpDebug (double amp)
 {
-    PowerAmp5150 pa;
+    PowerAmp5150 pa (true); // diagnostics: V3A's plate, lastP0
     pa.setControls (0.5, 0.5);
     pa.prepare (fs);
     int shown = 0;
@@ -615,8 +617,11 @@ static void cpuModules()
 namespace block8
 {
 constexpr double kBase = 48000.0, kOs = 8 * kBase, kCompRate = 2 * kBase, kSeconds = 4.0;
-constexpr int kBlock = 8, kOsBlock = 64, kCompBlock = 16, kRuns = 5;
-constexpr double kDeadlineUs = 1e6 * kBlock / kBase;
+// host block size: 8 samples by default, dsp_test block8 <n> for others (the k names kept: fixed during a run)
+int kBlock = 8, kOsBlock = 64, kCompBlock = 16;
+constexpr int kRuns = 5, kMaxOsBlock = 8 * 64;
+double kDeadlineUs = 1e6 * kBlock / kBase;
+void setBlock (int n) { kBlock = n; kOsBlock = 8 * n; kCompBlock = 2 * n; kDeadlineUs = 1e6 * kBlock / kBase; }
 constexpr double kChannelPost[3] = { 54.0, 1.0, 1.0 }; // AmpSim.h
 volatile double sink = 0;
 
@@ -624,16 +629,15 @@ volatile double sink = 0;
 struct AmpCore
 {
     static constexpr int kKnobs = 10, kControlInterval = 32, kHeavyEvery = 4;
-    static constexpr int kHeavy[3] = { 0, 5, 6 }; // Gain, Presence, Resonance
 
     PrecisionDrive drive;
     TubeScreamer9 ts9;
     Preamp5150 preamp;
     PowerAmp5150 power;
     double knob[kKnobs] {}, knobTarget[kKnobs] {}, knobFrom[kKnobs] {}, heavyApplied[3] {}, knobCoef = 1.0;
-    double modelMix = 0.0, modelStep = 1e-4;
+    double modelMix = 0.0, modelStep = 1e-4, modelW = 0.0;
     int heavyPhase = 0, controlPhase = 0, boostAttack = 3;
-    bool knobsSet = false, firstBlock = true, lastBoostOn = false;
+    bool knobsSet = false, firstBlock = true, lastBoostOn = false, bothPedals = false;
 
     void prepare()
     {
@@ -670,6 +674,11 @@ struct AmpCore
         }
         lastBoostOn = boostOn;
         const double modelTarget = boostModel == 1 ? 1.0 : 0.0;
+        if (boostOn && modelTarget != modelMix && ! bothPedals) // as AmpSim: the pedal fading in starts from rest
+        {
+            if (modelTarget > 0.5) ts9.reset(); else drive.reset();
+            bothPedals = true;
+        }
         std::copy (knobTarget, knobTarget + kKnobs, knobFrom);
         std::copy (target, target + kKnobs, knobTarget);
         if (! knobsSet)
@@ -677,20 +686,25 @@ struct AmpCore
             std::copy (target, target + kKnobs, knob);
             std::copy (target, target + kKnobs, knobFrom);
             knobsSet = true;
-            applyKnobs (boostOn, true);
+            applyKnobs (boostOn, true, true);
         }
-        auto pedals = [&] (double v)
+        auto pedals = [&] (double v) // as AmpSim::process: both pedals during the 20 ms crossfade, then the selected one
         {
             if (! boostOn) return v;
             if (modelMix != modelTarget)
+            {
                 modelMix = modelTarget > modelMix ? std::min (modelTarget, modelMix + modelStep) : std::max (modelTarget, modelMix - modelStep);
-            const double w = 0.5 - 0.5 * std::cos (kPi * modelMix);
-            return (1.0 - w) * drive.process (v) + w * ts9.process (v);
+                modelW = 0.5 - 0.5 * std::cos (kPi * modelMix);
+            }
+            else
+                bothPedals = false;
+            if (bothPedals) return (1.0 - modelW) * drive.process (v) + modelW * ts9.process (v);
+            return modelW > 0.5 ? ts9.process (v) : drive.process (v);
         };
         // two-core split (Preamp5150::runAhead): the pedals first (they do not depend on the amp), then the circuits
         // fading out, solved ahead on last block's rails ("core B", timed on its own), then the rest per sample.
         // Knobs must be still: the circuits solved ahead would miss control updates within the block.
-        double vpre[kOsBlock];
+        double vpre[kMaxOsBlock];
         aheadUs = 0.0;
         if (twoCore)
             for (int i = 0; i < kOsBlock; ++i) vpre[i] = pedals (x[i]);
@@ -718,7 +732,7 @@ struct AmpCore
     bool twoCore = false;  // set before the first block (with preamp.enableRunAhead)
     int aheadChunk = kOsBlock; // samples solved ahead at a time = the rail lag (a divisor of kOsBlock)
     double aheadUs = 0.0;  // the last block's run-ahead ("core B") time
-    double out[kOsBlock] {}; // the last block's speaker volts
+    double out[kMaxOsBlock] {}; // the last block's speaker volts
 
     void stepKnobs (bool boostOn, double frac)
     {
@@ -730,18 +744,18 @@ struct AmpCore
             knob[k] = std::abs (d) < 1e-5 ? t : knob[k] + knobCoef * d;
             moving = true;
         }
-        const bool heavyStep = ++heavyPhase >= kHeavyEvery;
-        if (heavyStep) heavyPhase = 0;
-        bool heavyPending = false;
-        for (int k : kHeavy) heavyPending = heavyPending || heavyApplied[k == 0 ? 0 : k - 4] != knob[k];
-        if (moving || (heavyStep && heavyPending))
-            applyKnobs (boostOn, heavyStep);
+        if (++heavyPhase >= kHeavyEvery) heavyPhase = 0;
+        const bool gainStep = heavyPhase == 0, powerStep = heavyPhase == kHeavyEvery / 2;
+        const bool heavyPending = (gainStep && heavyApplied[0] != knob[0])
+                               || (powerStep && (heavyApplied[1] != knob[5] || heavyApplied[2] != knob[6]));
+        if (moving || heavyPending)
+            applyKnobs (boostOn, gainStep, powerStep);
     }
 
-    void applyKnobs (bool boostOn, bool heavy)
+    void applyKnobs (bool boostOn, bool gain, bool powerKnobs)
     {
-        if (heavy)
-            for (int k : kHeavy) heavyApplied[k == 0 ? 0 : k - 4] = knob[k];
+        if (gain) heavyApplied[0] = knob[0];
+        if (powerKnobs) { heavyApplied[1] = knob[5]; heavyApplied[2] = knob[6]; }
         preamp.setControls (heavyApplied[0], knob[1], knob[2], knob[3], knob[4]);
         power.setControls (heavyApplied[1], heavyApplied[2]);
         if (boostOn)
@@ -1141,6 +1155,285 @@ void twoCoreTest()
     }
 }
 
+// What makes the slow blocks slow (dsp_test iter8): AMP RED, knobs still, per block the Newton iterations of the lead
+// preamp and the power amp next to the block's time (fastest of kRuns), grouped by time percentile
+void iterProfile()
+{
+    using clk = std::chrono::steady_clock;
+    const auto diOs = guitarDI (kOs, kSeconds);
+    const int numBlocks = (int) (kBase * kSeconds) / kBlock;
+    std::vector<double> us ((size_t) numBlocks, 1e30), itPre ((size_t) numBlocks), itPow ((size_t) numBlocks);
+    std::vector<double> failPre ((size_t) numBlocks), failPow ((size_t) numBlocks);
+    for (int r = 0; r < kRuns; ++r)
+    {
+        AmpCore amp;
+        amp.prepare();
+        AmpState st;
+        for (int b = 0; b < numBlocks; ++b)
+        {
+            auto& ln = amp.preamp.lead.net;
+            const long long i0 = ln.statIterations, p0 = amp.power.statIterations;
+            const long long f0 = ln.statFailures + ln.statRetries, g0 = amp.power.statFailures;
+            const auto t0 = clk::now();
+            sink = sink + amp.block (diOs.data() + (size_t) b * kOsBlock, st.target, st.channel, false, 0);
+            us[(size_t) b] = std::min (us[(size_t) b], std::chrono::duration<double, std::micro> (clk::now() - t0).count());
+            itPre[(size_t) b] = (double) (ln.statIterations - i0) / kOsBlock;
+            itPow[(size_t) b] = (double) (amp.power.statIterations - p0) / kOsBlock;
+            failPre[(size_t) b] = (double) (ln.statFailures + ln.statRetries - f0);
+            failPow[(size_t) b] = (double) (amp.power.statFailures - g0);
+        }
+    }
+    std::vector<int> order;
+    for (int b = kSkipBlocks; b < numBlocks; ++b) order.push_back (b);
+    std::sort (order.begin(), order.end(), [&] (int a, int b) { return us[(size_t) a] < us[(size_t) b]; });
+    std::printf ("\n== AMP RED, knobs still: Newton iterations per sample vs block time (8x, 64 samples / block) ==\n");
+    std::printf ("%-16s %8s %10s %10s %10s %10s %10s %10s\n", "blocks by time", "us", "pre it", "pre max", "pow it", "pow max",
+                 "pre fails", "pow fails");
+    const double bands[][2] = { { 0.0, 0.5 }, { 0.5, 0.9 }, { 0.9, 0.99 }, { 0.99, 0.999 }, { 0.999, 1.0 } };
+    const char* names[] = { "fastest 50%", "50-90%", "90-99%", "99-99.9%", "slowest 0.1%" };
+    for (int k = 0; k < 5; ++k)
+    {
+        const size_t a = (size_t) (bands[k][0] * order.size()), e = std::max (a + 1, (size_t) (bands[k][1] * order.size()));
+        double t = 0, ip = 0, iw = 0, mp = 0, mw = 0, fp = 0, fw = 0;
+        for (size_t j = a; j < e; ++j)
+        {
+            const size_t b = (size_t) order[j];
+            t += us[b]; ip += itPre[b]; iw += itPow[b]; fp += failPre[b]; fw += failPow[b];
+            mp = std::max (mp, itPre[b]); mw = std::max (mw, itPow[b]);
+        }
+        const double n = (double) (e - a);
+        std::printf ("%-16s %8.1f %10.2f %10.2f %10.2f %10.2f %10.2f %10.2f\n", names[k], t / n, ip / n, mp, iw / n, mw, fp / n, fw / n);
+    }
+}
+
+// Where a sample of the amp goes (dsp_test costs): the whole lead preamp / power amp per sample, against their DK
+// linear parts (p0, state update with the outputs) and the tube models, each timed on its own in a loop
+void costBreakdown()
+{
+    using clk = std::chrono::steady_clock;
+    const auto di = guitarDI (kOs, 1.0);
+    auto perCall = [] (auto&& f, int n) {
+        const auto t0 = clk::now();
+        for (int k = 0; k < n; ++k) f (k);
+        return 1e9 * std::chrono::duration<double> (clk::now() - t0).count() / n; // ns
+    };
+    constexpr int n = 400000;
+
+    AmpCore amp;
+    amp.prepare();
+    AmpState st;
+    double whole = 1e30;
+    for (int r = 0; r < 3; ++r)
+    {
+        const auto t0 = clk::now();
+        for (size_t b = 0; b + kOsBlock <= di.size(); b += (size_t) kOsBlock) sink = sink + amp.block (di.data() + b, st.target, st.channel, false, 0);
+        whole = std::min (whole, 1e9 * std::chrono::duration<double> (clk::now() - t0).count() / (double) di.size());
+    }
+    const double preIt = (double) amp.preamp.lead.net.statIterations / amp.preamp.lead.net.statSamples;
+    const double powIt = (double) amp.power.statIterations / amp.power.statSamples;
+
+    auto linear = [&] (DKCircuit dk, const char* name, double itPerSample) {
+        double u[16] {};
+        for (int k = 0; k < dk.numInputs(); ++k) u[k] = k == 0 ? 0.1 : 350.0;
+        double ip[32] {};
+        for (int k = 0; k < dk.numPorts(); ++k) ip[k] = 1e-4;
+        const double p0 = perCall ([&] (int k) { u[0] = 1e-3 * (k & 255); sink = sink + dk.computeP0 (u)[0]; }, n);
+        const double fin = perCall ([&] (int k) { ip[0] = 1e-6 * (k & 255); dk.finish (ip); sink = sink + dk.nodeV (0); }, n);
+        std::printf ("%-12s ports %2d states %3d sources %2d outputs %2d | p0 %6.1f ns  finish %6.1f ns | Newton evals / sample %.2f\n",
+                     name, dk.numPorts(), dk.numStates(), dk.numInputs(), dk.numOutputs(), p0, fin, itPerSample);
+        return p0 + fin;
+    };
+    std::printf ("\n== where a sample of AMP RED goes (8x, one core) ==\n");
+    std::printf ("whole amp (preamp RED + power amp + knobs): %.1f ns per sample\n", whole);
+    const double linPre = linear (amp.preamp.lead.net.dk, "preamp RED", preIt);
+    const double linPow = linear (amp.power.circuit(), "power amp", powIt);
+
+    KorenTriode tri;
+    const double koren = perCall ([&] (int k) { double ip, a, b; tri.eval (200.0 + 0.01 * (k & 1023), -1.5 + 1e-3 * (k & 511), ip, a, b); sink = sink + ip; }, n);
+    std::printf ("12AX7 Koren eval (table): %.1f ns -> 6 tubes x %.2f evals = %.1f ns per sample\n", koren, preIt, 6 * koren * preIt);
+    std::printf ("linear parts: preamp %.1f + power %.1f ns; rest (Newton algebra, tubes, control): %.1f ns\n", linPre, linPow,
+                 whole - linPre - linPow);
+
+    // the modules on their own, from copies of the warmed-up amp, on the signals they see in it
+    std::vector<double> preIn (di.size()), preOut (di.size());
+    {
+        AmpCore rec;
+        rec.prepare();
+        for (size_t b = 0; b + kOsBlock <= di.size(); b += (size_t) kOsBlock)
+        {
+            rec.block (di.data() + b, st.target, st.channel, false, 0);
+            // AmpCore's output is the speaker; the master-pot voltage is the preamp's output (processAmp5150)
+        }
+    }
+    auto timeIt = [&] (auto&& f) {
+        double best = 1e30;
+        for (int r = 0; r < 3; ++r)
+        {
+            const auto t0 = clk::now();
+            for (size_t k = 0; k < di.size(); ++k) f (k);
+            best = std::min (best, 1e9 * std::chrono::duration<double> (clk::now() - t0).count() / (double) di.size());
+        }
+        return best;
+    };
+    {
+        auto lead = amp.preamp.lead;
+        const double t = timeIt ([&] (size_t k) { preOut[k] = lead.process (di[k]); });
+        std::printf ("lead preamp circuit (FullPreamp5150, 6 tubes): %.1f ns per sample\n", t);
+    }
+    {
+        auto pre = amp.preamp;
+        const double t = timeIt ([&] (size_t k) { preIn[k] = pre.process (di[k]); });
+        std::printf ("Preamp5150 RED (circuit + tone stack + post): %.1f ns per sample\n", t);
+    }
+    {
+        auto pre = amp.preamp;
+        const double t = timeIt ([&] (size_t k) { sink = sink + pre.processToneStack (preOut[k]); });
+        std::printf ("tone stack alone: %.1f ns per sample\n", t);
+    }
+    {
+        auto pa = amp.power;
+        const double t = timeIt ([&] (size_t k) { sink = sink + pa.process (preIn[k]); });
+        std::printf ("PowerAmp5150 (with supply): %.1f ns per sample\n", t);
+    }
+}
+
+// The same for the 1176 (dsp_test iter8 comp): IN 10, attack / release 7, ALL; per block the coupled A / C passes and
+// the Newton evaluations of A, B and C per sample, and the most evaluations of one sample in the block
+void compIterProfile()
+{
+    using clk = std::chrono::steady_clock;
+    const auto di = guitarDI (kCompRate, kSeconds);
+    const int numBlocks = (int) (kBase * kSeconds) / kBlock;
+    const size_t n = (size_t) numBlocks;
+    std::vector<double> us (n, 1e30), pass (n), itA (n), itB (n), itC (n), maxA (n), maxC (n), fails (n);
+    for (int r = 0; r < kRuns; ++r)
+    {
+        Urei1176 m;
+        m.setControls (Urei1176::fromKnobs (10, 8.5, 7, 7, 4));
+        m.prepare (kCompRate);
+        for (int b = 0; b < numBlocks; ++b)
+        {
+            const long long p0 = m.statPasses, a0 = m.netA().statIterations, b0 = m.netB().statIterations, c0 = m.netC().statIterations;
+            const long long f0 = m.netA().statFailures + m.netC().statFailures + m.netA().statRetryFailures + m.netC().statRetryFailures;
+            double worstA = 0, worstC = 0, acc = 0;
+            const auto t0 = clk::now();
+            for (int i = 0; i < kCompBlock; ++i)
+            {
+                const long long ai = m.netA().statIterations, ci = m.netC().statIterations;
+                acc += m.processSample (di[(size_t) (b * kCompBlock + i)]);
+                worstA = std::max (worstA, (double) (m.netA().statIterations - ai));
+                worstC = std::max (worstC, (double) (m.netC().statIterations - ci));
+            }
+            us[(size_t) b] = std::min (us[(size_t) b], std::chrono::duration<double, std::micro> (clk::now() - t0).count());
+            sink = sink + acc;
+            pass[(size_t) b] = (double) (m.statPasses - p0) / kCompBlock;
+            itA[(size_t) b] = (double) (m.netA().statIterations - a0) / kCompBlock;
+            itB[(size_t) b] = (double) (m.netB().statIterations - b0) / kCompBlock;
+            itC[(size_t) b] = (double) (m.netC().statIterations - c0) / kCompBlock;
+            maxA[(size_t) b] = worstA; maxC[(size_t) b] = worstC;
+            fails[(size_t) b] = (double) (m.netA().statFailures + m.netC().statFailures + m.netA().statRetryFailures
+                                          + m.netC().statRetryFailures - f0);
+        }
+    }
+    std::vector<int> order;
+    for (int b = kSkipBlocks; b < numBlocks; ++b) order.push_back (b);
+    std::sort (order.begin(), order.end(), [&] (int a, int b) { return us[(size_t) a] < us[(size_t) b]; });
+    std::printf ("\n== 1176 IN 10, atk/rel 7, ALL: Newton work per sample vs block time (2x, 16 samples / block) ==\n");
+    std::printf ("%-16s %8s %8s %8s %8s %8s %10s %10s %8s\n", "blocks by time", "us", "passes", "A it", "B it", "C it",
+                 "A max/smp", "C max/smp", "fails");
+    const double bands[][2] = { { 0.0, 0.5 }, { 0.5, 0.9 }, { 0.9, 0.99 }, { 0.99, 0.999 }, { 0.999, 1.0 } };
+    const char* names[] = { "fastest 50%", "50-90%", "90-99%", "99-99.9%", "slowest 0.1%" };
+    for (int k = 0; k < 5; ++k)
+    {
+        const size_t a = (size_t) (bands[k][0] * order.size()), e = std::max (a + 1, (size_t) (bands[k][1] * order.size()));
+        double t = 0, p = 0, ia = 0, ib = 0, ic = 0, ma = 0, mc = 0, f = 0;
+        for (size_t j = a; j < e; ++j)
+        {
+            const size_t b = (size_t) order[j];
+            t += us[b]; p += pass[b]; ia += itA[b]; ib += itB[b]; ic += itC[b]; f += fails[b];
+            ma = std::max (ma, maxA[b]); mc = std::max (mc, maxC[b]);
+        }
+        const double cnt = (double) (e - a);
+        std::printf ("%-16s %8.1f %8.2f %8.2f %8.2f %8.2f %10.0f %10.0f %8.2f\n", names[k], t / cnt, p / cnt, ia / cnt, ib / cnt,
+                     ic / cnt, ma, mc, f / cnt);
+    }
+    const auto w = std::max_element (us.begin() + kSkipBlocks, us.end()) - us.begin();
+    std::printf ("slowest block at %.3f s: %.1f us, %.2f passes, A %.2f / C %.2f it per sample, A max %.0f, C max %.0f\n",
+                 (double) w * kBlock / kBase, us[(size_t) w], pass[(size_t) w], itA[(size_t) w], itC[(size_t) w], maxA[(size_t) w], maxC[(size_t) w]);
+
+    // the iteration bank against the unlimited solve: the same input, output difference and the samples it ended,
+    // and the bound it gives a 16-sample block (A + C evaluations: cap + 16 refills)
+    std::printf ("\niteration bank (A + C) vs unlimited, %zu samples\n", di.size());
+    std::printf ("%9s %9s %10s %10s %6s %14s %8s %6s\n", "A+C", "B", "diff dB", "peak V", "kept", "dropped A/B/C", "A+C max", "B max");
+    for (const auto& bk : { std::array { 16, 96, 4, 32 }, std::array { 16, 96, 6, 48 }, std::array { 16, 96, 8, 64 }, std::array { 20, 128, 8, 64 }, std::array { 24, 256, 12, 128 } })
+    {
+        Urei1176 on, off;
+        for (auto* u : { &on, &off }) { u->setControls (Urei1176::fromKnobs (10, 8.5, 7, 7, 4)); u->prepare (kCompRate); }
+        on.bankOn = true;
+        on.bankPerSample = bk[0]; on.bankCap = bk[1]; on.bankBPerSample = bk[2]; on.bankBCap = bk[3];
+        double e = 0, s = 0, peak = 0;
+        for (double x : di)
+        {
+            const double y1 = on.processSample (x), y0 = off.processSample (x);
+            e += (y1 - y0) * (y1 - y0); s += y0 * y0; peak = std::max (peak, std::abs (y1 - y0));
+        }
+        long long acc = 0, held = 0;
+        for (const SemiNetwork* sn : { &on.netA(), &on.netB(), &on.netC() }) { acc += sn->statBankAccepts; held += sn->statBankHolds; }
+        std::printf ("%4d/%-4d %4d/%-4d %10.1f %10.2g %6lld %4lld/%lld/%-4lld %8d %6d\n", bk[0], bk[1], bk[2], bk[3],
+                     10.0 * std::log10 (std::max (e, 1e-300) / s), peak, acc, on.netA().statBankHolds, on.netB().statBankHolds,
+                     on.netC().statBankHolds, bk[1] + 16 * bk[0], bk[3] + 16 * bk[2]);
+    }
+
+    // which ports fail the first attempt, and which get their steps limited in the fallback; for B also the
+    // samples that cost the most evaluations (with the output volts and the evaluations of each)
+    Urei1176 m;
+    m.bankOn = false;
+    m.setControls (Urei1176::fromKnobs (10, 8.5, 7, 7, 4));
+    m.prepare (kCompRate);
+    auto& na = const_cast<SemiNetwork&> (m.netA());
+    auto& nb = const_cast<SemiNetwork&> (m.netB());
+    auto& nc = const_cast<SemiNetwork&> (m.netC());
+    na.diag = nb.diag = nc.diag = true;
+    struct Hard { long long its; size_t n; double out; };
+    std::vector<Hard> hard;
+    std::vector<long long> histB (8, 0); // B evaluations per sample: 1, 2, 3, 4, 5-8, 9-16, 17-64, > 64
+    for (size_t n = 0; n < di.size(); ++n)
+    {
+        const long long b0 = nb.statIterations;
+        const double y = m.processSample (di[n]);
+        sink = sink + y;
+        const long long its = nb.statIterations - b0;
+        histB[(size_t) (its <= 4 ? std::max (0LL, its - 1) : its <= 8 ? 4 : its <= 16 ? 5 : its <= 64 ? 6 : 7)]++;
+        if (its > 8) hard.push_back ({ its, n, y });
+    }
+    std::printf ("\nB evaluations per sample: 1: %lld  2: %lld  3: %lld  4: %lld  5-8: %lld  9-16: %lld  17-64: %lld  >64: %lld;"
+                 " B failures %lld (backtracking reached)\n", histB[0], histB[1], histB[2], histB[3], histB[4], histB[5], histB[6],
+                 histB[7], nb.statFailures);
+    std::sort (hard.begin(), hard.end(), [] (const Hard& a, const Hard& b) { return a.its > b.its; });
+    for (size_t k = 0; k < std::min<size_t> (hard.size(), 12); ++k)
+        std::printf ("  B %4lld evaluations at %.4f s, output %+8.3f V\n", hard[k].its, (double) hard[k].n / kCompRate, hard[k].out);
+    const char* type[] = { "BJT", "JFET", "diode" };
+    const char* devA[] = { "Q1", "Q2", "Q3", "Q14" };
+    const char* devB[] = { "Q4", "CR1", "Q5", "Q6" };
+    const char* devC[] = { "Q7", "Q8", "Q9", "Q10", "CR2", "CR3" };
+    for (int net = 0; net < 3; ++net)
+    {
+        const SemiNetwork& sn = net == 0 ? na : net == 1 ? nb : nc;
+        const char** names = net == 0 ? devA : net == 1 ? devB : devC;
+        const int numNames = net == 0 ? 4 : net == 1 ? 4 : 6;
+        std::printf ("\nnetwork %s: %lld first attempts failed of %lld samples; fallback %.1f iterations each, %lld steps\n",
+                     net == 0 ? "A" : net == 1 ? "B" : "C", sn.diagFirstFails, sn.statSamples,
+                     (double) sn.diagFallbackIts / std::max (1LL, sn.diagFirstFails), sn.diagSteps);
+        std::printf ("  %-5s %-8s %-6s %12s %14s\n", "port", "device", "type", "worst F", "steps limited");
+        for (int k = 0; k < sn.numPorts(); ++k)
+        {
+            const int d = sn.portDevice (k);
+            const char* nm = d < 0 || d >= numNames ? "?" : names[d];
+            std::printf ("  %-5d %-8s %-6s %12lld %14lld\n", k, nm, d < 0 ? "?" : type[sn.deviceType (d)], sn.diagWorst[k], sn.diagLimited[k]);
+        }
+    }
+}
+
 void run()
 {
     const auto diOs = guitarDI (kOs, kSeconds), diComp = guitarDI (kCompRate, kSeconds), di = guitarDI (kBase, kSeconds);
@@ -1150,9 +1443,9 @@ void run()
     const double* xOs = diOs.data();
     const double* xComp = diComp.data();
 
-    std::printf ("\n== 8-sample blocks at 48 kHz: cost per block (us; deadline %.1f us; fastest of %d runs per block) ==\n",
-                 kDeadlineUs, kRuns);
-    std::printf ("amp at 8x (64 samples / block, no oversampling filters), 1176 at 2x (16 samples / block)\n");
+    std::printf ("\n== %d-sample blocks at 48 kHz: cost per block (us; deadline %.1f us; fastest of %d runs per block) ==\n",
+                 kBlock, kDeadlineUs, kRuns);
+    std::printf ("amp at 8x (%d samples / block, no oversampling filters), 1176 at 2x (%d samples / block)\n", kOsBlock, kCompBlock);
     std::printf ("%-38s %6s %6s %6s %7s %6s  %8s %7s %6s %7s\n", "", "avg", "p99", "p99.9", "max", "of dl", "max at", "raw max", "over",
                  "1st");
 
@@ -1715,14 +2008,119 @@ static void tubeSetTests()
     }
 }
 
+// ---- the port step's AVX path against its scalar path (PortSolve.h) ----
+// Random K, conductances and residuals for the preamp's (12) and the power amp's (10) port counts, every count of
+// conducting ports, the cache refilled and reused: the steps of the two paths, and of the uncached solve, must be
+// bit-identical (separate multiplies and adds in the same order).
+template <int M, int n>
+static void portSolveCompare (const PortStepCache<M>& c, const double (&d)[M][2], const double (&r)[M], long long& diffs, long long& singular)
+{
+    double a[M], b[M];
+    const bool okA = solvePortStepCachedN<M, n> (c, d, r, a);
+#if VAMP_SIMD_SSE2
+    const bool okB = solvePortStepCachedAvxN<M, n> (c, d, r, b);
+#else
+    const bool okB = solvePortStepCachedN<M, n> (c, d, r, b);
+#endif
+    if (okA != okB) { ++diffs; return; }
+    if (! okA) { ++singular; return; }
+    if (std::memcmp (a, b, sizeof a) != 0) ++diffs;
+}
+
+template <int M>
+static void portSolveDispatch (int n, const PortStepCache<M>& c, const double (&d)[M][2], const double (&r)[M], long long& diffs, long long& singular)
+{
+    switch (n)
+    {
+        case 1:  portSolveCompare<M, 1> (c, d, r, diffs, singular); break;
+        case 2:  portSolveCompare<M, (M < 2 ? M : 2)> (c, d, r, diffs, singular); break;
+        case 3:  portSolveCompare<M, (M < 3 ? M : 3)> (c, d, r, diffs, singular); break;
+        case 4:  portSolveCompare<M, (M < 4 ? M : 4)> (c, d, r, diffs, singular); break;
+        case 5:  portSolveCompare<M, (M < 5 ? M : 5)> (c, d, r, diffs, singular); break;
+        case 6:  portSolveCompare<M, (M < 6 ? M : 6)> (c, d, r, diffs, singular); break;
+        case 7:  portSolveCompare<M, (M < 7 ? M : 7)> (c, d, r, diffs, singular); break;
+        case 8:  portSolveCompare<M, (M < 8 ? M : 8)> (c, d, r, diffs, singular); break;
+        case 9:  portSolveCompare<M, (M < 9 ? M : 9)> (c, d, r, diffs, singular); break;
+        case 10: portSolveCompare<M, (M < 10 ? M : 10)> (c, d, r, diffs, singular); break;
+        case 11: portSolveCompare<M, (M < 11 ? M : 11)> (c, d, r, diffs, singular); break;
+        default: portSolveCompare<M, M> (c, d, r, diffs, singular); break;
+    }
+}
+
+template <int M>
+static bool portSolveTestM (unsigned& rng)
+{
+    auto uni = [&rng] { rng = rng * 1664525u + 1013904223u; return (rng >> 8) / 16777216.0; };
+    std::vector<double> K ((size_t) M * M);
+    PortStepCache<M> cache;
+    unsigned version = 0;
+    long long cases = 0, diffs = 0, singular = 0, uncachedDiffs = 0, refills = 0;
+    long long perN[M + 1] {};
+    for (int t = 0; t < 40000; ++t)
+    {
+        if (t % 40 == 0) // a new K (as a pot moving), magnitudes over 4 decades, mostly diagonally dominant
+        {
+            for (int i = 0; i < M; ++i)
+                for (int j = 0; j < M; ++j)
+                    K[(size_t) i * M + j] = (uni() - 0.5) * std::pow (10.0, 4.0 * uni()) * (i == j ? 10.0 : 1.0);
+            ++version;
+        }
+        double d[M][2], r[M];
+        const double pOn = 0.3 + 0.6 * uni(); // how many ports conduct: all counts from 0 to M over the run
+        for (int k = 0; k < M; k += 2)
+        {
+            const bool plate = uni() < pOn, grid = uni() < pOn * 0.5;
+            d[k][0] = plate ? uni() * 1e-3 : 0.0;  d[k][1] = plate ? uni() * 2e-3 : 0.0;
+            d[k + 1][0] = 0.0;                     d[k + 1][1] = grid ? uni() * 1e-4 : 0.0;
+            r[k] = (uni() - 0.5) * 2.0;            r[k + 1] = (uni() - 0.5) * 0.2;
+        }
+        double dp[M], dpU[M];
+        const unsigned before = cache.version;
+        const bool ok = solvePortStep<M> (K.data(), d, r, dp, cache, version);
+        if (cache.version != before) ++refills;
+#if ! VAMP_PORTSTEP_AVX
+        // the AVX kernel's entries of the cache, which the refill gathers only when that path is on (a refill also
+        // happens when the set of conducting ports changes, with the version unchanged: gathered after every solve)
+        for (int x = 0; x < cache.n; ++x)
+            for (int y = cache.n; y < PortStepCache<M>::MP; ++y) cache.rowK[x][y] = cache.rowKg[x][y] = 0.0;
+        for (int y = 0; y < cache.n; ++y)
+            for (int k = 0; k < M; ++k) cache.colKT[y][k] = K[(size_t) k * M + cache.act[y]];
+#endif
+        const bool okU = solvePortStep<M> (K.data(), d, r, dpU);
+        if (ok != okU || (ok && std::memcmp (dp, dpU, sizeof dp) != 0)) ++uncachedDiffs;
+        if (cache.n == 0) continue;
+        ++perN[cache.n];
+        ++cases;
+        portSolveDispatch<M> (cache.n, cache, d, r, diffs, singular);
+    }
+    std::printf ("M = %2d: %lld cases (%lld K refills; conducting ports", M, cases, refills);
+    for (int n = 1; n <= M; ++n) std::printf (" %d:%lld", n, perN[n]);
+    std::printf ("), singular %lld, AVX vs scalar differing %lld, cached vs uncached differing %lld -> %s\n",
+                 singular, diffs, uncachedDiffs, diffs == 0 && uncachedDiffs == 0 ? "PASS" : "FAIL");
+    return diffs == 0 && uncachedDiffs == 0;
+}
+
+static bool portSolveTests()
+{
+#if VAMP_SIMD_SSE2
+    std::printf ("port step (PortSolve.h): AVX path %s on this CPU\n", vampHasAvx() ? "available" : "NOT available: the scalar path is compared with itself");
+#endif
+    unsigned rng = 12345;
+    const bool a = portSolveTestM<12> (rng), b = portSolveTestM<10> (rng);
+    return a && b;
+}
+
 int main (int argc, char** argv)
 {
+    if (argc > 1 && std::string (argv[1]) == "portsolve") return portSolveTests() ? 0 : 1;
     if (argc > 1 && std::string (argv[1]) == "noise") { noiseTests(); return 0; }
     if (argc > 1 && std::string (argv[1]) == "tubes") { tubeSetTests(); return 0; }
     if (argc > 1 && std::string (argv[1]) == "fault") return faultRecoveryTests() ? 0 : 1;
     if (argc > 1 && std::string (argv[1]) == "cpu") { cpuModules(); return 0; }
-    if (argc > 1 && std::string (argv[1]) == "block8") { block8::run(); return 0; }
+    if (argc > 1 && std::string (argv[1]) == "costs") { block8::costBreakdown(); return 0; }
+    if (argc > 1 && std::string (argv[1]) == "block8") { if (argc > 2) block8::setBlock (std::clamp (std::atoi (argv[2]), 1, 64)); block8::run(); return 0; }
     if (argc > 1 && std::string (argv[1]) == "switch8") { block8::switchProfile(); return 0; }
+    if (argc > 1 && std::string (argv[1]) == "iter8") { if (argc > 2 && std::string (argv[2]) == "comp") block8::compIterProfile(); else block8::iterProfile(); return 0; }
     if (argc > 1 && std::string (argv[1]) == "twocore") { block8::twoCoreTest(); return 0; }
     if (argc > 1 && std::string (argv[1]) == "tables") { tubeTableAccuracy(); return 0; }
     if (argc > 1 && std::string (argv[1]) == "tube") { pentodeDatasheet(); return 0; }

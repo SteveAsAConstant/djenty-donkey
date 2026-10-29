@@ -101,11 +101,9 @@ public:
         // KCL at vn: the leg current flows through the feedback (Rf, the diodes, cf + diode capacitance); the
         // capacitor takes the rest, i_C = i_leg - x / Rf - 2 Is sinh (x / nVt), and by the trapezoidal rule
         //   k2 (x - vf) = i_C(now) + g0      (vf, g0: last sample's x and i_C)
-        const double halfT = T / (2.0 * Ca);
-        const double gL = 1.0 / (circ.rLeg + halfT), jL = (vc + halfT * iLeg) * gL;
-        const double a = opDen * vo + opGain * v, b = -opGain;
-        const double invBm1 = 1.0 / (b - 1.0);
-        const double k2 = 2.0 * (circ.cf + kCjDiodes) / T, invRf = 1.0 / Rf;
+        // halfT, gL, invBm1, k2, invRf: fixed by the rate, the parts and the knobs (updateCoeffs)
+        const double jL = (vc + halfT * iLeg) * gL;
+        const double a = opDen * vo + opGain * v;
         constexpr double invNVt = 1.0 / nVt;
         double x = vf;
         for (int it = 0; it < 24; ++it)
@@ -160,6 +158,15 @@ private:
 
         b0 = B0 / A0; b1 = B1 / A0; b2 = B2 / A0;
         a1 = A1 / A0; a2 = A2 / A0;
+
+        // the per-sample invariants of process() (the same expressions, computed once): the leg's trapezoidal
+        // half-step and conductance, the op-amp relation vn = (x - a) / (b - 1) with b = -opGain, the feedback
+        // capacitance's trapezoidal conductance, the feedback resistor
+        halfT = T / (2.0 * Ca);
+        gL = 1.0 / (circ.rLeg + halfT);
+        invBm1 = 1.0 / (-opGain - 1.0);
+        k2 = 2.0 * (circ.cf + kCjDiodes) / T;
+        invRf = 1.0 / Rf;
     }
 
     // the two diodes' junction capacitance (Cjo 4 pF; they sit near 0 V bias: one barely forward, one barely reverse)
@@ -174,6 +181,7 @@ private:
     OnePoleHP inHP1, inHP2;
     double vf = 0.0, vc = 0.0, iLeg = 0.0, g0 = 0.0, vo = 0.0;
     double opDen = 1.0, opGain = 0.0;
+    double halfT = 0.0, gL = 0.0, invBm1 = 0.0, k2 = 0.0, invRf = 0.0; // updateCoeffs
     double b0 = 1, b1 = 0, b2 = 0, a1 = 0, a2 = 0;
     double x1 = 0, x2 = 0, y1 = 0, y2 = 0;
 };

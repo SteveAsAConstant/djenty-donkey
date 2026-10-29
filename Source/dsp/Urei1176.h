@@ -75,10 +75,33 @@ public:
     // tests: LTspice-tight Newton tolerance
     void setReferencePrecision (bool on) { a.setReferencePrecision (on); b.setReferencePrecision (on); c.setReferencePrecision (on); }
 
+    // the real-time iteration bound (see processSample): off by default. Not usable yet: B (the output stage) has
+    // rare samples that need far more evaluations, and a sample the bank drops jumps the output (dsp_test iter8 comp)
+    bool bankOn = false;
+    int bankPerSample = 16, bankCap = 96;   // A + C evaluations: refill per sample, cap (tests may change them)
+    int bankBPerSample = 4, bankBCap = 32;  // B likewise
+
     // one sample: source EMF (V) -> output across the 600 ohm load (V)
     double processSample (double vin)
     {
         if (pending && ++controlPhase >= kControlEvery) { controlPhase = 0; applyControls(); }
+
+        // Real-time bound: A and C share an iteration bank refilled by bankPerSample per sample up to bankCap, B
+        // (the output stage, solved last) has its own, so any run of n samples costs at most cap + n * refill
+        // Newton evaluations (16 samples: 64 + 16 * 12 for A + C). Off for the reference renders.
+        struct Banks
+        {
+            Urei1176& u;
+            explicit Banks (Urei1176& o) : u (o)
+            {
+                if (! u.bankOn) return;
+                u.bankAC = std::min (u.bankAC + u.bankPerSample, u.bankCap);
+                u.bankB = std::min (u.bankB + u.bankBPerSample, u.bankBCap);
+                u.a.bank = u.c.bank = &u.bankAC;
+                u.b.bank = &u.bankB;
+            }
+            ~Banks() { u.a.bank = u.b.bank = u.c.bank = nullptr; }
+        } banks (*this);
 
         // A and C close the gain-reduction loop (gate -> preamp -> sidechain -> CTRL -> gate): solved together by
         // iterating the two within the sample until CTRL agrees (one pass while CTRL only drifts, a few while the
@@ -156,6 +179,10 @@ public:
     const SemiNetwork& netB() const { return b; }
     const SemiNetwork& netC() const { return c; }
     void testFailRetries (int nA, int nC) { a.testFailRetries = nA; c.testFailRetries = nC; } // tests (SemiNetwork)
+    void testDampedOnly (bool running, bool dc) // tests (SemiNetwork); before prepare
+    {
+        for (auto* n : { &a, &b, &c }) { n->testDampedOnly = running; n->testDampedDC = dc; }
+    }
 
     // Factory trims (calibrated in LTspice with the same equations, spice/1176_*.cir; docs/1176_schematic_notes.md):
     // "Q" bias R59 wiper position (1.0 dB drop with G.R. off, 2 kHz), R30* (Q6 33 mA: the +30 V rail at 50 mA as on
@@ -168,6 +195,10 @@ private:
     static constexpr double kR55 = 25e3, kR56 = 5e6, kZ0 = 620.0;
     static constexpr int kControlEvery = 32; // controls (matrix rebuilds) applied at most every 32 samples
     static constexpr int kMaxCoupled = 8;    // A / C passes per sample at most
+    // iteration banks (processSample): A + C typically take ~4 evaluations a sample, ~11 in the busiest 1 % of
+    // blocks; B ~2
+
+    int bankAC = 64, bankB = 32;
     static constexpr double kCtrlTol = 2e-6;  // V: CTRL agreement between A and C
 
     // device models (spice/1176ln_revd.inc)

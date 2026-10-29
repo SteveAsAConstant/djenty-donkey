@@ -106,6 +106,7 @@ private:
     juce::dsp::Convolution cab;
     vamp::Biquad fallbackCab[5];
     vamp::Biquad eq[10];
+    float eqGainApplied[10] {}; // the gain each band's coefficients were computed for (0 dB: the identity biquad)
     juce::dsp::Phaser<float> phaser;
     vamp::StereoDelay delay;
     juce::dsp::Reverb reverb;

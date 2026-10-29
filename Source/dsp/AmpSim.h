@@ -35,6 +35,11 @@ public:
         int boostModel = 0;  // 0 Precision Drive, 1 TS9
     };
 
+    // channel-switch crossfade (Preamp5150::switchFadeMs: 0 = relay switch, the default); tests, before prepare()
+    void setSwitchFadeMs (double ms) { preamp.switchFadeMs = ms; }
+    void setSwitchDipMs (double ms) { preamp.switchDipMs = ms; }    // relay dip (Preamp5150::switchDipMs); tests
+    bool testBothPedals = false; // tests: both drive pedals always run, as before single-pedal running (never reset)
+
     void prepare (double sampleRate, int maxBlock)
     {
         // Oversampling around the whole non-linear amp (preamp + power amp), to at least kMinOsRate:
@@ -72,11 +77,14 @@ public:
         settle (0.15);
         power.endSupplySettle();
         volume.reset (osRate, 0.03);
+        volumeDbApplied = std::numeric_limits<float>::quiet_NaN(); // the dB -> gain conversion again on the first block
+        dcBlock.set (10.0, osRate); // 10 Hz, on the speaker voltage
         dcBlock.reset();
         oversampler->reset();
         knobsSet = false;
         firstBlock = true;
         firstModel = true;
+        bothPedals = false;
         knobCoef = 1.0 - std::exp (-kControlInterval / (kKnobSmoothMs * 1e-3 * osRate));
     }
 
@@ -113,7 +121,16 @@ public:
             ts9.setControls (knob[7], knob[8], knob[9]);
         }
         modelTarget = s.boostModel == 1 ? 1.0 : 0.0;
-        if (firstModel) { modelMix = modelTarget; firstModel = false; }
+        if (firstModel) { modelMix = modelTarget; modelW = 0.5 - 0.5 * std::cos (kPi * modelMix); firstModel = false; }
+        if (testBothPedals) bothPedals = true;
+        else if (s.boostOn && modelTarget != modelMix && ! bothPedals)
+        {
+            // a crossfade starts: the pedal fading in has not run since it was last faded out, so it starts from rest
+            // (its coupling caps and filters hold stale voltages otherwise); from rest its own start-up transient dies
+            // out within the fade (tests/amp_path_test boost)
+            if (modelTarget > 0.5) ts9.reset(); else drive.reset();
+            bothPedals = true;
+        }
         lastBoostOn = s.boostOn;
         boostAttack = s.boostAttack;
         const double target[kKnobs] = { s.gain, s.bass, s.mid, s.treble, s.master, s.presence, s.resonance,
@@ -127,10 +144,11 @@ public:
             knobsSet = true;
             applyKnobs (true);
         }
-        dcBlock.set (10.0, osRate);
-
-
-        volume.setTargetValue (std::pow (10.0, s.volumeDb / 20.0) * kSpeakerToDigital);
+        if (s.volumeDb != volumeDbApplied) // the dB -> gain conversion only when the knob moved
+        {
+            volumeDbApplied = s.volumeDb;
+            volume.setTargetValue (std::pow (10.0, s.volumeDb / 20.0) * kSpeakerToDigital);
+        }
 
         float* chans[] = { data };
         juce::dsp::AudioBlock<float> block (chans, 1, (size_t) numSamples);
@@ -147,12 +165,17 @@ public:
             }
             double v = (double) x[i] * kInputVolts;
 
-            if (s.boostOn) // both pedals run, so switching between them is a crossfade, not a restart
+            if (s.boostOn) // a model switch is a 20 ms crossfade (both pedals run); settled, only the selected one runs
             {
                 if (modelMix != modelTarget)
+                {
                     modelMix = modelTarget > modelMix ? std::min (modelTarget, modelMix + modelStep) : std::max (modelTarget, modelMix - modelStep);
-                const double w = 0.5 - 0.5 * std::cos (kPi * modelMix);
-                v = (1.0 - w) * drive.process (v) + w * ts9.process (v);
+                    modelW = 0.5 - 0.5 * std::cos (kPi * modelMix); // the crossfade weight: only while the mix moves
+                }
+                else if (! testBothPedals)
+                    bothPedals = false; // settled (modelW exactly 0 or 1: the mix is the same as with both running)
+                if (bothPedals) v = (1.0 - modelW) * drive.process (v) + modelW * ts9.process (v);
+                else v = modelW > 0.5 ? ts9.process (v) : drive.process (v);
             }
 
             v = processAmp5150 (preamp, power, v, 1.0); // volts across the speaker (preamp on the power amp's rails; channel trim in the preamp)
@@ -174,7 +197,6 @@ private:
     // 20 ms ramp, a quarter of the CPU).
     static constexpr int kKnobs = 10, kControlInterval = 32, kHeavyEvery = 4;
     static constexpr double kKnobSmoothMs = 20.0;
-    static constexpr int kHeavy[3] = { 0, 5, 6 }; // Gain, Presence, Resonance
 
     // frac: position in the current host block (0..1], where the target is between knobFrom and knobTarget
     void stepKnobs (bool boostOn, double frac)
@@ -187,18 +209,20 @@ private:
             knob[k] = std::abs (d) < 1e-5 ? t : knob[k] + knobCoef * d;
             moving = true;
         }
-        const bool heavyStep = ++heavyPhase >= kHeavyEvery;
-        if (heavyStep) heavyPhase = 0;
-        bool heavyPending = false;
-        for (int k : kHeavy) heavyPending = heavyPending || heavyApplied[k == 0 ? 0 : k - 4] != knob[k];
-        if (moving || (heavyStep && heavyPending))
-            applyKnobs (boostOn, heavyStep);
+        // the preamp's and the power amp's rebuilds fall on different steps (half a cycle apart), so they never
+        // land in the same block: the worst block carries one rebuild, not two
+        if (++heavyPhase >= kHeavyEvery) heavyPhase = 0;
+        const bool gainStep = heavyPhase == 0, powerStep = heavyPhase == kHeavyEvery / 2;
+        const bool heavyPending = (gainStep && heavyApplied[0] != knob[0])
+                               || (powerStep && (heavyApplied[1] != knob[5] || heavyApplied[2] != knob[6]));
+        if (moving || heavyPending)
+            applyKnobs (boostOn, gainStep, powerStep);
     }
 
-    void applyKnobs (bool boostOn, bool heavy = true)
+    void applyKnobs (bool boostOn, bool gain = true, bool powerKnobs = true)
     {
-        if (heavy)
-            for (int k : kHeavy) heavyApplied[k == 0 ? 0 : k - 4] = knob[k];
+        if (gain) heavyApplied[0] = knob[0];
+        if (powerKnobs) { heavyApplied[1] = knob[5]; heavyApplied[2] = knob[6]; }
         preamp.setControls (heavyApplied[0], knob[1], knob[2], knob[3], knob[4]);
         power.setControls (heavyApplied[1], heavyApplied[2]);
         if (boostOn)
@@ -214,6 +238,9 @@ private:
     bool knobsSet = false, lastBoostOn = false, firstBlock = true, firstModel = true;
     int tubeSetApplied = 0;
     double modelMix = 0.0, modelTarget = 0.0, modelStep = 1e-4; // drive model crossfade, 0 = Precision Drive
+    double modelW = 0.0;                                         // its raised-cosine weight (1 = TS9)
+    bool bothPedals = false;      // a crossfade is in progress: both pedals run; otherwise only the selected one
+    float volumeDbApplied = std::numeric_limits<float>::quiet_NaN(); // volumeDb the smoother's target was set from
     int controlPhase = 0, boostAttack = 3;
 
     static constexpr double kMinOsRate = 352800.0; // 8 x 44.1 kHz

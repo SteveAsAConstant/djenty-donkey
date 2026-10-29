@@ -5,6 +5,7 @@
 #include "PortSolve.h"
 #include "TriodeStage.h"
 #include "TubeNoise.h"
+#include "Profile.h"
 
 namespace vamp
 {
@@ -85,7 +86,8 @@ public:
     // accepted sample: the caller repeats its output).
     bool solve (double* u)
     {
-        const auto& p0 = dk.computeP0 (u); // updated in place by later computeP0 calls
+        VAMP_PROF (prof::kTriSolve);
+        const auto& p0 = [&] () -> const auto& { VAMP_PROF (prof::kTriP0); return dk.computeP0 (u); }(); // updated in place by later computeP0 calls
         if (noiseOn) for (int t = 0; t < NT; ++t) vn[t] = tubeNoise[t].next();
         const auto& K = dk.getK();
 
@@ -112,6 +114,8 @@ public:
             evalDevices (i, d);
 
             double rhs[M], maxF = 0.0; // -F
+            {
+            VAMP_PROF (prof::kTriResidual);
             for (int r = 0; r < M; ++r)
             {
                 double Ki = 0.0;
@@ -119,6 +123,7 @@ public:
                 const double F = p[r] - p0[(size_t) r] - Ki;
                 maxF = std::max (maxF, std::abs (F) * (r % 2 == 0 ? 1.0 : 10.0)); // grids 10x stricter
                 rhs[r] = -F;
+            }
             }
             if (damped)
             {
@@ -137,7 +142,9 @@ public:
             // (I - K D) dp = -F over the conducting ports only (plate current depends on both ports, grid current
             // on the grid's: PortSolve.h)
             double dp[M];
-            if (! solvePortStep<M> (K.data(), d, rhs, dp)) return converged;
+            bool stepOk;
+            { VAMP_PROF (prof::kTriStep); stepOk = solvePortStep<M> (K.data(), d, rhs, dp, stepCache, dk.getKVersion()); }
+            if (! stepOk) return converged;
 
             double maxStep = 0.0;
             for (int k = 0; k < M; ++k)
@@ -194,7 +201,9 @@ public:
             if (! std::isfinite (sum)) return true;
             return ! conv && ! (residual (p0, K, i) <= kAcceptResidual && plausible());
         };
-        if (bad (converged))
+        bool badSolve;
+        { VAMP_PROF (prof::kTriCheck); badSolve = bad (converged); }
+        if (badSolve)
         {
             ++statRetries;
             std::copy (lastU, lastU + nU, u);
@@ -214,7 +223,7 @@ public:
         }
         heldRun = 0;
         std::copy (u, u + nU, lastU);
-        dk.finish (i);
+        { VAMP_PROF (prof::kTriFinish); dk.finish (i); }
         for (int t = 0; t < NT; ++t) plateI[t] = i[2 * t];
         return true;
     }
@@ -298,6 +307,7 @@ private:
 
     void evalDevices (double (&i)[M], double (&d)[M][2]) const
     {
+        VAMP_PROF (prof::kTriEval);
         for (int t = 0; t < NT; ++t)
         {
             const int pk = 2 * t, gk = pk + 1;
@@ -326,6 +336,7 @@ private:
     double resTol = 2e-5;
     bool acceptSmallStep = true;
 
+    PortStepCache<M> stepCache; // K entries of the conducting ports (solvePortStep)
     KorenTriode triode[NT]; // one per tube: their variations (setTubeVariation) differ
     TubeNoise tubeNoise[NT];
     double vn[NT] {};           // this sample's tube noise (V at the grid)

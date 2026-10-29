@@ -1,6 +1,7 @@
 // UREI 1176LN Rev D model (Source/dsp/Urei1176.h) against the LTspice reference (spice/1176ln_revd.inc and the
 // 1176_*.cir test benches, which run the factory test procedures) and the factory specifications.
-// Build target: comp1176_test (no JUCE).  comp1176_test [spice | cpu | all]
+// Build target: comp1176_test (no JUCE).
+//   comp1176_test [spice | rates | release | null | metal | cpu | worst | stress | hf | retryfail | damped | all]
 #include <chrono>
 #include <cmath>
 #include <cstdio>
@@ -86,6 +87,7 @@ int worstBlock();
 int controlStress();
 int hfResponse();
 int retryFailure();
+int dampedFallback();
 static double outputForFraction (double frac) { return std::log10 (1.0 + 99.0 * frac) / 2.0; }
 
 static void spiceParity (double fs, bool reference = true)
@@ -210,7 +212,8 @@ static void cpu (double fs)
                  fs / 1000.0, 1e6 * sec / n, 100.0 * sec / 4.0,
                  (double) a.statIterations / a.statSamples, (double) b.statIterations / b.statSamples,
                  (double) c.statIterations / c.statSamples, a.statFailures + b.statFailures + c.statFailures, sink == 1234.5 ? "" : "");
-    std::printf ("  failures A %lld B %lld C %lld, held A %lld B %lld C %lld\n", a.statFailures, b.statFailures, c.statFailures, a.statHeld, b.statHeld, c.statHeld);
+    std::printf ("  failures A %lld B %lld C %lld, held A %lld B %lld C %lld, backtracking fallbacks A %lld B %lld C %lld\n",
+                 a.statFailures, b.statFailures, c.statFailures, a.statHeld, b.statHeld, c.statHeld, a.statDamped, b.statDamped, c.statDamped);
 }
 
 int main (int argc, char** argv)
@@ -224,6 +227,7 @@ int main (int argc, char** argv)
     if (mode == "stress") return controlStress();
     if (mode == "hf") return hfResponse();
     if (mode == "retryfail") return retryFailure();
+    if (mode == "damped") return dampedFallback();
     if (mode == "release") { releaseParity (96000.0, false); return 0; }
     if (mode == "spice" || mode == "all")
     {
@@ -516,6 +520,72 @@ int retryFailure()
         if (! pass) return 1;
     }
     return 0;
+}
+
+// The line-search Newton (SemiNetwork::newtonDamped: the fallback once both plain Newton attempts have failed,
+// and the DC operating point's last resort) forced on every solve: (1) on every running solve, with the DC
+// operating point found as usual, so each sample's fallback starts where a real one does (the last sample's
+// solution); (2) on the DC operating point's solves only. It solves the same equations to the same tolerance as
+// the plain path, so against a plain run every DC node must agree, the output must agree (tightly with the
+// reference precision, where the plain path has no small-step acceptance either), no sample may be held and no
+// solve may fail. Also how many evaluations that path costs per sample.
+int dampedFallback()
+{
+    const double fs = 96000.0;
+    bool allPass = true;
+    struct Case { bool running, dc, reference; };
+    for (int ratio : { 0, (int) Urei1176::rAll })
+        for (const Case& cs : { Case { true, false, true }, Case { true, false, false }, Case { false, true, false } })
+        {
+            Urei1176 ref, u;
+            u.testDampedOnly (cs.running, cs.dc);
+            for (auto* x : { &ref, &u })
+            {
+                x->setControls (Urei1176::fromKnobs (9.0, 8.5, 7.0, 6.0, ratio));
+                x->prepare (fs);
+                x->setReferencePrecision (cs.reference);
+            }
+            double dcDiff = 0.0;
+            bool dcOk = true;
+            for (int net = 0; net < 3; ++net)
+            {
+                const SemiNetwork& r = net == 0 ? ref.netA() : net == 1 ? ref.netB() : ref.netC();
+                const SemiNetwork& d = net == 0 ? u.netA() : net == 1 ? u.netB() : u.netC();
+                dcOk = dcOk && r.dcConverged && d.dcConverged && r.numDcNodes() == d.numDcNodes();
+                for (int k = 0; k < r.numDcNodes(); ++k) dcDiff = std::max (dcDiff, std::abs (r.dcNode (k) - d.dcNode (k)));
+            }
+            const int n = (int) (2.0 * fs);
+            double sumRef = 0.0, sumDiff = 0.0, maxDiff = 0.0;
+            bool finite = true;
+            for (int i = 0; i < n; ++i)
+            {
+                const double x = pickInput (i / fs), yr = ref.processSample (x), y = u.processSample (x);
+                finite = finite && std::isfinite (y);
+                sumRef += yr * yr;
+                sumDiff += (y - yr) * (y - yr);
+                maxDiff = std::max (maxDiff, std::abs (y - yr));
+            }
+            long long damped = 0, samples = 0, held = 0, failures = 0, evals = 0, evalsRef = 0, maxEvals = 0;
+            for (const SemiNetwork* s : { &u.netA(), &u.netB(), &u.netC() })
+            {
+                damped += s->statDamped; samples += s->statSamples; held += s->statHeld;
+                failures += s->statFailures + s->statRetryFailures; evals += s->statIterations;
+                maxEvals = std::max (maxEvals, s->statMaxIterations);
+            }
+            for (const SemiNetwork* s : { &ref.netA(), &ref.netB(), &ref.netC() }) evalsRef += s->statIterations;
+            const double errDb = 10.0 * std::log10 ((sumDiff + 1e-300) / sumRef);
+            const double errLimit = cs.running ? (cs.reference ? -100.0 : -60.0) : -100.0;
+            const bool pass = finite && dcOk && dcDiff < 1e-6 && held == 0 && failures == 0
+                           && (! cs.running || damped >= samples) && errDb < errLimit;
+            allPass = allPass && pass;
+            std::printf ("line-search Newton on %s, %s, %s precision: DC %s (nodes within %.2g V), %lld solves through it,"
+                         " evals / sample %.2f (plain path %.2f), most in one sample %lld, held %lld, failed %lld,"
+                         " output difference %.1f dB (peak %.2g V) -> %s\n", cs.running ? "every running solve" : "the DC solves",
+                         ratio == 0 ? "4:1" : "ALL", cs.reference ? "reference" : "default", dcOk ? "converged" : "NOT converged",
+                         dcDiff, damped, (double) evals / (double) samples, (double) evalsRef / (double) samples, maxEvals, held,
+                         failures, errDb, maxDiff, pass ? "PASS" : "FAIL");
+        }
+    return allPass ? 0 : 1;
 }
 
 // small-signal frequency response at 384 kHz, pots full CW, G.R. off (factory test 8: -3 dB at ~55 kHz)

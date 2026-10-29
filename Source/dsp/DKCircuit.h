@@ -101,6 +101,8 @@ public:
     int numPorts() const { return (int) ports.size(); }
     int numInputs() const { return (int) sources.size(); }
     int numNodesTotal() const { return numNodes; }
+    int numStates() const { return (int) (caps.size() + inds.size()); }
+    int numOutputs() const { return (int) outputs.size(); }
 
     // Element topology, for a DC operating point solved in a second instance of the same circuit (SemiNetwork):
     // capacitor / inductor / port idx -> its nodes (a, b)
@@ -209,6 +211,7 @@ public:
 
     // K (m x m, row-major): sensitivity of the port voltages to the port currents
     const std::vector<double>& getK() const { return K; }
+    unsigned getKVersion() const { return kVersion; } // changes whenever K may have (caches of K: PortSolve.h)
 
     // Given the converged port currents, compute the output nodes and advance the states
     // (uses the u passed to the preceding computeP0)
@@ -546,6 +549,7 @@ private:
         }
 
         dirty = false;
+        ++kVersion;
     }
 
     // Gauss-Jordan with partial pivoting: A (destroyed) -> I = A^-1, in place
@@ -587,6 +591,7 @@ private:
     double T = 1.0 / 192000.0;
     int numNodes = 0, numAux = 0, N = 0, m = 0, numS = 0, numSrc = 0, numNoise = 0, nzMain = 0, nz = 0;
     bool dirty = true;
+    unsigned kVersion = 0; // counts rebuilds: K (and the rest) changed
 
     static constexpr double kBoltzmann = 1.380649e-23;
     bool noiseOn = false;

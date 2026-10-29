@@ -79,6 +79,7 @@ void VibeAmpProcessor::prepareToPlay (double sampleRate, int samplesPerBlock)
     // Built-in fallback cabinet (used until the user loads an IR; loaded IRs are matched to its loudness)
     vamp::setupFallbackCab (fallbackCab, sampleRate);
     for (auto& f : eq) f.reset();
+    std::fill (std::begin (eqGainApplied), std::end (eqGainApplied), std::numeric_limits<float>::quiet_NaN()); // coefficients again at this rate
 
     phaser.prepare (stereoSpec);
     phaser.setCentreFrequency (1000.0f);
@@ -166,9 +167,14 @@ void VibeAmpProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Mid
     cabOn = pCabOn->load() > 0.5f;
 
     eqOn = pEqOn->load() > 0.5f;
-    if (eqOn)
+    if (eqOn) // coefficients only for a band whose gain moved (every block, they cost more than the filters at small buffers)
         for (int i = 0; i < 10; ++i)
-            eq[i].set (vamp::Biquad::Type::peak, sampleRateHz, ids::eqFreqs[i], 1.41, pEq[i]->load());
+        {
+            const float g = pEq[i]->load();
+            if (g == eqGainApplied[i]) continue;
+            eqGainApplied[i] = g;
+            eq[i].set (vamp::Biquad::Type::peak, sampleRateHz, ids::eqFreqs[i], 1.41, g);
+        }
 
     phaserOn = pPhaserOn->load() > 0.5f;
     phaser.setRate (pPhRate->load());

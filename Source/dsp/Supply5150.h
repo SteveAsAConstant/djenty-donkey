@@ -33,7 +33,7 @@ struct Supply5150
     double charge() const
     {
         const double e = kEmfRms * std::sqrt (2.0) * std::abs (std::sin (2.0 * 3.14159265358979323846 * phase));
-        return std::max (0.0, (e - kDiodeDrops - plate) / kRwinding);
+        return std::max (0.0, (e - kDiodeDrops - plate) * (1.0 / kRwinding));
     }
 
     // Operating point for constant load currents (A): the reservoir is run over the mains cycles until its ripple
@@ -76,14 +76,17 @@ struct Supply5150
     // h: time step (s); currents (A) drawn from each node
     void step (double h, double iPlate, double iScreen, double i3, double i2, double i1)
     {
-        const double iR210 = (plate - screen) / kR210, iR59 = (screen - v3) / kR59;
-        const double iR60 = (v3 - v2) / kR60, iR61 = (v2 - v1) / kR61;
+        // reciprocals instead of divisions (a division costs ~10x a multiply; rounding-level differences only)
+        constexpr double gR210 = 1.0 / kR210, gR59 = 1.0 / kR59, gR60 = 1.0 / kR60, gR61 = 1.0 / kR61, gBleed = 1.0 / kRbleed;
+        constexpr double sPlate = 1.0 / kCplate, sScreen = 1.0 / kCscreen, s36 = 1.0 / kC36, s37 = 1.0 / kC37, s33 = 1.0 / kC33;
+        const double iR210 = (plate - screen) * gR210, iR59 = (screen - v3) * gR59;
+        const double iR60 = (v3 - v2) * gR60, iR61 = (v2 - v1) * gR61;
         const double iCharge = charge(); // the bridge conducts only to charge
-        plate += h / kCplate * (iCharge - iPlate - iR210 - plate / kRbleed);
-        screen += h / kCscreen * (iR210 - iScreen - iR59 - screen / kRbleed);
-        v3 += h / kC36 * (iR59 - i3 - iR60);
-        v2 += h / kC37 * (iR60 - i2 - iR61);
-        v1 += h / kC33 * (iR61 - i1);
+        plate += h * sPlate * (iCharge - iPlate - iR210 - plate * gBleed);
+        screen += h * sScreen * (iR210 - iScreen - iR59 - screen * gBleed);
+        v3 += h * s36 * (iR59 - i3 - iR60);
+        v2 += h * s37 * (iR60 - i2 - iR61);
+        v1 += h * s33 * (iR61 - i1);
         phase += h * kMainsHz;
         if (phase >= 1.0) phase -= 1.0;
     }

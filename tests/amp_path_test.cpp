@@ -18,7 +18,9 @@
 #include <memory>
 #include <string>
 #include <vector>
+#include <fstream>
 #include "dsp/AmpSim.h"
+#include "dsp/CabMatch.h"
 #include "dsp/FFT.h"
 #include "dsp/MultibandGate.h"
 #include "NamWaveNet.h"
@@ -245,7 +247,7 @@ void zipperTests()
 // total (thumps) } for the switch and for the reference.
 struct SwitchResult { double click, thump, refClick, refThump; };
 
-SwitchResult switchTest (int from, int to, double fadeMs)
+SwitchResult switchTest (int from, int to, double fadeMs, double dipMs = 4.0)
 {
     constexpr int os = 8;
     const double rate = fs * os;
@@ -257,6 +259,7 @@ SwitchResult switchTest (int from, int to, double fadeMs)
         auto p = std::make_unique<vamp::Preamp5150>();
         p->setChannelTrims (vamp::kChannelPost[0], vamp::kChannelPost[1], vamp::kChannelPost[2]);
         p->switchFadeMs = fadeMs;
+        p->switchDipMs = dipMs;
         p->prepare (rate); p->setMode (channel);
         p->setControls (s.gain, s.bass, s.mid, s.treble, s.master);
         return p;
@@ -476,17 +479,185 @@ void sustainTest (const namcmp::NamWaveNet* nam, double peakV, double decayDbPer
     }
 }
 
+// mono 32-bit float WAV
+void writeWav (const std::string& path, const std::vector<double>& x, double rate, double gain)
+{
+    std::ofstream f (path, std::ios::binary);
+    auto u32 = [&] (uint32_t v) { f.write ((const char*) &v, 4); };
+    auto u16 = [&] (uint16_t v) { f.write ((const char*) &v, 2); };
+    const uint32_t n = (uint32_t) x.size();
+    f.write ("RIFF", 4); u32 (36 + n * 4); f.write ("WAVE", 4);
+    f.write ("fmt ", 4); u32 (16); u16 (3); u16 (1); u32 ((uint32_t) rate); u32 ((uint32_t) rate * 4); u16 (4); u16 (32);
+    f.write ("data", 4); u32 (n * 4);
+    for (double v : x) { const float s = (float) (v * gain); f.write ((const char*) &s, 4); }
+}
+
+// Listening A/B of the channel switch (amp_path_test render <dir>): a palm-muted riff through the plugin's amp path
+// (AmpSim at 48 kHz, 64-sample blocks) and the built-in cab, switching RED -> BLUE -> RED -> CLEAN -> RED -> BLUE
+// once a second, rendered with the relay switch and with the old 20 ms two-circuit crossfade. 32-bit float WAVs at
+// the same gain, so the two can be compared directly.
+void renderSwitchAB (const std::string& dir)
+{
+    constexpr double rate = 48000.0, secs = 6.0;
+    constexpr int block = 64;
+    const int n = (int) (rate * secs);
+    std::vector<float> di ((size_t) n);
+    unsigned rng = 1;
+    const double f[] = { 41.2, 61.7, 82.4 };
+    for (int i = 0; i < n; ++i)
+    {
+        const double t = i / rate, ph = std::fmod (t, 0.25), env = std::exp (-ph * 22.0); // eighth-note chugs at 120 bpm
+        double v = 0;
+        for (double fr : f)
+            for (int h = 1; h <= 6; ++h) v += env * 0.12 / h * std::sin (2 * kPi * fr * h * t + h);
+        rng = rng * 1664525u + 1013904223u;
+        di[(size_t) i] = (float) (v + 0.0003 * ((rng >> 8) / 8388608.0 - 1.0));
+    }
+    const int channels[6] = { 2, 1, 2, 0, 2, 1 }; // RED BLUE RED CLEAN RED BLUE, a second each (switch 0.1 s into a beat)
+    std::vector<double> out[4];
+    for (int which = 0; which < 4; ++which) // relay with a 4 ms dip, hard relay swap, the old crossfade, a 12 ms dip
+    {
+        const double fadeMs = which == 2 ? 20.0 : 0.0;
+        vamp::AmpSim amp;
+        amp.setSwitchFadeMs (fadeMs);
+        amp.setSwitchDipMs (which == 1 ? 0.0 : which == 3 ? 12.0 : 4.0);
+        auto s = settings();
+        amp.prepare (rate, block);
+        vamp::Biquad cab[5];
+        vamp::setupFallbackCab (cab, rate);
+        std::vector<double> y ((size_t) n);
+        std::vector<float> buf (block);
+        for (int start = 0; start < n; start += block)
+        {
+            s.channel = channels[std::min (5, (int) (start / rate + 0.9))];
+            std::copy (di.begin() + start, di.begin() + start + block, buf.begin());
+            amp.process (buf.data(), block, s);
+            for (int i = 0; i < block; ++i)
+            {
+                float v = buf[(size_t) i];
+                for (auto& c : cab) v = c.process (v);
+                y[(size_t) (start + i)] = v;
+            }
+        }
+        out[which] = std::move (y);
+    }
+    double peak = 0;
+    for (const auto& y : out) for (double v : y) peak = std::max (peak, std::abs (v));
+    const double gain = 0.7 / std::max (peak, 1e-9); // the same gain for all: -3 dBFS at the loudest peak
+    writeWav (dir + "/switch_relay_dip4ms.wav", out[0], rate, gain);
+    writeWav (dir + "/switch_relay_hard.wav", out[1], rate, gain);
+    writeWav (dir + "/switch_crossfade20ms_old.wav", out[2], rate, gain);
+    writeWav (dir + "/switch_relay_dip12ms.wav", out[3], rate, gain);
+    std::printf ("wrote %s/switch_relay_dip4ms.wav, switch_relay_hard.wav, switch_crossfade20ms_old.wav (gain %.3g)\n",
+                 dir.c_str(), gain);
+}
+
+// Drive pedal switching (amp_path_test boost [dir]): with the Boost on only the selected pedal runs, and a switch fades
+// the other one in from rest. Against both pedals running all the time (the behaviour before, AmpSim::testBothPedals)
+// the output must be identical while a pedal is settled, and after each switch the difference (the woken pedal's own
+// start-up transient, faded in over 20 ms, then the two renders converging as its filters forget their start) is
+// reported relative to the signal in windows after the switch. dir: also writes the two renders as WAVs (48 kHz,
+// through the built-in cab).
+void boostSwitchTests (const char* dir)
+{
+    constexpr double rate = 48000.0, secs = 4.0;
+    constexpr int block = 64;
+    const int n = (int) (rate * secs);
+    std::vector<float> di ((size_t) n);
+    unsigned rng = 1;
+    const double f[] = { 41.2, 61.7, 82.4 };
+    for (int i = 0; i < n; ++i)
+    {
+        const double t = i / rate, ph = std::fmod (t, 0.25), env = std::exp (-ph * 22.0); // eighth-note chugs at 120 bpm
+        double v = 0;
+        for (double fr : f)
+            for (int h = 1; h <= 6; ++h) v += env * 0.12 / h * std::sin (2 * kPi * fr * h * t + h);
+        rng = rng * 1664525u + 1013904223u;
+        di[(size_t) i] = (float) (v + 0.0003 * ((rng >> 8) / 8388608.0 - 1.0));
+    }
+    const double switchAt[] = { 0.6, 1.1, 1.85, 2.6, 3.3 }; // PD -> TS9 -> PD -> TS9 -> PD -> TS9, on and off the beat
+    auto modelAt = [&] (double t) { int m = 0; for (double sw : switchAt) if (t >= sw) m ^= 1; return m; };
+    auto render = [&] (bool both)
+    {
+        vamp::AmpSim amp;
+        amp.testBothPedals = both;
+        auto s = settings();
+        s.boostOn = true; s.boostDrive = 0.6f; s.boostBright = 0.5f; s.boostLevel = 0.7f; s.boostAttack = 2;
+        amp.prepare (rate, block);
+        vamp::Biquad cab[5];
+        vamp::setupFallbackCab (cab, rate);
+        std::vector<double> y ((size_t) n), yc ((size_t) n);
+        std::vector<float> buf (block);
+        for (int start = 0; start < n; start += block)
+        {
+            s.boostModel = modelAt (start / rate);
+            std::copy (di.begin() + start, di.begin() + start + block, buf.begin());
+            amp.process (buf.data(), block, s);
+            for (int i = 0; i < block; ++i)
+            {
+                float v = buf[(size_t) i];
+                y[(size_t) (start + i)] = v;
+                for (auto& c : cab) v = c.process (v);
+                yc[(size_t) (start + i)] = v;
+            }
+        }
+        return std::pair { y, yc };
+    };
+    const auto [warm, warmCab] = render (true);
+    const auto [single, singleCab] = render (false);
+    std::printf ("\n== drive pedal switch: only the selected pedal runs vs both always running (speaker volts, 48 kHz) ==\n");
+    long long identical = 0;
+    for (int i = 0; i < (int) (switchAt[0] * rate); ++i) identical += warm[(size_t) i] == single[(size_t) i];
+    std::printf ("before the first switch: %lld of %d samples identical\n", identical, (int) (switchAt[0] * rate));
+    std::printf ("%-10s %-11s | %s\n", "switch at", "to", "difference re the signal (dB) in the windows after it: 0-20 ms  20-50  50-100  100-200  200-400; peak (V)");
+    bool pass = identical == (long long) (switchAt[0] * rate);
+    for (double sw : switchAt)
+    {
+        const double edges[] = { 0.0, 0.02, 0.05, 0.1, 0.2, 0.4 };
+        std::printf ("%7.2f s  %-11s |", sw, modelAt (sw) == 1 ? "TS9" : "Precision");
+        double peak = 0.0;
+        for (int w = 0; w < 5; ++w)
+        {
+            double sig = 0.0, diff = 0.0;
+            const int a = (int) ((sw + edges[w]) * rate), b = std::min (n, (int) ((sw + edges[w + 1]) * rate));
+            for (int i = a; i < b; ++i)
+            {
+                const double d = single[(size_t) i] - warm[(size_t) i];
+                sig += warm[(size_t) i] * warm[(size_t) i]; diff += d * d; peak = std::max (peak, std::abs (d));
+            }
+            const double db = 10.0 * std::log10 ((diff + 1e-300) / (sig + 1e-300));
+            std::printf (" %7.1f", db);
+            if (w == 0 && db > -20.0) pass = false; // the woken pedal's transient inside the fade
+            if (w == 4 && db > -60.0) pass = false; // forgotten 200 ms later
+        }
+        std::printf ("   %.3g\n", peak);
+    }
+    std::printf ("-> %s\n", pass ? "PASS" : "FAIL");
+    if (dir)
+    {
+        double pk = 0.0;
+        for (const auto* y : { &warmCab, &singleCab }) for (double v : *y) pk = std::max (pk, std::abs (v));
+        const double gain = 0.7 / std::max (pk, 1e-9);
+        writeWav (std::string (dir) + "/boost_switch_single_pedal.wav", singleCab, rate, gain);
+        writeWav (std::string (dir) + "/boost_switch_both_pedals.wav", warmCab, rate, gain);
+        std::printf ("wrote %s/boost_switch_single_pedal.wav, boost_switch_both_pedals.wav (gain %.3g)\n", dir, gain);
+    }
+}
+
 void switchTests()
 {
     std::printf ("\n== channel switch: 220 Hz 0.1 V; dB re total (lower is cleaner) ==\n");
     std::printf ("(ideal: two always-running preamps crossfaded over the same time into one power amp)\n");
     const char* name[] = { "CLEAN", "BLUE", "RED" };
-    for (double fadeMs : { 0.0, 20.0 }) // 0: a hard switch (one sample), for comparison
+    // the relay switch with no dip (one sample), the plugin's relay switch (4 ms dip), the old 20 ms crossfade
+    struct Mode { const char* label; double fadeMs, dipMs; };
+    for (const Mode& m : { Mode { "relay, no dip       ", 0.0, 0.0 }, Mode { "relay, 4 ms dip     ", 0.0, 4.0 },
+                           Mode { "crossfade 20 ms     ", 20.0, 0.0 } })
     {
-        std::printf ("%-11s %4.0f ms | %10s %10s | %10s %10s\n", "switch, fade", fadeMs, "clicks", "thump", "ideal clk", "ideal thp");
+        std::printf ("%s | %10s %10s | %10s %10s\n", m.label, "clicks", "thump", "ideal clk", "ideal thp");
         for (const auto& p : { std::pair { 2, 1 }, std::pair { 1, 2 }, std::pair { 2, 0 }, std::pair { 0, 2 }, std::pair { 1, 0 }, std::pair { 0, 1 } })
         {
-            const auto r = switchTest (p.first, p.second, fadeMs);
+            const auto r = switchTest (p.first, p.second, m.fadeMs, m.dipMs);
             std::printf ("%-6s -> %-11s | %+10.1f %+10.1f | %+10.1f %+10.1f\n", name[p.first], name[p.second], r.click, r.thump, r.refClick, r.refThump);
         }
     }
@@ -509,6 +680,8 @@ int main (int argc, char** argv)
 {
     if (argc > 1 && std::string (argv[1]) == "knobs") { zipperTests(); return 0; }
     if (argc > 1 && std::string (argv[1]) == "switch") { switchTests(); return 0; }
+    if (argc > 1 && std::string (argv[1]) == "boost") { boostSwitchTests (argc > 2 ? argv[2] : nullptr); return 0; }
+    if (argc > 2 && std::string (argv[1]) == "render") { renderSwitchAB (argv[2]); return 0; }
     if (argc > 1 && std::string (argv[1]) == "sustain") // [model.nam]: the capture of settings() (Pr-5 B-6 M-4 T-6 Po-3 R-9 P-8)
     {
         namcmp::NamWaveNet nam;
