@@ -231,6 +231,8 @@ public:
         rRes = dk.addR (nM, nY, 1e6);      // VR8 resonance
         dk.addC (nY, nL, 22e-6);           // C30: the feedback network is AC-coupled to the tail (no DC through VR8)
         rPres = dk.addR (nY, nPr, 10e3);   // VR9 presence (10k audio taper, wiper tied to the capacitor end)
+        dk.markVariable (rRes, 5e5);       // the knobs: low-rank matrix updates while turning (DKCircuit)
+        dk.markVariable (rPres, 1e3);
         dk.addC (nPr, G, 0.133e-6);        // C8 0.1u || C62 0.033u
 
         dk.addC (nPB, nC1, 47e-9);         // C29

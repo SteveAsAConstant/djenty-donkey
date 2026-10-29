@@ -1541,6 +1541,134 @@ void run()
                  "of all runs (incl. OS interruptions); over = blocks past the deadline (fastest-run times); 1st = the first "
                  "block (channel reset, every knob applied), left out of the other columns with the rest of the first 10 ms\n");
 }
+
+// dsp_test iter8 compdetail: the 1176's costliest blocks (IN 10, attack / release 7, ALL; by Newton evaluations, which
+// are deterministic) sample by sample: the input, CTRL, the coupled A / C passes, the evaluations of A, B and C, and
+// which solves needed the restart from the last sample's solution (first attempt over 8 evaluations)
+void compWorstDetail()
+{
+    const auto di = guitarDI (kCompRate, kSeconds);
+    const int numBlocks = (int) (kBase * kSeconds) / kBlock;
+    struct Smp { double x, ctrl; long long pass, a, b, c, aSlow, cSlow, aRetrySlow, cRetrySlow, bSlow; };
+    std::vector<Smp> smp (di.size());
+    std::vector<long long> blockEvals ((size_t) numBlocks, 0);
+    Urei1176 m;
+    m.setControls (Urei1176::fromKnobs (10, 8.5, 7, 7, 4));
+    m.prepare (kCompRate);
+    for (int b = 0; b < numBlocks; ++b)
+        for (int i = 0; i < kCompBlock; ++i)
+        {
+            const size_t k = (size_t) (b * kCompBlock + i);
+            const auto& A = m.netA(); const auto& B = m.netB(); const auto& C = m.netC();
+            const long long p0 = m.statPasses, a0 = A.statIterations, b0 = B.statIterations, c0 = C.statIterations;
+            const long long as0 = A.statSlow, cs0 = C.statSlow, ar0 = A.statRetrySlow, cr0 = C.statRetrySlow, bs0 = B.statSlow;
+            m.processSample (di[k]);
+            smp[k] = { di[k], m.controlVoltage(), m.statPasses - p0, A.statIterations - a0, B.statIterations - b0,
+                       C.statIterations - c0, A.statSlow - as0, C.statSlow - cs0, A.statRetrySlow - ar0,
+                       C.statRetrySlow - cr0, B.statSlow - bs0 };
+            blockEvals[(size_t) b] += smp[k].a + smp[k].b + smp[k].c;
+        }
+    std::vector<int> order ((size_t) numBlocks);
+    for (int b = 0; b < numBlocks; ++b) order[(size_t) b] = b;
+    std::sort (order.begin() + kSkipBlocks, order.end(), [&] (int x, int y) { return blockEvals[(size_t) x] > blockEvals[(size_t) y]; });
+    // totals over the whole render: where the restarts happen
+    long long tA = 0, tB = 0, tC = 0, sA = 0, sC = 0, rA = 0, rC = 0, sB = 0, passes = 0;
+    for (const auto& s : smp) { tA += s.a; tB += s.b; tC += s.c; sA += s.aSlow; sC += s.cSlow; rA += s.aRetrySlow; rC += s.cRetrySlow; sB += s.bSlow; passes += s.pass; }
+    std::printf ("\n== 1176 IN 10, atk/rel 7, ALL: the costliest blocks sample by sample (96 kHz, 16 samples / block) ==\n");
+    std::printf ("whole render: evaluations per sample A %.2f B %.2f C %.2f, coupled passes %.3f; restarts (first attempt > 8) "
+                 "A %lld + %lld in retries, C %lld + %lld, B %lld\n", (double) tA / smp.size(), (double) tB / smp.size(),
+                 (double) tC / smp.size(), (double) passes / smp.size(), sA, rA, sC, rC, sB);
+    for (int r = 0; r < 3; ++r)
+    {
+        const int b = order[(size_t) (kSkipBlocks + r)];
+        std::printf ("\nblock at %.4f s: %lld evaluations\n%4s %9s %9s %5s %5s %5s %5s %s\n", (double) b * kBlock / kBase,
+                     blockEvals[(size_t) b], "smp", "in (V)", "CTRL (V)", "pass", "A", "B", "C", "restarts");
+        for (int i = 0; i < kCompBlock; ++i)
+        {
+            const auto& s = smp[(size_t) (b * kCompBlock + i)];
+            std::printf ("%4d %9.4f %9.5f %5lld %5lld %5lld %5lld %s%s%s%s%s\n", i, s.x, s.ctrl, s.pass, s.a, s.b, s.c,
+                         s.aSlow ? " A" : "", s.aRetrySlow ? " A-retry" : "", s.cSlow ? " C" : "", s.cRetrySlow ? " C-retry" : "",
+                         s.bSlow ? " B" : "");
+        }
+    }
+}
+
+// dsp_test iter8 compbudget: the 1176's Newton starts against the work and the output. Per scene (IN 10 / ALL and
+// IN 7 / 4:1 on the guitar DI, comp1176_test cpu's 20:1 sine bursts) and setting: Newton evaluations per sample, the
+// costliest 16-sample block and sample, restarts, coupled passes, the output against the LTspice-tight solve and
+// against the first row (the setting before 2026-10-29: first attempt 8, predictors always on). Settings: the first
+// attempt's evaluations before the restart from the last sample's solution; predictors on in A / B / C; the predictor
+// gate of B and C (no predictor after a sample that took more evaluations than that; 0: always on)
+void compBudget()
+{
+    struct Cfg { int first, retry, pred, gate; };
+    const Cfg cfgs[] = { { 8, 8, 7, 0 }, { 24, 8, 7, 0 }, { 24, 8, 1, 0 }, { 24, 8, 7, 1 }, { 24, 8, 7, 2 }, { 24, 8, 7, 3 },
+                         { 24, 8, 7, 4 }, { 24, 8, 7, 6 } };
+    const auto di = guitarDI (kCompRate, kSeconds);
+    std::vector<double> burst (di.size());
+    for (size_t i = 0; i < burst.size(); ++i)
+    {
+        const double t = (double) i / kCompRate, env = std::fmod (t, 0.5) < 0.25 ? 1.0 : 0.05;
+        burst[i] = env * 0.5 * std::sin (2.0 * kPi * 110.0 * t) + env * 0.2 * std::sin (2.0 * kPi * 880.0 * t);
+    }
+    Urei1176::Controls burstCtl;
+    burstCtl.inputDb = -10.0; burstCtl.output = 0.5; burstCtl.attack = 0.8; burstCtl.release = 0.6; burstCtl.ratio = Urei1176::r4;
+    struct Scene { const char* name; Urei1176::Controls ctl; const std::vector<double>* x; };
+    const Scene scenes[] = { { "IN 10, atk/rel 7, ALL, guitar DI", Urei1176::fromKnobs (10, 8.5, 7, 7, 4), &di },
+                             { "IN 7, atk/rel 5, 4:1, guitar DI", Urei1176::fromKnobs (7, 8.5, 5, 5, 0), &di },
+                             { "20:1-ish sine bursts (comp1176_test cpu)", burstCtl, &burst } };
+    for (const auto& sc : scenes)
+    {
+        const auto& x = *sc.x;
+        struct Stats { long long evals = 0, worstBlock = 0, worstSmp = 0, restarts = 0; double passes = 0; };
+        auto render = [&] (const Cfg* c, bool refPrec, Stats& st) {
+            Urei1176 m;
+            m.setControls (sc.ctl);
+            if (c)
+            {
+                m.setFirstAttempt (c->first, c->retry);
+                m.setPredictors (c->pred & 1, c->pred & 2, c->pred & 4);
+                m.setPredictorGates (0, c->gate, c->gate);
+            }
+            if (refPrec) m.setReferencePrecision (true);
+            m.prepare (kCompRate);
+            std::vector<double> y (x.size());
+            long long blk = 0;
+            for (size_t k = 0; k < x.size(); ++k)
+            {
+                const long long e0 = m.netA().statIterations + m.netB().statIterations + m.netC().statIterations;
+                y[k] = m.processSample (x[k]);
+                const long long d = m.netA().statIterations + m.netB().statIterations + m.netC().statIterations - e0;
+                st.evals += d; blk += d; st.worstSmp = std::max (st.worstSmp, d);
+                if ((k + 1) % (size_t) kCompBlock == 0) { if ((int) (k / kCompBlock) >= kSkipBlocks) st.worstBlock = std::max (st.worstBlock, blk); blk = 0; }
+            }
+            st.passes = (double) m.statPasses / (double) x.size();
+            st.restarts = m.netA().statSlow + m.netA().statRetrySlow + m.netB().statSlow + m.netC().statSlow + m.netC().statRetrySlow;
+            return y;
+        };
+        auto diffDb = [] (const std::vector<double>& a, const std::vector<double>& b) {
+            double e = 0, s = 0;
+            for (size_t k = 0; k < a.size(); ++k) { e += (a[k] - b[k]) * (a[k] - b[k]); s += b[k] * b[k]; }
+            return 10.0 * std::log10 (std::max (e, 1e-300) / std::max (s, 1e-300));
+        };
+        Stats refSt;
+        const auto ref = render (nullptr, true, refSt);
+        std::vector<double> first;
+        std::printf ("\n== 1176 %s ==\n", sc.name);
+        std::printf ("%6s %6s %6s %5s %10s %12s %10s %9s %8s %14s %14s\n", "first", "retry", "pred", "gate", "evals/smp", "worst block",
+                     "worst smp", "restarts", "passes", "vs tight (dB)", "vs row 1 (dB)");
+        for (const auto& c : cfgs)
+        {
+            Stats st;
+            const auto y = render (&c, false, st);
+            if (first.empty()) first = y;
+            const char* pred = c.pred == 7 ? "ABC" : c.pred == 1 ? "A" : "?";
+            std::printf ("%6d %6d %6s %5d %10.3f %12lld %10lld %9lld %8.3f %14.1f %14.1f\n", c.first, c.retry, pred, c.gate,
+                         (double) st.evals / (double) x.size(), st.worstBlock, st.worstSmp, st.restarts, st.passes, diffDb (y, ref),
+                         diffDb (y, first));
+        }
+    }
+}
 } // namespace block8
 
 static void transposeTests()
@@ -2110,9 +2238,125 @@ static bool portSolveTests()
     return a && b;
 }
 
+// dsp_test potupdate: the pots' low-rank matrix update (DKCircuit::markVariable) against a full rebuild with the same
+// values, over both pots' whole travel (the ends included: a pot shorted to 1 mOhm), for every channel's circuit and
+// the power amp. Per matrix the largest difference relative to the largest entry of its row (K, P, M and O; P / M / O
+// over the inputs, states, port currents and noise).
+static double potUpdateError (const DKCircuit& fast, const DKCircuit& direct)
+{
+    double worst = 0.0;
+    const int m = fast.numPorts(), nS = fast.numStates(), nO = fast.numOutputs();
+    auto rowErr = [&] (const std::vector<double>& a, const std::vector<double>& b, int rows, int cols, int ld, bool colMajor) {
+        for (int r = 0; r < rows; ++r)
+        {
+            double scale = 0.0, err = 0.0;
+            for (int c = 0; c < cols; ++c)
+            {
+                const size_t i = colMajor ? (size_t) c * ld + r : (size_t) r * ld + c;
+                scale = std::max (scale, std::abs (b[i]));
+                err = std::max (err, std::abs (a[i] - b[i]));
+                if (! std::isfinite (a[i])) err = 1e300;
+            }
+            if (scale > 0.0) worst = std::max (worst, err / scale);
+            else if (err > 0.0) worst = std::max (worst, 1e300);
+        }
+    };
+    rowErr (fast.getK(), direct.getK(), m, m, m, false);
+    // the columns in use: with noise off the noise columns are not read (and not updated, DKCircuit::updateVariable)
+    const int nzAll = (int) (fast.getPt().size() / (size_t) ((m + 3) & ~3));
+    const int nzCols = fast.getNoise() ? nzAll : nS + fast.numInputs() + m;
+    rowErr (fast.getPt(), direct.getPt(), m, nzCols, (m + 3) & ~3, true);
+    rowErr (fast.getMt(), direct.getMt(), nS, nzCols, (nS + 3) & ~3, true);
+    rowErr (fast.getO(), direct.getO(), nO, nzCols, nzAll, false);
+    return worst;
+}
+
+static bool potUpdateTests()
+{
+    const double f[] = { 0.0, 1e-6, 1e-3, 0.02, 0.1, 0.25, 0.5, 0.75, 0.9, 0.98, 0.999, 1.0 };
+    bool ok = true;
+    std::vector<double> errs; // this case's settings: the median as well as the worst
+    auto report = [&] (const char* name, double worst, int cases) {
+        std::sort (errs.begin(), errs.end());
+        const double median = errs.empty() ? 0.0 : errs[errs.size() / 2];
+        errs.clear();
+        // rounding level (measured: preamp ~1e-12, power amp ~1e-10, the pot ends included); the amp's output moves
+        // less than with every resistor scaled by 1 + 1e-14 (golden, DD_G_SCALE)
+        const bool pass = worst < 1e-9;
+        std::printf ("%-26s %4d settings, row-relative difference vs a full rebuild: median %.1e, worst %.2e -> %s\n", name,
+                     cases, median, worst, pass ? "PASS" : "FAIL");
+        ok = ok && pass;
+    };
+    Preamp5150 pre;
+    pre.prepare (8 * 48000.0);
+    auto preCase = [&] (const char* name, auto member, bool noise = false) {
+        pre.setNoise (noise);
+        double worst = 0.0;
+        int cases = 0;
+        for (double a : f)
+            for (double b : f)
+            {
+                pre.setPreGainPots (a, b);
+                DKCircuit fast = (pre.*member).net.dk;
+                fast.ensureBuilt();
+                DKCircuit direct = fast;
+                direct.rebuildDirect();
+                const double e = potUpdateError (fast, direct);
+                errs.push_back (e);
+                worst = std::max (worst, e);
+                ++cases;
+            }
+        report (name, worst, cases);
+    };
+    preCase ("preamp RED (VR2, VR1)", &Preamp5150::lead);
+    preCase ("preamp BLUE", &Preamp5150::blue);
+    preCase ("preamp BLUE crunch off", &Preamp5150::blueOff);
+    preCase ("preamp CLEAN", &Preamp5150::clean);
+    preCase ("preamp RED, noise on", &Preamp5150::lead, true);
+    preCase ("preamp BLUE, noise on", &Preamp5150::blue, true);
+    {
+        PowerAmp5150 pa;
+        pa.prepare (8 * 48000.0);
+        double worst = 0.0;
+        int cases = 0;
+        for (double a : f)
+            for (double b : f)
+            {
+                pa.setControls (a, b);
+                DKCircuit fast = pa.circuit();
+                fast.ensureBuilt();
+                DKCircuit direct = fast;
+                direct.rebuildDirect();
+                const double e = potUpdateError (fast, direct);
+                errs.push_back (e);
+                worst = std::max (worst, e);
+                ++cases;
+            }
+        report ("power amp (VR9, VR8)", worst, cases);
+    }
+    // a knob's path does not matter: the same values after a sweep give the same matrices, bit for bit
+    {
+        Preamp5150 p2;
+        p2.prepare (8 * 48000.0);
+        p2.setPreGainPots (0.37, 0.61);
+        DKCircuit once = p2.lead.net.dk;
+        once.ensureBuilt();
+        for (double a : f) { p2.setPreGainPots (a, 1.0 - a); p2.lead.net.dk.ensureBuilt(); }
+        p2.setPreGainPots (0.37, 0.61);
+        DKCircuit swept = p2.lead.net.dk;
+        swept.ensureBuilt();
+        const bool same = potUpdateError (once, swept) == 0.0;
+        std::printf ("%-26s same values after a sweep: matrices %s -> %s\n", "path independence", same ? "identical" : "differ",
+                     same ? "PASS" : "FAIL");
+        ok = ok && same;
+    }
+    return ok;
+}
+
 int main (int argc, char** argv)
 {
     if (argc > 1 && std::string (argv[1]) == "portsolve") return portSolveTests() ? 0 : 1;
+    if (argc > 1 && std::string (argv[1]) == "potupdate") return potUpdateTests() ? 0 : 1;
     if (argc > 1 && std::string (argv[1]) == "noise") { noiseTests(); return 0; }
     if (argc > 1 && std::string (argv[1]) == "tubes") { tubeSetTests(); return 0; }
     if (argc > 1 && std::string (argv[1]) == "fault") return faultRecoveryTests() ? 0 : 1;
@@ -2120,7 +2364,7 @@ int main (int argc, char** argv)
     if (argc > 1 && std::string (argv[1]) == "costs") { block8::costBreakdown(); return 0; }
     if (argc > 1 && std::string (argv[1]) == "block8") { if (argc > 2) block8::setBlock (std::clamp (std::atoi (argv[2]), 1, 64)); block8::run(); return 0; }
     if (argc > 1 && std::string (argv[1]) == "switch8") { block8::switchProfile(); return 0; }
-    if (argc > 1 && std::string (argv[1]) == "iter8") { if (argc > 2 && std::string (argv[2]) == "comp") block8::compIterProfile(); else block8::iterProfile(); return 0; }
+    if (argc > 1 && std::string (argv[1]) == "iter8") { if (argc > 2 && std::string (argv[2]) == "comp") block8::compIterProfile(); else if (argc > 2 && std::string (argv[2]) == "compdetail") block8::compWorstDetail(); else if (argc > 2 && std::string (argv[2]) == "compbudget") block8::compBudget(); else block8::iterProfile(); return 0; }
     if (argc > 1 && std::string (argv[1]) == "twocore") { block8::twoCoreTest(); return 0; }
     if (argc > 1 && std::string (argv[1]) == "tables") { tubeTableAccuracy(); return 0; }
     if (argc > 1 && std::string (argv[1]) == "tube") { pentodeDatasheet(); return 0; }

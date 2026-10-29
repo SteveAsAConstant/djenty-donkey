@@ -20,13 +20,23 @@ struct Scope
     explicit Scope (int s) : slot (s), t0 (__rdtsc()) {}
     ~Scope() { cycles[slot] += __rdtsc() - t0; ++calls[slot]; }
 };
+// consecutive phases: each lap(slot) charges the time since the previous lap (or the start) to slot
+struct Lap
+{
+    unsigned long long t = __rdtsc();
+    void operator() (int slot) { const auto n = __rdtsc(); cycles[slot] += n - t; ++calls[slot]; t = n; }
+};
 } // namespace vamp::prof
 
 #define VAMP_PROF_CAT2(a, b) a##b
 #define VAMP_PROF_CAT(a, b) VAMP_PROF_CAT2 (a, b)
 #define VAMP_PROF(slot) const vamp::prof::Scope VAMP_PROF_CAT (vampProf, __LINE__) (slot)
+#define VAMP_PROF_LAPS vamp::prof::Lap vampLap
+#define VAMP_PROF_LAP(slot) vampLap (slot)
 #else
 #define VAMP_PROF(slot)
+#define VAMP_PROF_LAPS
+#define VAMP_PROF_LAP(slot)
 #endif
 
 namespace vamp::prof
@@ -35,6 +45,8 @@ namespace vamp::prof
 enum Slot
 {
     kTriSolve = 0, kTriP0, kTriEval, kTriResidual, kTriStep, kTriFinish, kTriCheck,
-    kPowProcess = 10, kPowP0, kPowEval, kPowResidual, kPowStep, kPowFinish, kPowSupply, kPowCheck
+    kPowProcess = 10, kPowP0, kPowEval, kPowResidual, kPowStep, kPowFinish, kPowSupply, kPowCheck,
+    // DKCircuit::rebuild (a pot moved)
+    kDkRebuild = 20, kDkStamp, kDkInvert, kDkAinvNi, kDkV, kDkPMO, kDkTranspose, kDkUpdate
 };
 }

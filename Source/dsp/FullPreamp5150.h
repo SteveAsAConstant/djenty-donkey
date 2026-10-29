@@ -59,6 +59,8 @@ struct Front5150
         dk.addR (nP, G, 1e6, true);                     // R41
         leadTop = dk.addR (nP, nLW, 5e5, true);         // VR2 upper
         leadBot = dk.addR (nLW, G, 5e5, true);          // VR2 lower
+        dk.markVariable (leadTop, 5e5);                 // pots: low-rank matrix updates while turning (DKCircuit)
+        dk.markVariable (leadBot, 5e5);
         cap[C19] = dk.addC (nP, nLW, 1e-9);       // C19
         dk.addR (nP, nLW, 1e6, true);                   // R40
 
@@ -79,6 +81,8 @@ struct Front5150
         rR75 = dk.addR (nC10, nB, 2.2e6, true);         // R75 (S1C, BRIGHT, shorts it: setBright)
         rhyTop = dk.addR (nB, nRW, 5e5, true);          // VR1 upper
         rhyBot = dk.addR (nRW, G, 5e5, true);           // VR1 lower
+        dk.markVariable (rhyTop, 5e5);
+        dk.markVariable (rhyBot, 5e5);
         cap[C27] = dk.addC (nB, nRW, 180e-12);    // C27
         if (! crunch)
         {

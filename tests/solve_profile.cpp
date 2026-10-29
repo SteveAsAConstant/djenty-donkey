@@ -67,5 +67,25 @@ int main()
     std::printf ("AMP RED at 8x, %.0f samples (sum %.3g)\n%-30s %12s %10s\n", n, acc, "phase", "cycles/smp", "calls/smp");
     for (const auto& r : rows)
         std::printf ("%-30s %12.1f %10.2f\n", r.name, (double) prof::cycles[r.slot] / n, (double) prof::calls[r.slot] / n);
+
+    // a matrix rebuild (a pot moved: Gain in the preamp, Presence / Resonance in the power amp), per phase
+    auto rebuilds = [] (DKCircuit dk, const char* name) {
+        for (auto& c : prof::cycles) c = 0;
+        for (auto& c : prof::calls) c = 0;
+        constexpr int reps = 2000;
+        for (int k = 0; k < reps; ++k) { dk.markDirty(); dk.ensureBuilt(); }
+        std::printf ("\n%s rebuild: N %d, ports %d, states %d, inputs %d, outputs %d\n", name, dk.numUnknowns(), dk.numPorts(),
+                     dk.numStates(), dk.numInputs(), dk.numOutputs());
+        const Row rr[] = { { prof::kDkRebuild, "whole rebuild" }, { prof::kDkStamp, "  stamp A" }, { prof::kDkInvert, "  invert A" },
+                           { prof::kDkAinvNi, "  Ainv Ni, K" }, { prof::kDkV, "  V (node rows)" }, { prof::kDkPMO, "  P, M, O" },
+                           { prof::kDkTranspose, "  transposes" }, { prof::kDkUpdate, "  pots' low-rank update" } };
+        for (const auto& r : rr) std::printf ("%-30s %12.0f cycles\n", r.name, (double) prof::cycles[r.slot] / reps);
+        // a pot turning: only the low-rank update (DKCircuit::markVariable)
+        for (auto& c : prof::cycles) c = 0;
+        for (int k = 0; k < reps; ++k) { dk.markVariableDirty(); dk.ensureBuilt(); }
+        std::printf ("%-30s %12.0f cycles\n", "pot moved (update only)", (double) prof::cycles[prof::kDkUpdate] / reps);
+    };
+    rebuilds (pre.lead.net.dk, "preamp RED");
+    rebuilds (pa.circuit(), "power amp");
     return 0;
 }

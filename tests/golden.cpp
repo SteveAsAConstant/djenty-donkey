@@ -6,6 +6,7 @@
 // switches, both drive pedals, circuit noise, another tube set and a hot input; the 1176 at 2x; the drives alone.
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <functional>
 #include <string>
@@ -178,6 +179,10 @@ std::vector<Scene> renderAll()
 
 int main (int argc, char** argv)
 {
+    // controls for the pots' low-rank update (DKCircuit::markVariable): DD_POT_DIRECT=1 rebuilds directly (as before);
+    // DD_G_SCALE=1+x scales every resistor (a perturbation of a known size, to compare with)
+    if (const char* e = std::getenv ("DD_POT_DIRECT")) vamp::DKCircuit::testAlwaysDirect = std::atoi (e) != 0;
+    if (const char* e = std::getenv ("DD_G_SCALE")) vamp::DKCircuit::testGScale = std::atof (e);
     if (argc < 3 || (std::string (argv[1]) != "write" && std::string (argv[1]) != "check"))
     {
         std::printf ("golden write <file> | golden check <file>\n");

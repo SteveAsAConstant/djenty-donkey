@@ -28,7 +28,7 @@ cmake --build %USERPROFILE%\vab-build --config Release
 ## Tests (run after DSP changes)
 
 - `tone_regress`: must stay at 0 failed (null against the frozen baseline).
-- `dsp_test [cpu | fault | noise | tubes | tube | chain | power | transpose | ingate | tables | portsolve]`: LTspice comparisons,
+- `dsp_test [cpu | fault | noise | tubes | tube | chain | power | transpose | ingate | tables | portsolve | potupdate]`: LTspice comparisons,
   fault recovery, CPU per module. `dsp_test block8 | switch8 | twocore`: cost per 8-sample block at 48 kHz (hardware
   target), one channel switch in detail, the two-core switch split; pin to a P-core (`start /high /affinity 1000`).
   `block8 <n>`: the same with n-sample blocks. `costs`: one 8-sample block split per stage. `iter8 [comp]`: Newton
@@ -36,8 +36,12 @@ cmake --build %USERPROFILE%\vab-build --config Release
   with VAMP_PROFILE, `Source/dsp/Profile.h`): rdtsc cycles per phase of the tube solves; compare phases, not totals.
   `portsolve`: the port step's AVX version (PortSolve.h, off by default: measured slower at these sizes) stays
   bit-identical to the scalar one on random circuits.
+  `potupdate`: the pots' low-rank matrix update (DKCircuit::markVariable) against a full rebuild over both pots' travel.
+  `iter8 compdetail`: the 1176's costliest blocks sample by sample; `iter8 compbudget`: its Newton starts (first attempt,
+  predictor gate) against work and output. `solve_profile` also splits a matrix rebuild and a pot update into phases.
 - `golden write <file>` (built from the last commit) / `golden check <file>`: null test for speed work; a change must
-  be bit-identical, or rounding-level only (far below the solver's ~-100 dB own error).
+  be bit-identical, or rounding-level only (far below the solver's ~-100 dB own error). Controls for what "rounding level" means
+  here: `DD_G_SCALE=1.00000000000001` (every resistor x (1 + 1e-14)), `DD_POT_DIRECT=1` (full rebuilds, no pot updates).
 - `comp1176_test [spice | rates | release | null | metal | cpu | worst | stress | hf | retryfail | damped | all]`: 1176 vs
   LTspice and the factory test procedures. `worst`: run at real-time priority for meaningful numbers. `retryfail`:
   forced failures in the coupled A / C solve must not reach the states. `damped`: the line-search Newton fallback

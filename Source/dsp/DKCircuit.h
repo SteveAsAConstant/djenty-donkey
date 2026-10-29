@@ -3,6 +3,7 @@
 #include <cassert>
 #include <cmath>
 #include <vector>
+#include "Profile.h"
 #include "Simd.h"
 
 namespace vamp
@@ -36,16 +37,37 @@ public:
     // spectral density 4kT/R across it, white up to Nyquist. Structural: set before prepare().
     int addR (int a, int b, double r, bool noisy = false)
     {
-        resistors.push_back ({ a, b, 1.0 / std::max (r, 1e-3), noisy });
+        resistors.push_back ({ a, b, 1.0 / std::max (r, 1e-3), std::max (r, 1e-3), noisy, -1 });
         dirty = true;
         return (int) resistors.size() - 1;
     }
 
     void setR (int idx, double r)
     {
+        auto& e = resistors[(size_t) idx];
         const double g = 1.0 / std::max (r, 1e-3);
-        if (resistors[(size_t) idx].g != g) { resistors[(size_t) idx].g = g; dirty = true; }
+        if (e.g == g) return;
+        e.g = g;
+        e.r = std::max (r, 1e-3);
+        if (e.var >= 0) varDirty = true; // a pot: low-rank update (updateVariable), not a rebuild
+        else dirty = true;
     }
+
+    // Resistor idx (addR) changes while running (a pot): setR on it then corrects the matrices by a rank-r update
+    // instead of rebuilding them. It is solved in resistance form (a branch-current unknown, see rebuild), which is
+    // well conditioned as a short too. A rebuild builds the matrices with every variable resistor at its reference value rRef
+    // and keeps the correction's factors; each later value is applied from that same base (Woodbury identity), so
+    // the matrices depend only on the present values, never on the knob's path. Structural: before prepare().
+    void markVariable (int idx, double rRef)
+    {
+        assert (numVar < kMaxVar && resistors[(size_t) idx].var < 0);
+        resistors[(size_t) idx].var = numVar;
+        var[numVar].res = idx;
+        var[numVar].rRef = std::max (rRef, 1e-3);
+        ++numVar;
+        dirty = true;
+    }
+    static constexpr int kMaxVar = 4;
 
     int addC (int a, int b, double c) { caps.push_back ({ a, b, c, 0 }); dirty = true; return (int) caps.size() - 1; }
     int addL (int a, int b, double l) { inds.push_back ({ a, b, l, 0 }); dirty = true; return (int) inds.size() - 1; }
@@ -101,6 +123,7 @@ public:
     int numPorts() const { return (int) ports.size(); }
     int numInputs() const { return (int) sources.size(); }
     int numNodesTotal() const { return numNodes; }
+    int numUnknowns() const { return N; } // MNA size (nodes + transformer aux), after prepare()
     int numStates() const { return (int) (caps.size() + inds.size()); }
     int numOutputs() const { return (int) outputs.size(); }
 
@@ -126,7 +149,9 @@ public:
         // aux unknowns: one current per winding + one "volts per turn" per transformer
         numAux = 0;
         for (auto& t : transformers) numAux += (int) t.size() + 1;
-        N = numNodes + numAux;
+        // one branch-current unknown per variable resistor (after the transformers' aux unknowns): see rebuild
+        N = numNodes + numAux + numVar;
+        for (int v = 0; v < numVar; ++v) var[v].row = numNodes + numAux + v;
         m = (int) ports.size();
         numS = (int) (caps.size() + inds.size());
         numSrc = (int) sources.size();
@@ -156,7 +181,17 @@ public:
         Pt.assign ((size_t) nz * ldP, 0.0);
         Mt.assign ((size_t) nz * ldM, 0.0);
         Ot.assign ((size_t) nz * ldO, 0.0);
-        dirty = true;
+        // the variable resistors' base (markVariable): the matrices at the reference values and the correction factors
+        if (numVar > 0)
+        {
+            K0.assign (K.size(), 0.0); Pt0.assign (Pt.size(), 0.0); Mt0.assign (Mt.size(), 0.0);
+            O0.assign (O.size(), 0.0);
+            qP.assign ((size_t) kMaxVar * ldP, 0.0); qM.assign ((size_t) kMaxVar * ldM, 0.0); qO.assign ((size_t) kMaxVar * ldO, 0.0);
+            yV.assign ((size_t) kMaxVar * nz, 0.0); gV.assign ((size_t) kMaxVar * nz, 0.0);
+        }
+        // built now (prepare is not on the audio thread): a circuit that only runs later (an idle channel) does not pay
+        // for its first rebuild in the audio block where it comes in
+        rebuild();
         reset();
     }
 
@@ -193,7 +228,7 @@ public:
     // p0 = P [s; u] for the source values u and the current reactive states
     const std::vector<double>& computeP0 (const double* u)
     {
-        if (dirty) rebuild();
+        ensureBuilt();
 
         std::copy (u, u + numSrc, z.begin() + numS);
         if (noiseOn && numSrc + numNoise > 0)
@@ -243,11 +278,29 @@ public:
     void markDirty() { dirty = true; }
 
     // the matrix rebuild computeP0() would do next, ahead of time (allocation-free; the same matrices either way)
-    bool isDirty() const { return dirty; }
-    void ensureBuilt() { if (dirty) rebuild(); }
+    bool isDirty() const { return dirty || varDirty; }
+    void ensureBuilt()
+    {
+        if (dirty) rebuild();
+        else if (varDirty) updateVariable();
+    }
+
+    // tests: the next ensureBuilt() / computeP0() rebuilds everything, the variable resistors' values included
+    // directly (no low-rank update): the reference the update is checked against (dsp_test potupdate)
+    void rebuildDirect() { directOnce = true; dirty = true; ensureBuilt(); }
+    void markVariableDirty() { varDirty = numVar > 0; } // tests: redo the low-rank update (solve_profile)
+    // tests (golden controls): every rebuild direct, no low-rank updates; every resistor's conductance scaled
+    static inline bool testAlwaysDirect = false;
+    static inline double testGScale = 1.0;
+    const std::vector<double>& getPt() const { return Pt; } // tests: the per-sample matrices
+    const std::vector<double>& getMt() const { return Mt; }
+    const std::vector<double>& getOt() const { return Ot; }
+    const std::vector<double>& getO() const { return O; }
 
 private:
-    struct Res { int a, b; double g; bool noisy; };
+    struct Res { int a, b; double g, r; bool noisy; int var; }; // var: index in var[] when variable (markVariable), else -1
+    // row: its branch-current unknown; noiseSlot: its noise amplitude in noiseAmp
+    struct Var { int res = -1, row = -1; double rRef = 0.0; int noiseSlot = -1; };
     struct Cap { int a, b; double c, gc; };
     struct Ind { int a, b; double l, gl; };
     struct Src { int node; double g; bool noisy; };
@@ -416,10 +469,25 @@ private:
 
     void rebuild()
     {
-        // all buffers are sized in prepare(): rebuilding when a pot moves does not allocate (audio thread)
+        VAMP_PROF (prof::kDkRebuild);
+        VAMP_PROF_LAPS;
+        // all buffers are sized in prepare(): rebuilding does not allocate (audio thread)
+        // with variable resistors (markVariable) the base is built with them at their reference values, and their
+        // present values are applied by updateVariable() at the end (tests: rebuildDirect() takes them directly)
+        const bool useBase = numVar > 0 && ! directOnce && ! testAlwaysDirect;
         auto& A = bufA;
         A.assign ((size_t) N * N, 0.0);
-        for (auto& r : resistors) stamp (A, N, r.a, r.b, r.g);
+        for (auto& r : resistors)
+        {
+            if (r.var < 0) { stamp (A, N, r.a, r.b, r.g * testGScale); continue; }
+            // a variable resistor in resistance form: its current i (a -> b) is an unknown, with the branch equation
+            // v(a) - v(b) - R i = 0. R is one diagonal entry, so a pot's change is a rank-1 update that stays well
+            // conditioned at both ends of its travel (a segment at 1 mOhm is R ~ 0, not a conductance of 1e3)
+            const int k = var[r.var].row;
+            if (r.a >= 0) { A[(size_t) r.a * N + k] += 1.0; A[(size_t) k * N + r.a] += 1.0; }
+            if (r.b >= 0) { A[(size_t) r.b * N + k] -= 1.0; A[(size_t) k * N + r.b] -= 1.0; }
+            A[(size_t) k * N + k] = -(useBase ? var[r.var].rRef : r.r) / testGScale;
+        }
         for (auto& c : caps)      stamp (A, N, c.a, c.b, c.gc);
         for (auto& l : inds)      stamp (A, N, l.a, l.b, l.gl);
         for (auto& s : sources)   A[(size_t) s.node * N + s.node] += s.g;
@@ -439,8 +507,10 @@ private:
             }
             aux = eIdx + 1;
         }
+        VAMP_PROF_LAP (prof::kDkStamp);
 
         invert (A, bufInv, N);
+        VAMP_PROF_LAP (prof::kDkInvert);
         const auto& Ainv = bufInv;
 
         // Ni: port current a -> b leaves node a (-1) and enters node b (+1); Nv = -Ni^T
@@ -468,6 +538,7 @@ private:
                 K[(size_t) k * m + j] = s;
             }
         }
+        VAMP_PROF_LAP (prof::kDkAinvNi);
 
         // The MNA right-hand side is b = Bs s + Bu u: a capacitor companion current ieq enters node a
         // and leaves b, an inductor's the other way round, a source drives its node through g.
@@ -500,6 +571,7 @@ private:
                 if (rs.noisy)
                     row[k++] = (rs.a >= 0 ? a[rs.a] : 0.0) - (rs.b >= 0 ? a[rs.b] : 0.0);
         }
+        VAMP_PROF_LAP (prof::kDkV);
         auto nodeRow = [&] (int n, int j) { return n < 0 ? 0.0 : V[(size_t) n * nz + j]; };
 
         // p0 = (v(a) - v(b)) of each port with i = 0: over z, the port-current columns left at 0
@@ -533,9 +605,11 @@ private:
             for (int j = 0; j < nz; ++j)
                 O[o * (size_t) nz + j] = nodeRow (outputs[o], j);
 
+        VAMP_PROF_LAP (prof::kDkPMO);
         transpose (P, m, nz, Pt, ldP);
         transpose (M, numS, nz, Mt, ldM);
         transpose (O, (int) outputs.size(), nz, Ot, ldO);
+        VAMP_PROF_LAP (prof::kDkTranspose);
 
         // thermal noise per sample, white up to Nyquist (one-sided density 4kT R, i.e. variance 2kT R fs), as uniform
         // samples of the same variance: a series voltage for a noisy source, a parallel current for a resistor
@@ -545,10 +619,146 @@ private:
                 noiseAmp[(size_t) k] = sources[(size_t) k].noisy ? std::sqrt (3.0 * 2.0 * noiseKT * fs / sources[(size_t) k].g) : 0.0;
             int j = numSrc;
             for (auto& rs : resistors)
-                if (rs.noisy) noiseAmp[(size_t) j++] = std::sqrt (3.0 * 2.0 * noiseKT * fs * rs.g);
+                if (rs.noisy)
+                {
+                    if (rs.var >= 0) var[rs.var].noiseSlot = j;
+                    noiseAmp[(size_t) j++] = std::sqrt (3.0 * 2.0 * noiseKT * fs * rs.g);
+                }
         }
 
         dirty = false;
+        ++kVersion;
+        if (numVar == 0) return;
+        varDirty = false;
+        if (! useBase) { directOnce = false; baseValid = false; return; } // exact for the present values; no base
+
+        // The correction factors. The variable resistors' branch rows (U = their unit vectors) hold -R, so with the
+        // change from the reference D = diag (-(R - rRef)), A = A0 + U D U^T and (Woodbury)
+        //        Ainv = Ainv0 - W (I + D Z0)^-1 D U^T Ainv0,    W = Ainv0 U,  Z0 = U^T W,
+        // and every per-sample matrix is a fixed row selection / scaling of Ainv times a fixed right-hand side
+        // (X = L Ainv B), so X = X0 - (L W) G with G = (I + D Z0)^-1 D (U^T V0): rank numVar per matrix.
+        {
+            const auto& Ainv = bufInv;
+            auto w = [&] (int n, int v) { return n < 0 ? 0.0 : Ainv[(size_t) n * N + var[v].row]; }; // W[n][v]
+            for (int v = 0; v < numVar; ++v)
+            {
+                for (int l = 0; l < numVar; ++l) z0[v][l] = w (var[v].row, l);
+                for (int j = 0; j < nz; ++j) yV[(size_t) v * nz + j] = nodeRow (var[v].row, j);
+                for (int p = 0; p < m; ++p)
+                    qP[(size_t) v * ldP + p] = w (ports[(size_t) p].a, v) - w (ports[(size_t) p].b, v);
+                int s = 0;
+                for (auto& c : caps) { qM[(size_t) v * ldM + s] = 2.0 * c.gc * (w (c.a, v) - w (c.b, v)); ++s; }
+                for (auto& l : inds) { qM[(size_t) v * ldM + s] = 2.0 * l.gl * (w (l.a, v) - w (l.b, v)); ++s; }
+                for (size_t o = 0; o < outputs.size(); ++o) qO[(size_t) v * ldO + o] = w (outputs[o], v);
+            }
+            std::copy (K.begin(), K.end(), K0.begin());
+            std::copy (Pt.begin(), Pt.end(), Pt0.begin());
+            std::copy (Mt.begin(), Mt.end(), Mt0.begin());
+            std::copy (O.begin(), O.end(), O0.begin());
+            baseValid = true;
+        }
+        updateVariable();
+    }
+
+    // out[0..len) = base - sum over v of q[v][..] g[v], in that order (base may be out); len: the padded column (the pads
+    // are 0 in base and q), so the loops run over whole vectors
+    static void columnUpdate (double* out, const double* base, const double* q, int len, const double* g, int r)
+    {
+        for (int p = 0; p < len; ++p) out[p] = base[p];
+        for (int v = 0; v < r; ++v)
+        {
+            const double gv = g[v];
+            const double* qv = q + (size_t) v * len;
+            for (int p = 0; p < len; ++p) out[p] -= qv[p] * gv;
+        }
+    }
+    static constexpr int kMaxColumn = 64; // ports (padded) in one column of P
+
+    // The variable resistors' present values applied to the base (see rebuild): G from the numVar x numVar system,
+    // then X = X0 - Q G for K, P, M and O. O(numVar nz (ports + states + outputs)) instead of the rebuild's O(N^3).
+    void updateVariable()
+    {
+        if (testAlwaysDirect) { rebuildDirect(); return; }
+        if (! baseValid) { rebuild(); return; }
+        VAMP_PROF (prof::kDkUpdate);
+        const int r = numVar, cols = noiseOn ? nz : nzMain; // (noise columns: see below)
+        double D[kMaxVar], S[kMaxVar][kMaxVar];
+        for (int v = 0; v < r; ++v) D[v] = var[v].rRef - resistors[(size_t) var[v].res].r; // -(R - rRef)
+        for (int v = 0; v < r; ++v)
+        {
+            double sc = 0.0;
+            for (int l = 0; l < r; ++l) { S[v][l] = (v == l ? 1.0 : 0.0) + D[v] * z0[v][l]; sc = std::max (sc, std::abs (S[v][l])); }
+            const double inv = 1.0 / sc; // rows equilibrated: a shorted pot's row is ~1e9 times the others
+            for (int l = 0; l < r; ++l) S[v][l] *= inv;
+            for (int j = 0; j < cols; ++j) gV[(size_t) v * nz + j] = D[v] * inv * yV[(size_t) v * nz + j];
+        }
+        // (I + D Z0) G = D Y: Gaussian elimination with partial pivoting, then back substitution
+        for (int c = 0; c < r; ++c)
+        {
+            int piv = c;
+            for (int v = c + 1; v < r; ++v) if (std::abs (S[v][c]) > std::abs (S[piv][c])) piv = v;
+            if (piv != c)
+            {
+                for (int l = 0; l < r; ++l) std::swap (S[c][l], S[piv][l]);
+                std::swap_ranges (gV.begin() + (std::ptrdiff_t) c * nz, gV.begin() + (std::ptrdiff_t) (c + 1) * nz, gV.begin() + (std::ptrdiff_t) piv * nz);
+            }
+            if (! (std::abs (S[c][c]) > 0.0) || ! std::isfinite (S[c][c])) { rebuildDirect(); return; } // (cannot happen for a solvable circuit)
+            for (int v = c + 1; v < r; ++v)
+            {
+                const double f = S[v][c] / S[c][c];
+                if (f == 0.0) continue;
+                for (int l = c; l < r; ++l) S[v][l] -= f * S[c][l];
+                for (int j = 0; j < cols; ++j) gV[(size_t) v * nz + j] -= f * gV[(size_t) c * nz + j];
+            }
+        }
+        for (int c = r - 1; c >= 0; --c)
+        {
+            double* gc = &gV[(size_t) c * nz];
+            for (int l = c + 1; l < r; ++l)
+            {
+                const double s = S[c][l];
+                const double* gl = &gV[(size_t) l * nz];
+                for (int j = 0; j < cols; ++j) gc[j] -= s * gl[j];
+            }
+            const double inv = 1.0 / S[c][c];
+            for (int j = 0; j < cols; ++j) gc[j] *= inv;
+        }
+
+        // X = X0 - Q G, column by column of z (Pt / Mt / Ot are stored that way; P's port-current columns are K). With
+        // noise off the noise columns are not used (computeP0 / finish stop before them) and stay at the base: turning
+        // noise on rebuilds (setNoise)
+        const int iBegin = numS + numSrc, iEnd = iBegin + m, numO = (int) outputs.size();
+        assert (ldP <= kMaxColumn);
+        double col[kMaxColumn];
+        for (int j = 0; j < cols; ++j)
+        {
+            double gj[kMaxVar];
+            for (int v = 0; v < r; ++v) gj[v] = gV[(size_t) v * nz + j];
+            if (j < iBegin || j >= iEnd)
+                columnUpdate (&Pt[(size_t) j * ldP], &Pt0[(size_t) j * ldP], qP.data(), ldP, gj, r);
+            else
+            {
+                const int c = j - iBegin;
+                for (int p = 0; p < m; ++p) col[p] = K0[(size_t) p * m + c];
+                for (int p = m; p < ldP; ++p) col[p] = 0.0;
+                columnUpdate (col, col, qP.data(), ldP, gj, r);
+                for (int p = 0; p < m; ++p) K[(size_t) p * m + c] = col[p];
+            }
+            columnUpdate (&Mt[(size_t) j * ldM], &Mt0[(size_t) j * ldM], qM.data(), ldM, gj, r);
+            for (int o = 0; o < numO; ++o)
+            {
+                double t = O0[(size_t) o * nz + j];
+                for (int v = 0; v < r; ++v) t -= qO[(size_t) v * ldO + o] * gj[v];
+                O[(size_t) o * nz + j] = t;
+                Ot[(size_t) j * ldO + o] = t;
+            }
+        }
+
+        const double fs = 1.0 / T;
+        for (int v = 0; v < r; ++v)
+            if (var[v].noiseSlot >= 0)
+                noiseAmp[(size_t) var[v].noiseSlot] = std::sqrt (3.0 * 2.0 * noiseKT * fs * resistors[(size_t) var[v].res].g);
+        varDirty = false;
         ++kVersion;
     }
 
@@ -614,6 +824,15 @@ private:
     std::vector<double> x, p0; // x: output node voltages (others stay 0)
     std::vector<double> zSaved, xSaved, zTrial;
     std::vector<double> bufA, bufInv, bufAinvNi, bufV; // rebuild work buffers
+
+    // variable resistors (markVariable): the base matrices at the reference values and the correction factors
+    Var var[kMaxVar];
+    int numVar = 0;
+    bool varDirty = false, baseValid = false, directOnce = false;
+    double z0[kMaxVar][kMaxVar] {};
+    std::vector<double> K0, Pt0, Mt0, O0; // the per-sample matrices at the reference values
+    std::vector<double> qP, qM, qO;       // rows of W for the ports, states, outputs (numVar rows, padded as Pt / Mt / Ot)
+    std::vector<double> yV, gV;           // U^T V0 and the update G (numVar x nz)
 };
 
 } // namespace vamp

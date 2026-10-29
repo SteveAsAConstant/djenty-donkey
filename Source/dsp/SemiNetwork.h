@@ -224,15 +224,19 @@ public:
             step[k] = p[k] - pPrev[k];
             pPrev[k] = p[k];
         }
-        if (usePredictor) applyStepImpl (step);
+        // the predictor is skipped after a sample that needed more than predictorGate evaluations (a transient: the
+        // extrapolated step then overshoots more often than it helps)
+        const bool gated = predictorGate > 0 && lastBeginIts > predictorGate;
+        if (usePredictor && predictorAllowed && ! gated) applyStepImpl (step);
         iterations = 0;
-        const bool ok = attempt (u, 8);
+        const bool ok = attempt (u, firstIts);
         predictorScore = 0.9 * predictorScore + 0.1 * (iterations <= 2 ? 1.0 : 0.0);
         if (usePredictor && predictorScore < 0.3) usePredictor = false;
         else if (! usePredictor && (++predictorRetry & 63) == 0) { usePredictor = true; predictorScore = 0.5; }
         statSamples++;
         statMaxIterations = std::max (statMaxIterations, (long long) iterations);
-        if (iterations > 8) ++statSlow;
+        if (iterations > firstIts) ++statSlow;
+        lastBeginIts = iterations;
         statIterations += iterations;
         return ok;
     }
@@ -246,8 +250,9 @@ public:
         std::copy (cur, cur + m, iKeep);
         dk.saveTrial();
         iterations = 0;
-        bool ok = attempt (u, 8);
+        bool ok = attempt (u, retryIts);
         statIterations += iterations;
+        if (iterations > retryIts) ++statRetrySlow;
         if (testFailRetries > 0) // tests: a failure that leaves a non-finite iterate behind
         {
             --testFailRetries;
@@ -291,9 +296,16 @@ public:
 
     long long statSamples = 0, statIterations = 0, statFailures = 0, statHeld = 0;
     long long statMaxIterations = 0, statSlow = 0; // most Newton evaluations in one sample; samples needing the fallbacks
-    long long statRetryFailures = 0;
+    long long statRetryFailures = 0, statRetrySlow = 0; // retries that failed; that needed the restart from the last sample
     long long statDamped = 0;      // solves that reached the line-search Newton (both plain attempts failed)
     int testFailRetries = 0;       // tests: make the next n retries fail
+    // plain Newton evaluations before the restart from the last sample's solution: a sample's first solve starts from
+    // the predictor and, while the 1176's rectifiers turn on, often needs 9-20 to converge (a restart then threw them
+    // away: dsp_test iter8 compbudget); a retry starts from the solution for the last CTRL and rarely needs 8
+    int firstIts = 24, retryIts = 8;
+    bool predictorAllowed = true; // off: every sample starts from the last solution (set by the owner, Urei1176)
+    int predictorGate = 0;        // > 0: no predictor after a sample that took more evaluations than this (see begin)
+    int lastBeginIts = 0;
     bool testDampedOnly = false;   // tests: the plain Newton attempts fail at once, so every solve goes through the
                                    // line-search fallback (newtonDamped)
     bool testDampedDC = false;     // tests: likewise for the DC operating point's solves (initDC; set before prepare)
@@ -311,11 +323,11 @@ private:
 
     // Newton from the current p, then from the last sample's solution, then backtracking; a sample that still has
     // no solution is retried as a lost input sample (the last accepted sources, written back to u)
-    bool attempt (double* u, int firstIts)
+    bool attempt (double* u, int its)
     {
         const auto& p0 = dk.computeP0 (u); // the reference stays valid: computeP0 updates the same buffer
         auto finite = [this] { double s = 0.0; for (int k = 0; k < m; ++k) s += p[k]; return std::isfinite (s); };
-        bool ok = newton (p0, firstIts) && finite();
+        bool ok = newton (p0, its) && finite();
         if (! ok)
         {
             if (diag) diagNote (p0);

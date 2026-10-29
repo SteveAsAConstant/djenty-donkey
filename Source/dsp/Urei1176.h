@@ -43,6 +43,12 @@ public:
         a.prepare ([this] (SemiNetwork& n) { buildA (n); }, fs);
         b.prepare ([this] (SemiNetwork& n) { buildB (n); }, fs);
         c.prepare ([this] (SemiNetwork& n) { buildC (n); }, fs);
+        // the predictor (SemiNetwork::begin) helps on smooth signals, but in the output stage B and the sidechain C it
+        // overshoots through a transient (an attack turning the rectifiers on): there they start from the last solution
+        // after a sample that took more than 2 evaluations (dsp_test iter8 compbudget: guitar DI IN 10 / ALL, worst
+        // 16-sample block 382 -> 335 evaluations, IN 7 / 4:1 170 -> 155; sine bursts unchanged, bit for bit)
+        a.predictorAllowed = predictorOn[0]; b.predictorAllowed = predictorOn[1]; c.predictorAllowed = predictorOn[2];
+        a.predictorGate = predictorGate[0]; b.predictorGate = predictorGate[1]; c.predictorGate = predictorGate[2];
         pending = false;
         controlPhase = 0;
         initOperatingPoint();
@@ -179,6 +185,11 @@ public:
     const SemiNetwork& netB() const { return b; }
     const SemiNetwork& netC() const { return c; }
     void testFailRetries (int nA, int nC) { a.testFailRetries = nA; c.testFailRetries = nC; } // tests (SemiNetwork)
+    void setFirstAttempt (int first, int retry) { for (auto* n : { &a, &b, &c }) { n->firstIts = first; n->retryIts = retry; } } // tests
+    void setPredictors (bool pa, bool pb, bool pc) { predictorOn[0] = pa; predictorOn[1] = pb; predictorOn[2] = pc; } // tests; before prepare
+    bool predictorOn[3] { true, true, true }; // A, B, C (prepare)
+    int predictorGate[3] { 0, 2, 2 };
+    void setPredictorGates (int ga, int gb, int gc) { predictorGate[0] = ga; predictorGate[1] = gb; predictorGate[2] = gc; } // tests; before prepare
     void testDampedOnly (bool running, bool dc) // tests (SemiNetwork); before prepare
     {
         for (auto* n : { &a, &b, &c }) { n->testDampedOnly = running; n->testDampedDC = dc; }
