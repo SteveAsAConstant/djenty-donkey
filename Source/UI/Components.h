@@ -73,6 +73,17 @@ public:
         g.drawLine ({ p1, p2 }, 2.5f);
     }
 
+    // centred, with a small indent, squeezed (down to 60 %) rather than cut to "..." in a narrow button (the 1176's
+    // ratio buttons in two columns)
+    void drawButtonText (juce::Graphics& g, juce::TextButton& b, bool, bool) override
+    {
+        const auto r = b.getLocalBounds().reduced (3, 1);
+        g.setFont (font (juce::jmin (16.0f, (float) b.getHeight() * 0.6f)));
+        g.setColour (b.findColour (b.getToggleState() ? juce::TextButton::textColourOnId : juce::TextButton::textColourOffId)
+                         .withMultipliedAlpha (b.isEnabled() ? 1.0f : 0.5f));
+        g.drawFittedText (b.getButtonText(), r, juce::Justification::centred, 1, 0.6f);
+    }
+
     void drawToggleButton (juce::Graphics& g, juce::ToggleButton& b, bool highlighted, bool) override
     {
         auto r = b.getLocalBounds().toFloat().reduced (2.0f);
@@ -480,8 +491,16 @@ public:
         {
             power = std::make_unique<juce::ToggleButton> ("ON");
             power->setColour (juce::ToggleButton::tickColourId, accent);
+            // the switch says what the section is doing (ON / OFF), and the title dims while it is off
+            power->onStateChange = [this]
+            {
+                const bool on = power->getToggleState();
+                if (on != wasOn) { wasOn = on; power->setButtonText (on ? "ON" : "OFF"); repaint(); }
+            };
             addAndMakeVisible (*power);
             powerAttachment = std::make_unique<APVTS::ButtonAttachment> (*state, enableParamID, *power);
+            wasOn = ! power->getToggleState();
+            power->onStateChange();
         }
     }
 
@@ -516,9 +535,12 @@ public:
         g.setColour (accent.withAlpha (0.55f));
         g.drawRoundedRectangle (r, 8.0f, 1.5f);
 
-        g.setColour (accent);
+        // the title keeps clear of the switch: squeezed (down to 70 %), then cut with an ellipsis in a narrow panel
+        auto titleArea = getLocalBounds().reduced (10, 6).removeFromTop (20);
+        if (power) titleArea.removeFromRight (power->getWidth() + 6);
+        g.setColour (power && ! power->getToggleState() ? accent.withAlpha (0.45f) : accent);
         g.setFont (font (13.0f, true));
-        g.drawText (title, getLocalBounds().reduced (10, 6).removeFromTop (20), juce::Justification::centredLeft);
+        g.drawFittedText (title, titleArea, juce::Justification::centredLeft, 1, 0.7f);
     }
 
     void resized() override
@@ -541,6 +563,7 @@ private:
     juce::Colour accent;
     std::unique_ptr<juce::ToggleButton> power;
     std::unique_ptr<APVTS::ButtonAttachment> powerAttachment;
+    bool wasOn = false;
     juce::OwnedArray<juce::Component> items;
 };
 
@@ -600,10 +623,16 @@ public:
         auto b = getLocalBounds();
         label.setBounds (b.removeFromTop (16));
         b = b.reduced (4, 6);
-        const int h = juce::jmin (30, b.getHeight() / juce::jmax (1, buttons.size()));
-        b = b.withSizeKeepingCentre (b.getWidth(), h * buttons.size());
-        for (auto* btn : buttons)
-            btn->setBounds (b.removeFromTop (h).reduced (0, 2));
+        const int n = juce::jmax (1, buttons.size());
+        // one column while each button gets 24 px; otherwise two (the 1176's five ratios in a short panel)
+        const int cols = n > 2 && b.getHeight() / n < 24 ? 2 : 1;
+        const int rows = (n + cols - 1) / cols;
+        const int h = juce::jmin (30, b.getHeight() / rows);
+        b = b.withSizeKeepingCentre (b.getWidth(), h * rows);
+        const int w = b.getWidth() / cols;
+        for (int i = 0; i < buttons.size(); ++i)
+            buttons[i]->setBounds (juce::Rectangle<int> (b.getX() + (i % cols) * w, b.getY() + (i / cols) * h, w, h)
+                                       .reduced (cols > 1 ? 2 : 0, 2));
     }
 
 private:

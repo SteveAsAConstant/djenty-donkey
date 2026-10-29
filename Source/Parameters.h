@@ -80,7 +80,24 @@ inline std::unique_ptr<juce::AudioParameterFloat> makeFloat (const juce::String&
         juce::ParameterID { id, 1 }, name, range, def,
         juce::AudioParameterFloatAttributes()
             .withLabel (suffix)
-            .withStringFromValueFunction ([decimals, suffix] (float v, int) { return juce::String (v, decimals) + suffix; }));
+            // juce::String (v, 0) would print every digit (0 means no limit there), so whole numbers are rounded here
+            .withStringFromValueFunction ([decimals, suffix] (float v, int)
+            {
+                return (decimals > 0 ? juce::String (v, decimals) : juce::String (juce::roundToInt (v))) + suffix;
+            }));
+}
+
+// a 0..1 amount (mix, depth, feedback ...) shown and typed as a percentage; the stored value stays 0..1, so old
+// sessions and presets load unchanged
+inline std::unique_ptr<juce::AudioParameterFloat> makePercent (const juce::String& id, const juce::String& name,
+                                                               float min, float max, float def)
+{
+    return std::make_unique<juce::AudioParameterFloat> (
+        juce::ParameterID { id, 1 }, name, juce::NormalisableRange<float> (min, max), def,
+        juce::AudioParameterFloatAttributes()
+            .withLabel ("%")
+            .withStringFromValueFunction ([] (float v, int) { return juce::String (juce::roundToInt (v * 100.0f)) + " %"; })
+            .withValueFromStringFunction ([] (const juce::String& t) { return t.getFloatValue() / 100.0f; }));
 }
 
 inline std::unique_ptr<juce::AudioParameterBool> makeBool (const juce::String& id, const juce::String& name, bool def)
@@ -152,21 +169,21 @@ inline juce::AudioProcessorValueTreeState::ParameterLayout createParameterLayout
 
     layout.add (makeBool  (ids::phaserOn, "Phaser On", false));
     layout.add (makeFloat (ids::phRate, "Phaser Rate", 0.05f, 5.0f, 0.5f, " Hz", 2, 0.8f));
-    layout.add (makeFloat (ids::phDepth, "Phaser Depth", 0.0f, 1.0f, 0.6f, "", 2));
-    layout.add (makeFloat (ids::phFeedback, "Phaser Feedback", -0.9f, 0.9f, 0.3f, "", 2));
-    layout.add (makeFloat (ids::phMix, "Phaser Mix", 0.0f, 1.0f, 0.5f, "", 2));
+    layout.add (makePercent (ids::phDepth, "Phaser Depth", 0.0f, 1.0f, 0.6f));
+    layout.add (makePercent (ids::phFeedback, "Phaser Feedback", -0.9f, 0.9f, 0.3f));
+    layout.add (makePercent (ids::phMix, "Phaser Mix", 0.0f, 1.0f, 0.5f));
 
     layout.add (makeBool  (ids::delayOn, "Delay On", false));
     layout.add (makeFloat (ids::dlTime, "Delay Time", 20.0f, 2000.0f, 380.0f, " ms", 0, 400.0f));
-    layout.add (makeFloat (ids::dlFeedback, "Delay Feedback", 0.0f, 0.95f, 0.35f, "", 2));
-    layout.add (makeFloat (ids::dlMix, "Delay Mix", 0.0f, 1.0f, 0.3f, "", 2));
+    layout.add (makePercent (ids::dlFeedback, "Delay Feedback", 0.0f, 0.95f, 0.35f));
+    layout.add (makePercent (ids::dlMix, "Delay Mix", 0.0f, 1.0f, 0.3f));
     layout.add (makeBool  (ids::dlPingPong, "Ping Pong", false));
 
     layout.add (makeBool  (ids::reverbOn, "Reverb On", false));
-    layout.add (makeFloat (ids::rvSize, "Reverb Size", 0.0f, 1.0f, 0.5f, "", 2));
-    layout.add (makeFloat (ids::rvDamping, "Reverb Damping", 0.0f, 1.0f, 0.5f, "", 2));
-    layout.add (makeFloat (ids::rvWidth, "Reverb Width", 0.0f, 1.0f, 1.0f, "", 2));
-    layout.add (makeFloat (ids::rvMix, "Reverb Mix", 0.0f, 1.0f, 0.25f, "", 2));
+    layout.add (makePercent (ids::rvSize, "Reverb Size", 0.0f, 1.0f, 0.5f));
+    layout.add (makePercent (ids::rvDamping, "Reverb Damping", 0.0f, 1.0f, 0.5f));
+    layout.add (makePercent (ids::rvWidth, "Reverb Width", 0.0f, 1.0f, 1.0f));
+    layout.add (makePercent (ids::rvMix, "Reverb Mix", 0.0f, 1.0f, 0.25f));
 
     layout.add (makeFloat (ids::outGain, "Output", -24.0f, 24.0f, 0.0f, " dB"));
 
