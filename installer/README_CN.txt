@@ -73,6 +73,11 @@ DONKEY HEAD  箱头：CLEAN / BLUE / RED 三通道（5150 / 6505 元件级模拟
              Volume 在功放之后只调音量不改音色（相当于衰减器）：
              Master 推到喜欢的饱和度，再用 Volume 把音量降下来
              Presence / Resonance 是功放负反馈电路，调高频 / 低频的'松紧'
+             Bass / Middle / Treble 是原机的被动音色堆栈：5 以上变化很小（Middle 5→10 只多约 1.4 dB），
+               往下才明显（Middle 0 中频少约 6.5 dB），真机就是这样
+             EQ MOD（默认关，原机没有）：打开后 Bass / Middle / Treble 同时控制一个主动 EQ
+               （低频 100 Hz、中频 700 Hz、高频 3 kHz），0 / 10 时各 ±10 dB，5 时和原机完全一样；
+               接在音色堆栈和功放之间，所以 Presence / Resonance 和功放饱和的反应照旧
 CABINET IR   点 LOAD IR 选 .wav 箱体 IR，或者把文件直接拖进去
              < > 切换同文件夹的上一个/下一个 IR，BUILT-IN 回到内置箱体
              加载的 IR 会自动对齐到内置箱体的响度（按箱头的实际输出频谱、响度计权计算，只调音量不改音色），

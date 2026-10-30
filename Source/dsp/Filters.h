@@ -30,19 +30,23 @@ struct OnePoleHP
     inline float process (float x) { return x - lp.process (x); }
 };
 
-// RBJ cookbook biquad, transposed direct form II. Allocation-free coefficient updates.
-struct Biquad
+enum class BiquadType { lowPass, highPass, peak, lowShelf, highShelf };
+
+// RBJ cookbook biquad, transposed direct form II. Allocation-free coefficient updates. Biquad (float) for the
+// output-rate filters, BiquadD (double) where a low corner sits at the oversampled rate (poles close to z = 1).
+template <typename T>
+struct BiquadT
 {
-    enum class Type { lowPass, highPass, peak, lowShelf, highShelf };
+    using Type = BiquadType;
 
-    float b0 = 1, b1 = 0, b2 = 0, a1 = 0, a2 = 0;
-    float z1 = 0, z2 = 0;
+    T b0 = 1, b1 = 0, b2 = 0, a1 = 0, a2 = 0;
+    T z1 = 0, z2 = 0;
 
-    void reset() { z1 = z2 = 0.0f; }
+    void reset() { z1 = z2 = 0; }
 
-    inline float process (float x)
+    inline T process (T x)
     {
-        const float y = b0 * x + z1;
+        const T y = b0 * x + z1;
         z1 = b1 * x - a1 * y + z2;
         z2 = b2 * x - a2 * y;
         return y;
@@ -91,10 +95,12 @@ struct Biquad
                 break;
         }
 
-        b0 = (float) (B0 / A0); b1 = (float) (B1 / A0); b2 = (float) (B2 / A0);
-        a1 = (float) (A1 / A0); a2 = (float) (A2 / A0);
+        b0 = (T) (B0 / A0); b1 = (T) (B1 / A0); b2 = (T) (B2 / A0);
+        a1 = (T) (A1 / A0); a2 = (T) (A2 / A0);
     }
 };
+using Biquad = BiquadT<float>;
+using BiquadD = BiquadT<double>;
 
 inline float dbToGain (float db) { return std::pow (10.0f, db / 20.0f); }
 

@@ -33,6 +33,7 @@ public:
         float boostDrive = 0.0f, boostBright = 0.5f, boostLevel = 0.7f;
         int boostAttack = 3; // 0..5 (the knob minus one)
         int boostModel = 0;  // 0 Precision Drive, 1 TS9
+        bool eqMod = false;  // EQ MOD (ModEq, not on the amp): Bass / Middle / Treble also drive an active EQ
     };
 
     // channel-switch crossfade (Preamp5150::switchFadeMs: 0 = relay switch, the default); tests, before prepare()
@@ -55,6 +56,8 @@ public:
 
         drive.prepare (osRate);
         ts9.prepare (osRate);
+        modEq.prepare (osRate);
+        modEqRunning = false;
         modelStep = 1.0 / (0.02 * osRate); // drive model switch: 20 ms crossfade
         preamp.setChannelTrims (kChannelPost[0], kChannelPost[1], kChannelPost[2]); // applied inside the switch crossfade
         // the tubes of the last block (or nominal): settled with them
@@ -134,7 +137,7 @@ public:
         lastBoostOn = s.boostOn;
         boostAttack = s.boostAttack;
         const double target[kKnobs] = { s.gain, s.bass, s.mid, s.treble, s.master, s.presence, s.resonance,
-                                        s.boostDrive, s.boostBright, s.boostLevel };
+                                        s.boostDrive, s.boostBright, s.boostLevel, s.eqMod ? 1.0 : 0.0 };
         std::copy (knobTarget, knobTarget + kKnobs, knobFrom); // the last block's values: the target ramps from there
         std::copy (target, target + kKnobs, knobTarget);
         if (! knobsSet)
@@ -178,7 +181,10 @@ public:
                 else v = modelW > 0.5 ? ts9.process (v) : drive.process (v);
             }
 
-            v = processAmp5150 (preamp, power, v, 1.0); // volts across the speaker (preamp on the power amp's rails; channel trim in the preamp)
+            // the EQ MOD runs while its switch is on or still ramping out (knob[10]: 0..1); it starts from rest
+            const bool eqMod = knob[10] > 0.0 || knobTarget[10] > 0.0;
+            if (eqMod != modEqRunning) { modEqRunning = eqMod; modEq.reset(); }
+            v = processAmp5150 (preamp, power, v, 1.0, eqMod ? &modEq : nullptr); // volts across the speaker (preamp on the power amp's rails; channel trim in the preamp)
             x[i] = dcBlock.process ((float) (v * volume.getNextValue()));
         }
 
@@ -195,7 +201,7 @@ private:
     // Gain and Presence / Resonance sit inside DK circuits (lead preamp, power amp): their matrices are rebuilt then
     // (DKCircuit: allocation-free), so they follow every kHeavyEvery-th step only (~0.36 ms: still ~55 steps per
     // 20 ms ramp, a quarter of the CPU).
-    static constexpr int kKnobs = 10, kControlInterval = 32, kHeavyEvery = 4;
+    static constexpr int kKnobs = 11, kControlInterval = 32, kHeavyEvery = 4;
     static constexpr double kKnobSmoothMs = 20.0;
 
     // frac: position in the current host block (0..1], where the target is between knobFrom and knobTarget
@@ -225,6 +231,7 @@ private:
         if (powerKnobs) { heavyApplied[1] = knob[5]; heavyApplied[2] = knob[6]; }
         preamp.setControls (heavyApplied[0], knob[1], knob[2], knob[3], knob[4]);
         power.setControls (heavyApplied[1], heavyApplied[2]);
+        if (knob[10] > 0.0 || knobTarget[10] > 0.0) modEq.set (knob[1], knob[2], knob[3], knob[10]);
         if (boostOn)
         {
             drive.setControls (knob[7], knob[8], boostAttack, knob[9]);
@@ -240,6 +247,8 @@ private:
     double modelMix = 0.0, modelTarget = 0.0, modelStep = 1e-4; // drive model crossfade, 0 = Precision Drive
     double modelW = 0.0;                                         // its raised-cosine weight (1 = TS9)
     bool bothPedals = false;      // a crossfade is in progress: both pedals run; otherwise only the selected one
+    ModEq modEq;
+    bool modEqRunning = false;
     float volumeDbApplied = std::numeric_limits<float>::quiet_NaN(); // volumeDb the smoother's target was set from
     int controlPhase = 0, boostAttack = 3;
 

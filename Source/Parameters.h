@@ -32,6 +32,7 @@ inline constexpr const char* channel     = "channel";
 inline constexpr const char* ampBright   = "ampBright";
 inline constexpr const char* ampCrunch   = "ampCrunch";
 inline constexpr const char* ampNoise    = "ampNoise";
+inline constexpr const char* ampEqMod    = "ampEqMod";
 inline constexpr const char* tubeSet     = "tubeSet";
 inline constexpr const char* ampGain     = "ampGain";
 inline constexpr const char* bass        = "bass";
@@ -150,6 +151,7 @@ inline juce::AudioProcessorValueTreeState::ParameterLayout createParameterLayout
     layout.add (makeBool (ids::ampBright, "Bright", true)); // the rhythm channel's BRIGHT pushbutton (CLEAN, BLUE)
     layout.add (makeBool (ids::ampCrunch, "Crunch", true)); // the rhythm channel's CRUNCH pushbutton (BLUE)
     layout.add (makeBool (ids::ampNoise, "Amp Noise", false)); // circuit noise: resistors' thermal, tubes' shot / flicker
+    layout.add (makeBool (ids::ampEqMod, "EQ Mod", false)); // not on the amp: Bass / Middle / Treble also drive an active EQ (ModEq)
     layout.add (std::make_unique<juce::AudioParameterChoice> (juce::ParameterID { ids::tubeSet, 1 }, "Tube Set",
                                                               juce::StringArray { "Stock", "Set A", "Set B", "Set C", "Set D", "Set E" }, 0));
     layout.add (makeFloat (ids::ampGain, "Gain", 0.0f, 10.0f, 6.9f));

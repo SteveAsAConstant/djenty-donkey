@@ -225,6 +225,19 @@ int main (int argc, char** argv)
     const double seconds = argc > 2 ? std::atof (argv[2]) : 2.0;
 
     std::unique_ptr<juce::AudioProcessor> p (createPluginFilter());
+    if (mode == "snapshot" && argc > 2) // snapshot <file.png> [scale]: the editor at its default size, rendered offscreen
+    {
+        std::unique_ptr<juce::AudioProcessorEditor> ed (p->createEditor());
+        const float scale = argc > 3 ? (float) std::atof (argv[3]) : 1.0f;
+        const auto img = ed->createComponentSnapshot (ed->getLocalBounds(), true, scale);
+        juce::File f = juce::File::getCurrentWorkingDirectory().getChildFile (argv[2]);
+        f.deleteFile();
+        juce::FileOutputStream out (f);
+        juce::PNGImageFormat().writeImageToStream (img, out);
+        std::printf ("%s: %d x %d\n", f.getFullPathName().toRawUTF8(), img.getWidth(), img.getHeight());
+        ed.reset();
+        return 0;
+    }
     if (mode == "auval" || mode == "all")
     {
         setDefaults (*p);

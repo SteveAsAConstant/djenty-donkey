@@ -52,10 +52,10 @@ cmake --build %USERPROFILE%\vab-build --config Release
 - `plugin_cpu [ir.wav ...]`: the whole plugin's CPU at 48 kHz / 64-256 buffers, per stage (pin to a P-core; close any
   running standalone first: it competes for the core). `plugin_cpu levels [ir.wav ...]`: output level with each IR vs
   the built-in cab (IRs are loudness-matched to it, `dsp/CabMatch.h`).
-- `amp_path_test [knobs | switch | boost [dir] | render <dir> | sustain | prepare]`: the plugin's amp path (AmpSim):
+- `amp_path_test [knobs | switch | boost [dir] | render <dir> | sustain | prepare | eqmod]`: the plugin's amp path (AmpSim):
   aliasing and tone vs an ideal path, knob zipper noise, channel switches (relay, relay + 4 ms dip as in the plugin,
   the old 20 ms crossfade; `render <dir>`: the same as WAVs from a played riff, for listening), the drive pedal switch (`boost`: only the
-  selected pedal runs; the other starts from rest when faded in, checked against both always running; `dir`: WAVs).
+  selected pedal runs; the other starts from rest when faded in, checked against both always running; `dir`: WAVs); `eqmod`: the EQ MOD is the stock amp at 5 / 5 / 5, its range through the amp, no clicks.
 - `nam_compare`, `power_compare`, `pedal_compare`, `comp1176_nam`: against NAM captures (pass the .nam path).
 - Captures live in `D:\Downloads From Web\` (6505 lead / rhythm / POW / AMP / PRE, two 1176s). They are T3K-licensed:
   use locally only, never commit, upload or put them in a package.

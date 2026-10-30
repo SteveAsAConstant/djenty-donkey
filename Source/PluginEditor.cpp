@@ -271,7 +271,10 @@ VibeAmpEditor::VibeAmpEditor (VibeAmpProcessor& p) : AudioProcessorEditor (&p), 
         { ids::ampCrunch, "CRUNCH", "The rhythm channel's CRUNCH switch (relay K4, as on the amp): on, BLUE is the crunch "
                                     "rhythm; off, the 6505's rhythm channel without crunch (all five stages, less gain)." },
         { ids::ampNoise, "NOISE", "The preamp's own noise, from physics: thermal noise of its resistors, shot and flicker "
-                                  "noise of its tubes. Off: a noiseless amp." } }, colours::red,
+                                  "noise of its tubes. Off: a noiseless amp." },
+        { ids::ampEqMod, "EQ MOD", "Not on the amp: Bass / Middle / Treble also drive an active EQ between the tone stack "
+                                   "and the power amp, +-10 dB at 0 / 10 (100 Hz shelf, 700 Hz, 3 kHz shelf). At 5 the "
+                                   "stock amp. Off: the 5150's own passive stack, which moves little above 5." } }, colours::red,
         ToggleStack::Item { ids::tubeSet, "TUBES", "Stock: the datasheet (nominal) tubes. Set A-E: particular real tubes, each "
                             "12AX7 and 6L6 within production spreads (gain, bias and the output pairs' balance differ "
                             "a little, as from one amp to the next)." });

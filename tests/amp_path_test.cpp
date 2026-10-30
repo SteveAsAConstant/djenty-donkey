@@ -644,6 +644,123 @@ void boostSwitchTests (const char* dir)
     }
 }
 
+// EQ MOD (amp_path_test eqmod): ModEq between the tone stack and the power amp.
+// 1. at Bass / Middle / Treble 5 it is the stock amp, sample for sample (each band b = a, from rest);
+// 2. its range through the whole amp: CLEAN, Gain 2, 5 mV sines (linear), MOD on against off at the same knobs;
+// 3. clicks: the switch flipped, and Middle swept 0 -> 10 with it on, 220 Hz 0.1 V (as zipperDb).
+void eqModTests()
+{
+    constexpr int block = 64;
+    auto run = [&] (vamp::AmpSim::Settings s, const std::function<double (double)>& in, double secs,
+                    const std::function<void (vamp::AmpSim::Settings&, double)>& automate = {})
+    {
+        vamp::AmpSim amp;
+        amp.prepare (fs, block);
+        std::vector<float> buf (block);
+        for (int i = 0; i < (int) fs / block; ++i) { std::fill (buf.begin(), buf.end(), 0.0f); amp.process (buf.data(), block, s); }
+        Signal y;
+        for (long long n = 0; n < (long long) (secs * fs); n += block)
+        {
+            if (automate) automate (s, n / fs);
+            for (int i = 0; i < block; ++i) buf[(size_t) i] = (float) in ((double) (n + i) / fs);
+            amp.process (buf.data(), block, s);
+            for (float v : buf) y.push_back (v);
+        }
+        return y;
+    };
+    auto chug = [] (double t)
+    {
+        const double ph = std::fmod (t, 0.25), env = std::exp (-ph * 22.0);
+        double v = 0;
+        for (double fr : { 41.2, 61.7, 82.4 }) for (int h = 1; h <= 6; ++h) v += env * 0.12 / h * std::sin (2 * kPi * fr * h * t + h);
+        return v;
+    };
+    bool pass = true;
+
+    std::printf ("\n== EQ MOD ==\n1. knobs at 5, MOD on vs off (RED, chugs, 2 s): ");
+    auto s5 = settings();
+    s5.bass = s5.mid = s5.treble = 0.5f;
+    auto on5 = s5; on5.eqMod = true;
+    const auto a = run (s5, chug, 2.0), b = run (on5, chug, 2.0);
+    size_t same = 0;
+    for (size_t i = 0; i < a.size(); ++i) same += a[i] == b[i];
+    std::printf ("%zu of %zu samples identical\n", same, a.size());
+    pass = pass && same == a.size();
+
+    std::printf ("2. MOD on minus off (dB), CLEAN Gain 2, 5 mV sines; the ModEq target in brackets\n%-22s", "knobs B M T");
+    const double fr[] = { 60, 100, 250, 700, 1500, 3000, 6000 };
+    for (double f : fr) std::printf (" %13.0f", f);
+    std::printf ("\n");
+    struct K { float b, m, t; };
+    for (const K& k : { K { 0, 0.5f, 0.5f }, K { 1, 0.5f, 0.5f }, K { 0.5f, 0, 0.5f }, K { 0.5f, 1, 0.5f }, K { 0.5f, 0.5f, 0 },
+                        K { 0.5f, 0.5f, 1 }, K { 0.7f, 0.3f, 0.6f } })
+    {
+        std::printf ("B %4.1f M %4.1f T %4.1f   ", k.b * 10, k.m * 10, k.t * 10);
+        vamp::ModEq ref;
+        ref.prepare (fs * 8);
+        ref.set (k.b, k.m, k.t, 1.0);
+        for (double f : fr)
+        {
+            auto s = settings();
+            s.channel = 0; s.gain = 0.2f; s.bass = k.b; s.mid = k.m; s.treble = k.t;
+            auto sOn = s; sOn.eqMod = true;
+            auto sine = [f] (double t) { return 0.005 * std::sin (2 * kPi * f * t); };
+            auto rms = [] (const Signal& y) { double e = 0; for (size_t i = y.size() / 2; i < y.size(); ++i) e += y[i] * y[i]; return std::sqrt (e / (double) (y.size() / 2)); };
+            const double d = db (rms (run (sOn, sine, 0.5)) / rms (run (s, sine, 0.5)));
+            // the EQ's own gain at f, from its impulse response's steady sine
+            vamp::ModEq e = ref;
+            e.reset();
+            double ee = 0, ex = 0;
+            const int nOs = (int) (fs * 8 * 0.3);
+            for (int i = 0; i < nOs; ++i)
+            {
+                const double x = std::sin (2 * kPi * f * i / (fs * 8)), y = e.process (x);
+                if (i > nOs / 2) { ee += y * y; ex += x * x; }
+            }
+            const double target = 10 * std::log10 (ee / ex);
+            std::printf (" %+5.1f [%+5.1f]", d, target);
+            if (std::abs (d - target) > 0.5) pass = false;
+        }
+        std::printf ("\n");
+    }
+
+    std::printf ("3. clicks, 220 Hz 0.1 V, RED, inharmonic re total (dB, lower is cleaner)\n");
+    auto clicks = [&] (const std::function<void (vamp::AmpSim::Settings&, double)>& automate)
+    {
+        auto s = settings();
+        s.bass = 0.0f; s.mid = 1.0f; s.treble = 1.0f;
+        const auto y = run (s, [] (double t) { return 0.1 * std::sin (2 * kPi * 220.0 * t); }, (double) (1 << 16) / fs, automate);
+        return inharmonicDb (y, 220.0, 20.0);
+    };
+    const double held = clicks ([] (vamp::AmpSim::Settings& s, double) { s.eqMod = true; });
+    const double flipOn = clicks ([] (vamp::AmpSim::Settings& s, double t) { s.eqMod = t > 0.68; });
+    const double flipOff = clicks ([] (vamp::AmpSim::Settings& s, double t) { s.eqMod = t < 0.68; });
+    const double sweep = clicks ([] (vamp::AmpSim::Settings& s, double t) { s.eqMod = true; s.mid = (float) std::clamp ((t - 0.48) / 0.4, 0.0, 1.0); });
+    // ideal switch: the held off and on outputs crossfaded with the knob smoothing's own curve (one-pole 20 ms from
+    // the switch): what a click-free change of this size measures, the level change widening the harmonics
+    auto idealFlip = [&] (bool toOn)
+    {
+        auto s = settings();
+        s.bass = 0.0f; s.mid = 1.0f; s.treble = 1.0f;
+        auto sOn = s; sOn.eqMod = true;
+        const auto sine = [] (double t) { return 0.1 * std::sin (2 * kPi * 220.0 * t); };
+        const double secs = (double) (1 << 16) / fs;
+        const auto yOff = run (s, sine, secs), yOn = run (sOn, sine, secs);
+        Signal y (yOff.size());
+        for (size_t i = 0; i < y.size(); ++i)
+        {
+            const double t = (double) i / fs, w = t < 0.68 ? 0.0 : 1.0 - std::exp (-(t - 0.68) / 0.02);
+            y[i] = toOn ? (1 - w) * yOff[i] + w * yOn[i] : (1 - w) * yOn[i] + w * yOff[i];
+        }
+        return inharmonicDb (y, 220.0, 20.0);
+    };
+    const double idealOn = idealFlip (true), idealOff = idealFlip (false);
+    std::printf ("   held on %+.1f | switched on %+.1f (ideal %+.1f) | switched off %+.1f (ideal %+.1f) | Middle 0 -> 10 over 0.4 s %+.1f\n",
+                 held, flipOn, idealOn, flipOff, idealOff, sweep);
+    if (flipOn > idealOn + 3.0 || flipOff > idealOff + 3.0 || sweep > held + 6.0) pass = false;
+    std::printf ("-> %s\n", pass ? "PASS" : "FAIL");
+}
+
 void switchTests()
 {
     std::printf ("\n== channel switch: 220 Hz 0.1 V; dB re total (lower is cleaner) ==\n");
@@ -680,6 +797,7 @@ int main (int argc, char** argv)
 {
     if (argc > 1 && std::string (argv[1]) == "knobs") { zipperTests(); return 0; }
     if (argc > 1 && std::string (argv[1]) == "switch") { switchTests(); return 0; }
+    if (argc > 1 && std::string (argv[1]) == "eqmod") { eqModTests(); return 0; }
     if (argc > 1 && std::string (argv[1]) == "boost") { boostSwitchTests (argc > 2 ? argv[2] : nullptr); return 0; }
     if (argc > 2 && std::string (argv[1]) == "render") { renderSwitchAB (argv[2]); return 0; }
     if (argc > 1 && std::string (argv[1]) == "sustain") // [model.nam]: the capture of settings() (Pr-5 B-6 M-4 T-6 Po-3 R-9 P-8)
