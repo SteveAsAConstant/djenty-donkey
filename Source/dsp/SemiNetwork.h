@@ -4,6 +4,7 @@
 #include <functional>
 #include <limits>
 #include "DKCircuit.h"
+#include "Profile.h"
 
 namespace vamp
 {
@@ -229,7 +230,14 @@ public:
         const bool gated = predictorGate > 0 && lastBeginIts > predictorGate;
         if (usePredictor && predictorAllowed && ! gated) applyStepImpl (step);
         iterations = 0;
+#ifdef VAMP_PROFILE
+        profBegin = true;
+#endif
         const bool ok = attempt (u, firstIts);
+#ifdef VAMP_PROFILE
+        profBegin = false;
+        ++statBeginIts[std::clamp (iterations, 1, 5) - 1];
+#endif
         predictorScore = 0.9 * predictorScore + 0.1 * (iterations <= 2 ? 1.0 : 0.0);
         if (usePredictor && predictorScore < 0.3) usePredictor = false;
         else if (! usePredictor && (++predictorRetry & 63) == 0) { usePredictor = true; predictorScore = 0.5; }
@@ -248,7 +256,7 @@ public:
         double pKeep[kMaxPorts], iKeep[kMaxPorts];
         std::copy (p, p + m, pKeep);
         std::copy (cur, cur + m, iKeep);
-        dk.saveTrial();
+        { VAMP_PROF (prof::kSemiTrial); dk.saveTrial(); }
         iterations = 0;
         bool ok = attempt (u, retryIts);
         statIterations += iterations;
@@ -266,7 +274,7 @@ public:
             ++statRetryFailures;
             std::copy (pKeep, pKeep + m, p);
             std::copy (iKeep, iKeep + m, cur);
-            dk.restoreTrial();
+            { VAMP_PROF (prof::kSemiTrial); dk.restoreTrial(); }
         }
         return ok;
     }
@@ -275,6 +283,7 @@ public:
     {
         heldRun = 0;
         std::copy (uNow, uNow + nU, lastU);
+        VAMP_PROF (prof::kSemiFinish);
         dk.finish (cur); // the currents of the accepted solution (Newton leaves them in cur)
     }
 
@@ -298,6 +307,11 @@ public:
     long long statMaxIterations = 0, statSlow = 0; // most Newton evaluations in one sample; samples needing the fallbacks
     long long statRetryFailures = 0, statRetrySlow = 0; // retries that failed; that needed the restart from the last sample
     long long statDamped = 0;      // solves that reached the line-search Newton (both plain attempts failed)
+#ifdef VAMP_PROFILE
+    long long statBeginIts[5] {};  // begin()'s evaluations: 1, 2, 3, 4, 5 or more (solve_profile comp)
+    long long statRes2[6] {};      // the residual (V) at begin()'s second evaluation: < 1e-8, 1e-7, 1e-6, 1e-5, 1e-4, more
+    bool profBegin = false;
+#endif
     int testFailRetries = 0;       // tests: make the next n retries fail
     // plain Newton evaluations before the restart from the last sample's solution: a sample's first solve starts from
     // the predictor and, while the 1176's rectifiers turn on, often needs 9-20 to converge (a restart then threw them
@@ -325,7 +339,8 @@ private:
     // no solution is retried as a lost input sample (the last accepted sources, written back to u)
     bool attempt (double* u, int its)
     {
-        const auto& p0 = dk.computeP0 (u); // the reference stays valid: computeP0 updates the same buffer
+        // (the reference stays valid: computeP0 updates the same buffer)
+        const auto& p0 = [&] () -> const auto& { VAMP_PROF (prof::kSemiP0); return dk.computeP0 (u); }();
         auto finite = [this] { double s = 0.0; for (int k = 0; k < m; ++k) s += p[k]; return std::isfinite (s); };
         bool ok = newton (p0, its) && finite();
         if (! ok)
@@ -366,7 +381,7 @@ private:
             if (! ok) return false;
         }
         std::copy (u, u + nU, uNow);
-        dk.evalOutputs (cur);
+        { VAMP_PROF (prof::kSemiOutputs); dk.evalOutputs (cur); }
         return true;
     }
 
@@ -613,8 +628,15 @@ private:
         {
             if (bank && (*bank)-- <= 0) { *bank = 0; return false; }
             ++iterations;
+            VAMP_PROF_LAPS;
             evalDevices (i, d);
+            VAMP_PROF_LAP (prof::kSemiEval);
             const double maxF = residualN<NP> (p0, i, F);
+            VAMP_PROF_LAP (prof::kSemiResidual);
+#ifdef VAMP_PROFILE
+            if (profBegin && it == 1)
+                ++statRes2[maxF < 1e-8 ? 0 : maxF < 1e-7 ? 1 : maxF < 1e-6 ? 2 : maxF < 1e-5 ? 3 : maxF < 1e-4 ? 4 : 5];
+#endif
             if (! std::isfinite (maxF)) return false;
             if (maxF < resTol) return true;
 
@@ -637,10 +659,13 @@ private:
                     J[r][c1] -= k0 * d[c0][1] + k1 * d[c1][1];
                 }
             }
+            VAMP_PROF_LAP (prof::kSemiJacobian);
             double dp[kMaxPorts];
             if (! solveLinearN<NP> (J, dp)) return false;
+            VAMP_PROF_LAP (prof::kSemiSolve);
             std::copy (p, p + NP, pOld);
             applyStep (dp);
+            VAMP_PROF_LAP (prof::kSemiApply);
             // Quadratic convergence: after a full (unlimited) step this small the remaining error is ~step^2, so it
             // is accepted without evaluating the devices again; the currents move along their linearisation.
             if (acceptSmallStep)
@@ -789,33 +814,89 @@ private:
         }
     }
 
+    // Gaussian elimination with partial pivoting on the augmented n x (n + 1) matrix. The same operations in the same
+    // order as the plain loops (bit-identical to them): the rows are addressed through a permutation instead of being
+    // swapped, a multiplier's own column is not updated (never read again), and the row update runs two columns at a
+    // time with a separate multiply and subtract per lane. (Measured 2026-10-30, solve_profile comp: the plain loops
+    // took a third of a 1176 sample, ~470 cycles per 7-10 unknowns.)
     template <int n>
     static bool solveLinearN (double (&a)[kMaxPorts][kMaxPorts + 1], double (&x)[kMaxPorts])
     {
+        double* row[kMaxPorts];
+        for (int r = 0; r < n; ++r) row[r] = a[r];
         double invPivot[kMaxPorts];
         for (int col = 0; col < n; ++col)
         {
             int piv = col;
-            for (int r = col + 1; r < n; ++r)
-                if (std::abs (a[r][col]) > std::abs (a[piv][col])) piv = r;
-            if (std::abs (a[piv][col]) < 1e-300) return false;
-            if (piv != col)
-                for (int j = 0; j <= n; ++j) std::swap (a[col][j], a[piv][j]);
-            invPivot[col] = 1.0 / a[col][col];
+            double best = std::abs (row[col][col]);
             for (int r = col + 1; r < n; ++r)
             {
-                const double f = a[r][col] * invPivot[col];
-                if (f == 0.0) continue;
-                for (int j = col; j <= n; ++j) a[r][j] -= f * a[col][j];
+                const double v = std::abs (row[r][col]);
+                if (v > best) { best = v; piv = r; }
+            }
+            if (best < 1e-300) return false;
+            if (piv != col) std::swap (row[col], row[piv]);
+            const double inv = 1.0 / row[col][col];
+            invPivot[col] = inv;
+            // the rows below the pivot, columns col + 1 .. n: their count n - col is a compile-time length per case, so
+            // each update is straight-line code (the variable-length loops cost more than the arithmetic here)
+            switch (n - col)
+            {
+                case 1:  eliminateRows<1> (row, col, n, inv); break;
+                case 2:  eliminateRows<2> (row, col, n, inv); break;
+                case 3:  eliminateRows<3> (row, col, n, inv); break;
+                case 4:  eliminateRows<4> (row, col, n, inv); break;
+                case 5:  eliminateRows<5> (row, col, n, inv); break;
+                case 6:  eliminateRows<6> (row, col, n, inv); break;
+                case 7:  eliminateRows<7> (row, col, n, inv); break;
+                case 8:  eliminateRows<8> (row, col, n, inv); break;
+                case 9:  eliminateRows<9> (row, col, n, inv); break;
+                case 10: eliminateRows<10> (row, col, n, inv); break;
+                case 11: eliminateRows<11> (row, col, n, inv); break;
+                default: eliminateRows<12> (row, col, n, inv); break;
             }
         }
         for (int r = n - 1; r >= 0; --r)
         {
-            double s = a[r][n];
-            for (int j = r + 1; j < n; ++j) s -= a[r][j] * x[j];
+            const double* pr = row[r];
+            double s = pr[n];
+            for (int j = r + 1; j < n; ++j) s -= pr[j] * x[j];
             x[r] = s * invPivot[r];
         }
         return true;
+    }
+
+    // the elimination step of column col on the rows below it: row[r][j] -= f row[col][j] for j = col + 1 .. col + L
+    template <int L>
+    static inline void eliminateRows (double* const* row, int col, int n, double inv)
+    {
+        const double* pc = row[col] + col + 1;
+        for (int r = col + 1; r < n; ++r)
+        {
+            double* pr = row[r];
+            const double f = pr[col] * inv;
+            if (f == 0.0) continue;
+            rowUpdate<L> (pr + col + 1, pc, f);
+        }
+    }
+
+    // pr[j] -= f * pc[j] for j < L: two lanes at a time, each lane the scalar multiply then subtract
+    template <int L>
+    static inline void rowUpdate (double* pr, const double* pc, double f)
+    {
+#if VAMP_SIMD_SSE2
+        const __m128d ff = _mm_set1_pd (f);
+        for (int j = 0; j + 1 < L; j += 2)
+            _mm_storeu_pd (pr + j, _mm_sub_pd (_mm_loadu_pd (pr + j), _mm_mul_pd (ff, _mm_loadu_pd (pc + j))));
+        if (L & 1) pr[L - 1] -= f * pc[L - 1];
+#elif VAMP_SIMD_NEON
+        const float64x2_t ff = vdupq_n_f64 (f);
+        for (int j = 0; j + 1 < L; j += 2)
+            vst1q_f64 (pr + j, vsubq_f64 (vld1q_f64 (pr + j), vmulq_f64 (ff, vld1q_f64 (pc + j))));
+        if (L & 1) pr[L - 1] -= f * pc[L - 1];
+#else
+        for (int j = 0; j < L; ++j) pr[j] -= f * pc[j];
+#endif
     }
 
     void restoreIdle()

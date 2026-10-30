@@ -3,9 +3,14 @@
 #include <cmath>
 #include "SemiNetwork.h"
 #include "PotTapers.h"
+#include "Profile.h"
 
 namespace vamp
 {
+// Neural Donkey (a study, solve_profile comp): the coupled A / C solve's first correction of CTRL. 0 a plain repeat
+// (the default); 1 a Newton step with the loop's slope dCTRL/dx - 1 as the last sample's passes measured it
+inline int testCoupleMode = 0;
+
 // UREI 1176LN Rev D limiting amplifier at component level: the factory schematic (S/N 1239-2331), transcribed in
 // docs/1176_schematic_notes.md, the same circuit and device equations as the LTspice reference
 // spice/1176ln_revd.inc. Voltages in and out are real volts (the plugin's 1 V = 0 dBFS).
@@ -112,12 +117,16 @@ public:
         // A and C close the gain-reduction loop (gate -> preamp -> sidechain -> CTRL -> gate): solved together by
         // iterating the two within the sample until CTRL agrees (one pass while CTRL only drifts, a few while the
         // rectifier conducts), so the loop has no sample delay even at the fastest attack
+        VAMP_PROF (prof::kCompSample);
+        VAMP_PROF_LAPS;
         double ua[4] = { vin, kV30, ctrl + (ctrl - ctrlPrev), -iLadderErr * kNortonR };
         double uc[4] = { 0.0, kV30, kVm10, 0.0 };
         if (! a.begin (ua)) { a.hold(); return lastOut; }
+        VAMP_PROF_LAP (prof::kCompA);
         double vo2 = a.dk.nodeV (nO2), vg = a.dk.nodeV (nG);
         uc[0] = vo2; uc[3] = vg;
         if (! c.begin (uc)) { a.hold(); c.hold(); return lastOut; }
+        VAMP_PROF_LAP (prof::kCompC);
         // fixed point CTRL = C (A (CTRL)) by the secant method on g (x) = C (A (x)) - x (a plain repeat first)
         double ctrlNew = c.dk.nodeV (nCtrl);
         double xPrev = ua[2], gPrev = ctrlNew - ua[2];
@@ -125,8 +134,11 @@ public:
         {
             const double x = ua[2], gx = ctrlNew - x;
             double next = ctrlNew;
+            if (it > 0 && std::abs (x - xPrev) > 1e-12) loopSlope = (gx - gPrev) / (x - xPrev);
             if (it > 0 && std::abs (gx - gPrev) > 1e-15)
                 next = x - gx * (x - xPrev) / (gx - gPrev);
+            else if (it == 0 && testCoupleMode == 1 && loopSlope < -0.05 && loopSlope > -20.0)
+                next = x - gx / loopSlope;
             xPrev = x; gPrev = gx;
             ua[2] = next;
             ++statPasses;
@@ -136,6 +148,7 @@ public:
             if (! c.retry (uc)) break;
             ctrlNew = c.dk.nodeV (nCtrl);
         }
+        VAMP_PROF_LAP (prof::kCompPasses);
         ++statSamples;
         a.commit();
         c.commit();
@@ -146,6 +159,7 @@ public:
 
         double ub[2] = { vo2 * wiperFrac, kV30 };
         if (b.solve (ub)) lastOut = b.dk.nodeV (nBlu) - b.dk.nodeV (nSlt);
+        VAMP_PROF_LAP (prof::kCompB);
         return lastOut;
     }
 
@@ -211,6 +225,7 @@ private:
 
     int bankAC = 64, bankB = 32;
     static constexpr double kCtrlTol = 2e-6;  // V: CTRL agreement between A and C
+    double loopSlope = -1.0;                  // d (C (A (x)) - x) / dx as the last passes measured it (testCoupleMode)
 
     // device models (spice/1176ln_revd.inc)
     static constexpr SemiNetwork::BjtModel kQ3391 { 6.734e-15, 400.0, 0.74, 74.0 };

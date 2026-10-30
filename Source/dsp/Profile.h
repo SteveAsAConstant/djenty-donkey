@@ -10,8 +10,8 @@
 
 namespace vamp::prof
 {
-inline unsigned long long cycles[32] {};
-inline long long calls[32] {};
+inline unsigned long long cycles[64] {};
+inline long long calls[64] {};
 
 struct Scope
 {
@@ -47,6 +47,9 @@ enum Slot
     kTriSolve = 0, kTriP0, kTriEval, kTriResidual, kTriStep, kTriFinish, kTriCheck,
     kPowProcess = 10, kPowP0, kPowEval, kPowResidual, kPowStep, kPowFinish, kPowSupply, kPowCheck,
     // DKCircuit::rebuild (a pot moved)
-    kDkRebuild = 20, kDkStamp, kDkInvert, kDkAinvNi, kDkV, kDkPMO, kDkTranspose, kDkUpdate
+    kDkRebuild = 20, kDkStamp, kDkInvert, kDkAinvNi, kDkV, kDkPMO, kDkTranspose, kDkUpdate,
+    // SemiNetwork (the 1176's circuits: phases of one Newton evaluation and of a sample) and Urei1176::processSample
+    kSemiP0 = 30, kSemiEval, kSemiResidual, kSemiJacobian, kSemiSolve, kSemiApply, kSemiFinish, kSemiOutputs, kSemiTrial,
+    kCompSample = 40, kCompA, kCompC, kCompPasses, kCompB
 };
 }
