@@ -7,6 +7,7 @@
 #include "dsp/MultibandGate.h"
 #include "dsp/PitchShifter.h"
 #include "dsp/StereoDelay.h"
+#include "dsp/Tuner.h"
 #include "PresetManager.h"
 
 class VibeAmpProcessor : public juce::AudioProcessor,
@@ -53,6 +54,12 @@ public:
     // Noise gate band gains (0..1: low, mid, high) for the UI
     float getGateBandGain (int band) const { return gateBandGain[band].load(); }
     float getCompGainReduction() const { return compGr.load(); } // dB, the 1176 meter in GR mode
+
+    // Tuner (not a parameter: never saved or recalled with a preset). On: the output is muted (20 ms ramp) and the dry
+    // input, after the Input knob, analysed (vamp::Tuner); getTunerReading from a UI / control thread.
+    void setTunerOn (bool on) { tunerOn.store (on); }
+    bool isTunerOn() const { return tunerOn.load(); }
+    vamp::Tuner::Reading getTunerReading() { return tunerOn.load() ? tuner.analyse() : vamp::Tuner::Reading {}; }
 
     juce::AudioProcessorValueTreeState apvts;
     PresetManager presets;
@@ -150,6 +157,10 @@ private:
     juce::SpinLock preCabLock;
     double irGain = 0.0;
     void loadIRFile (const juce::File& file, double gain); // gain <= 0: matched now
+
+    vamp::Tuner tuner;
+    std::atomic<bool> tunerOn { false };
+    juce::SmoothedValue<float> tunerGain { 1.0f }; // the output's mute while tuning (audio thread)
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (VibeAmpProcessor)
 };

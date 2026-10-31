@@ -46,8 +46,9 @@ cmake --build %USERPROFILE%\vab-build --config Release
   LTspice and the factory test procedures. `worst`: run at real-time priority for meaningful numbers. `retryfail`:
   forced failures in the coupled A / C solve must not reach the states. `damped`: the line-search Newton fallback
   (SemiNetwork::newtonDamped) forced on every solve and on the DC operating point must reproduce the plain path.
-- `host_test [auval | random | ir | all]`: the whole processor driven like a host / auval (rates, block sizes, layouts,
-  random parameters; `ir`: IRs loaded from another thread while rendering, user presets restoring their cab). Configure with `-DDD_ASAN=ON` for AddressSanitizer (Windows: the VS `bin\Hostx64\x64` dir must
+- `host_test [auval | random | ir | tuner | all]`: the whole processor driven like a host / auval (rates, block sizes, layouts,
+  random parameters; `ir`: IRs loaded from another thread while rendering, user presets restoring their cab; `tuner`:
+  plucked A1..E5 read within 1 cent, the output muted while on). Configure with `-DDD_ASAN=ON` for AddressSanitizer (Windows: the VS `bin\Hostx64\x64` dir must
   be on PATH for the ASan DLL); slow under ASan. The macOS CI runs it.
 - `plugin_cpu [ir.wav ...]`: the whole plugin's CPU at 48 kHz / 64-256 buffers, per stage (pin to a P-core; close any
   running standalone first: it competes for the core). `plugin_cpu levels [ir.wav ...]`: output level with each IR vs
@@ -94,6 +95,10 @@ cmake --build %USERPROFILE%\vab-build --config Release
   `Source/PresetManager.h` (factory presets), `Source/PluginEditor.cpp` + `Source/UI/Components.h`.
 - Docs: `docs/5150_schematic_notes.md`, `docs/power_amp.md`, `docs/nam_calibration.md`, `docs/noise.md`,
   `docs/precision_drive.md`, `docs/1176_schematic_notes.md`, `docs/compressor_1176.md`.
+- Neural Donkey (`D:\NeuralDonkey`, branch `neural`, its own CLAUDE.md): the Raspberry Pi port, forked from 553da76.
+  Taken back here (2026-11-01): the 1176's linear solve (8418e73), arm64 matVecT (35bd779), IRs matched for what is
+  played (9a0fb63 + 9b757a0), the tuner (from d12e61e). Left there: the pipeline, the neural / anti-alias studies, the
+  Pi's accuracy-for-CPU defaults (ND_PI), pi_host and the remote control. Check it for later fixes worth taking.
 
 ## Windows gotchas
 

@@ -101,6 +101,10 @@ void VibeAmpProcessor::prepareToPlay (double sampleRate, int samplesPerBlock)
     keyDelayBuf.assign (16384, 0.0f);
     keyDelayPos = 0;
 
+    tuner.prepare (sampleRate);
+    tunerGain.reset (sampleRate, 0.02);
+    tunerGain.setCurrentAndTargetValue (tunerOn.load() ? 0.0f : 1.0f);
+
     targetLatency = amp.getLatencySamples() + shifter.getReportedLatency() + (compOn ? comp1176.getLatencySamples() : 0);
     setLatencySamples (targetLatency.load());
 }
@@ -247,6 +251,8 @@ void VibeAmpProcessor::processChunk (juce::AudioBuffer<float>& buffer, int start
     // ---- pre-amp: input -> transpose -> comp ----
     inputGain.process (monoCtx);
     updatePeak (inputPeak, monoBuf.getMagnitude (0, 0, len)); // what the amp sees (after the Input knob)
+    if (tunerOn.load (std::memory_order_relaxed))
+        tuner.push (monoBuf.getReadPointer (0), len);
     {
         // clean guitar = noise gate detector key, delayed to line up with the transposed signal
         float* key = keyBuf.getWritePointer (0);
@@ -328,6 +334,18 @@ void VibeAmpProcessor::processChunk (juce::AudioBuffer<float>& buffer, int start
                                 dlTime, dlFeedback, dlMix, pingPong);
     if (reverbOn) reverb.process (stereoCtx);
     outputGain.process (stereoCtx);
+    tunerGain.setTargetValue (tunerOn.load (std::memory_order_relaxed) ? 0.0f : 1.0f);
+    if (tunerGain.isSmoothing() || tunerGain.getTargetValue() == 0.0f) // tuning: muted
+    {
+        float* l = stereoBuf.getWritePointer (0);
+        float* r = stereoBuf.getWritePointer (1);
+        for (int i = 0; i < len; ++i)
+        {
+            const float g = tunerGain.getNextValue();
+            l[i] *= g;
+            r[i] *= g;
+        }
+    }
     updatePeak (outputPeak, juce::jmax (stereoBuf.getMagnitude (0, 0, len), stereoBuf.getMagnitude (1, 0, len)));
 
     // ---- write out ----

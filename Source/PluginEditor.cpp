@@ -95,6 +95,80 @@ void IRPanel::filesDropped (const juce::StringArray& files, int, int)
     }
 }
 
+
+// ===========================================================================
+// TunerDisplay
+// ===========================================================================
+TunerDisplay::TunerDisplay (VibeAmpProcessor& p) : proc (p)
+{
+    offButton.onClick = [this] { proc.setTunerOn (false); };
+    addAndMakeVisible (offButton);
+    setInterceptsMouseClicks (true, true); // the editor below does not take clicks while tuning
+}
+
+void TunerDisplay::resized()
+{
+    auto b = getLocalBounds().withSizeKeepingCentre (juce::jmin (640, getWidth() - 40), juce::jmin (360, getHeight() - 40));
+    offButton.setBounds (b.removeFromBottom (60).withSizeKeepingCentre (160, 34));
+    if (isVisible()) startTimerHz (25);
+}
+
+void TunerDisplay::timerCallback()
+{
+    if (! isVisible()) { stopTimer(); return; }
+    reading = proc.getTunerReading();
+    if (reading.valid) shownCents += 0.35 * (reading.cents - shownCents);
+    repaint();
+}
+
+void TunerDisplay::paint (juce::Graphics& g)
+{
+    g.fillAll (colours::background.withAlpha (0.85f));
+    auto box = getLocalBounds().withSizeKeepingCentre (juce::jmin (640, getWidth() - 40), juce::jmin (360, getHeight() - 40));
+    g.setColour (juce::Colour (0xff16161c));
+    g.fillRoundedRectangle (box.toFloat(), 10.0f);
+    g.setColour (colours::text.withAlpha (0.3f));
+    g.drawRoundedRectangle (box.toFloat(), 10.0f, 1.5f);
+
+    auto b = box.reduced (24, 16);
+    g.setColour (colours::text.withAlpha (0.6f));
+    g.setFont (font (14.0f, true));
+    g.drawText ("TUNER  (output muted)", b.removeFromTop (22), juce::Justification::centred);
+    b.removeFromBottom (60);
+
+    const bool ok = reading.valid;
+    const bool inTune = ok && std::abs (reading.cents) <= 2.0;
+    const auto accent = inTune ? juce::Colour (0xff3ddc84) : ok ? colours::yellow : colours::text.withAlpha (0.35f);
+    auto noteArea = b.removeFromTop (b.getHeight() * 55 / 100);
+    g.setColour (accent);
+    g.setFont (font (96.0f, true));
+    g.drawText (ok ? juce::String (vamp::Tuner::noteName (reading.note)) : juce::String ("-"), noteArea, juce::Justification::centred);
+    if (ok)
+    {
+        g.setFont (font (22.0f, true));
+        g.drawText (juce::String (vamp::Tuner::octave (reading.note)), noteArea.withTrimmedLeft (noteArea.getWidth() / 2 + 60),
+                    juce::Justification::centredLeft);
+    }
+
+    // the cents bar: -50 .. +50, the centre marked
+    auto bar = b.removeFromTop (28).reduced (20, 4);
+    g.setColour (colours::text.withAlpha (0.15f));
+    g.fillRoundedRectangle (bar.toFloat(), 4.0f);
+    const float cx = (float) bar.getCentreX();
+    g.setColour (colours::text.withAlpha (0.5f));
+    g.fillRect (cx - 1.0f, (float) bar.getY() - 4.0f, 2.0f, (float) bar.getHeight() + 8.0f);
+    if (ok)
+    {
+        const float x = cx + (float) (juce::jlimit (-50.0, 50.0, shownCents) / 50.0) * (float) bar.getWidth() * 0.5f;
+        g.setColour (accent);
+        g.fillRoundedRectangle (juce::Rectangle<float> (x - 5.0f, (float) bar.getY() - 6.0f, 10.0f, (float) bar.getHeight() + 12.0f), 3.0f);
+    }
+    g.setColour (colours::text.withAlpha (0.7f));
+    g.setFont (font (15.0f));
+    g.drawText (ok ? juce::String::formatted ("%+.1f cents   %.2f Hz", reading.cents, reading.hz) : juce::String ("play a single string"),
+                b.removeFromTop (34), juce::Justification::centred);
+}
+
 // ===========================================================================
 // PresetBar
 // ===========================================================================
@@ -320,19 +394,37 @@ VibeAmpEditor::VibeAmpEditor (VibeAmpProcessor& p) : AudioProcessorEditor (&p), 
     outSec->add<LevelMeter> ([this] { return proc.popOutputPeak(); }, false);
 
     addAndMakeVisible (presetBar);
+    tunerButton.setTooltip ("Tuner: mutes the output while on");
+    tunerButton.onClick = [this] { proc.setTunerOn (! proc.isTunerOn()); timerCallback(); };
+    addAndMakeVisible (tunerButton);
 
     for (auto* sec : { inSec.get(), inGateSec.get(), gateSec.get(), pitchSec.get(), compSec.get(), boostSec.get(), ampSec.get(),
                        cabSec.get(), eqSec.get(), phaserSec.get(), delaySec.get(), reverbSec.get(), outSec.get() })
         addAndMakeVisible (sec);
+    addChildComponent (tunerDisplay); // above the sections
 
     setResizable (true, true);
     setResizeLimits (1200, 700, 2400, 1500);
     setSize (1480, 840);
+    timerCallback(); // a tuner left on (the editor reopened) shows at once
+    startTimerHz (5);
 }
 
 VibeAmpEditor::~VibeAmpEditor()
 {
     setLookAndFeel (nullptr);
+}
+
+void VibeAmpEditor::timerCallback()
+{
+    const bool on = proc.isTunerOn();
+    tunerButton.setToggleState (on, juce::dontSendNotification);
+    tunerButton.setColour (juce::TextButton::buttonColourId, on ? juce::Colour (0xff3ddc84).withAlpha (0.6f) : juce::Colour (0xff2a2a32));
+    if (tunerDisplay.isVisible() != on)
+    {
+        tunerDisplay.setVisible (on);
+        tunerDisplay.resized(); // starts its timer
+    }
 }
 
 void VibeAmpEditor::setAmpChannelColour (int channel)
@@ -380,8 +472,11 @@ void layoutRow (juce::Rectangle<int> r, std::initializer_list<std::pair<juce::Co
 
 void VibeAmpEditor::resized()
 {
+    tunerDisplay.setBounds (getLocalBounds());
     auto b = getLocalBounds().reduced (16, 10);
-    presetBar.setBounds (b.removeFromTop (50).removeFromRight (640).reduced (0, 6));
+    auto header = b.removeFromTop (50);
+    presetBar.setBounds (header.removeFromRight (640).reduced (0, 6));
+    tunerButton.setBounds (header.removeFromRight (90).reduced (6, 6));
 
     constexpr int gap = 8;
     const int h = b.getHeight() - gap * 3;

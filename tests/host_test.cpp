@@ -1,13 +1,14 @@
 // The whole plugin (VibeAmpProcessor) driven the way hosts and validators drive it, to catch crashes and
 // out-of-range memory access in the processor itself (prepare / block-size / sample-rate handling):
 //
-//   host_test [auval | random | ir | all] [seconds-per-case=2]
+//   host_test [auval | random | ir | tuner | all] [seconds-per-case=2]
 //
 // auval   Apple auval's render sequence: mono in / stereo out, prepare + render at 44.1 kHz / 512,
 //         22.05 kHz / 64, 96 kHz / 137, 48 kHz / 4096, 192 kHz / 4096, 11.025 kHz / 4096, 44.1 kHz / 512,
 //         then mono / stereo layouts and blocks larger than prepared. Default and randomised parameters.
 // random  random layouts, rates, prepared sizes, block sizes (often not the prepared one) and parameters.
 // ir      IRs loaded / cleared from another thread while rendering; user presets restoring their cabinet.
+// tuner   the tuner on plucked notes: the right note, within 1 cent; the output muted while on.
 // Every output sample must be finite and bounded (< 1e4: random settings stack up to ~+45 dBFS). Build with AddressSanitizer for the memory checks
 // (cmake -DDD_ASAN=ON).
 #include <atomic>
@@ -216,6 +217,64 @@ void irCases (juce::AudioProcessor& p, double seconds)
     vp.clearIR();
     dir.deleteRecursively();
 }
+// tuner: plucked notes (eight decaying harmonics, the 2nd and 3rd strongest as a pickup has them) from a drop-A 7
+// string's low A to the high E string's 12th fret, in tune and 7 cents off, at 48 / 44.1 kHz: the reading's note must be
+// right and its cents within 1 of the truth 0.3 s into the note; the output muted while tuning, back when off
+void tunerCases (juce::AudioProcessor& p)
+{
+    auto& vp = dynamic_cast<VibeAmpProcessor&> (p);
+    setDefaults (p);
+    for (double rate : { 48000.0, 44100.0 })
+    {
+        p.setRateAndBufferSizeDetails (rate, 64);
+        p.prepareToPlay (rate, 64);
+        juce::AudioBuffer<float> buf (2, 64);
+        juce::MidiBuffer midi;
+        vp.setTunerOn (true);
+        double worst = 0.0;
+        bool ok = true;
+        for (int note : { 33, 38, 40, 45, 50, 55, 59, 64, 76 }) // A1 D2 E2 A2 D3 G3 B3 E4 E5
+            for (double off : { 0.0, 7.0 })
+            {
+                const double hz = 440.0 * std::pow (2.0, (note - 69 + off / 100.0) / 12.0);
+                double t = 0.0;
+                float outPeak = 0.0f;
+                for (int b = 0; b < (int) (0.3 * rate / 64); ++b)
+                {
+                    for (int i = 0; i < 64; ++i, t += 1.0 / rate)
+                    {
+                        double v = 0.0;
+                        for (int h = 1; h <= 8; ++h)
+                            v += (h == 2 || h == 3 ? 0.5 : 0.25 / h) * std::exp (-t * (1.5 + 0.6 * h)) * std::sin (2.0 * juce::MathConstants<double>::pi * hz * h * t + h);
+                        buf.setSample (0, i, (float) (0.3 * v));
+                        buf.setSample (1, i, 0.0f);
+                    }
+                    p.processBlock (buf, midi);
+                    if (b * 64 > (int) (0.03 * rate)) outPeak = juce::jmax (outPeak, buf.getMagnitude (0, 0, 64)); // past the 20 ms ramp
+                }
+                const auto r = vp.getTunerReading();
+                const double err = r.valid && r.note == note ? std::abs (r.cents - off) : 99.0;
+                worst = juce::jmax (worst, err);
+                if (err > 1.0 || outPeak > 1e-6f)
+                {
+                    ok = false;
+                    std::printf ("  %s%d %+.0f c: read %s %s%d %+.2f c (%.2f Hz), output peak %g\n", vamp::Tuner::noteName (note), vamp::Tuner::octave (note),
+                                 off, r.valid ? "" : "(none)", vamp::Tuner::noteName (r.note), vamp::Tuner::octave (r.note), r.cents, r.hz, outPeak);
+                }
+            }
+        vp.setTunerOn (false);
+        float back = 0.0f;
+        for (int b = 0; b < (int) (0.2 * rate / 64); ++b)
+        {
+            for (int i = 0; i < 64; ++i) { buf.setSample (0, i, (float) (0.1 * std::sin (0.05 * (b * 64 + i)))); buf.setSample (1, i, 0.0f); }
+            p.processBlock (buf, midi);
+            back = juce::jmax (back, buf.getMagnitude (0, 0, 64));
+        }
+        ok = ok && back > 1e-3f;
+        std::printf ("%-44s %6.0f Hz  worst cents error %.2f, output after off %.3g  %s\n", "tuner, A1 .. E5 in tune and +7 c", rate, worst, back, ok ? "PASS" : "FAIL");
+        if (! ok) ++failures;
+    }
+}
 } // namespace
 
 int main (int argc, char** argv)
@@ -252,6 +311,8 @@ int main (int argc, char** argv)
         randomCases (*p, seconds * 0.5, 40);
     if (mode == "ir" || mode == "all")
         irCases (*p, seconds * 5.0);
+    if (mode == "tuner" || mode == "all")
+        tunerCases (*p);
 
     std::printf ("\n%d failed\n", failures);
     return failures == 0 ? 0 : 1;

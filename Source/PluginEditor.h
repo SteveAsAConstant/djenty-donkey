@@ -29,6 +29,23 @@ private:
     bool dragOver = false;
 };
 
+// Tuner: note, cents (a bar, green within 2 cents) and Hz while the processor's tuner is on; shown over the editor
+class TunerDisplay : public juce::Component, private juce::Timer
+{
+public:
+    explicit TunerDisplay (VibeAmpProcessor&);
+    void paint (juce::Graphics&) override;
+    void resized() override;
+
+private:
+    void timerCallback() override;
+
+    VibeAmpProcessor& proc;
+    vamp::Tuner::Reading reading;
+    double shownCents = 0.0; // smoothed for the bar
+    juce::TextButton offButton { "TUNER OFF" };
+};
+
 // Header bar: preset list, previous / next, save, delete, open folder
 class PresetBar : public juce::Component
 {
@@ -48,7 +65,7 @@ private:
                      deleteButton { "DELETE" }, folderButton { "FOLDER" };
 };
 
-class VibeAmpEditor : public juce::AudioProcessorEditor
+class VibeAmpEditor : public juce::AudioProcessorEditor, private juce::Timer
 {
 public:
     explicit VibeAmpEditor (VibeAmpProcessor&);
@@ -59,6 +76,7 @@ public:
 
 private:
     void setAmpChannelColour (int channel);
+    void timerCallback() override; // the tuner shown / hidden as its state changes
 
     VibeAmpProcessor& proc;
     ui::LookAndFeel lnf;
@@ -69,6 +87,8 @@ private:
     std::unique_ptr<ui::Section> ampSec;
     std::unique_ptr<ui::Section> cabSec, eqSec;
     std::unique_ptr<ui::Section> phaserSec, delaySec, reverbSec, outSec;
+    juce::TextButton tunerButton { "TUNER" };
+    TunerDisplay tunerDisplay { proc };
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (VibeAmpEditor)
 };
