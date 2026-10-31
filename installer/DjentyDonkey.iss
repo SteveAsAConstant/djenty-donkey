@@ -2,7 +2,7 @@
 ; Build: installer\make_package.ps1  (or ISCC.exe installer\DjentyDonkey.iss)
 
 #define AppName "Djenty Donkey"
-#define AppVersion "1.0.1-beta"
+#define AppVersion "1.1.0-beta"
 #define AppExe "Djenty Donkey.exe"
 #define BuildDir GetEnv("USERPROFILE") + "\vab-build\DjentyDonkey_artefacts\Release"
 
