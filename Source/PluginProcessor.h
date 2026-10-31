@@ -139,6 +139,17 @@ private:
     juce::AudioBuffer<float> irPending;
     double irPendingRate = 0.0;
     bool irPendingSet = false;
+    // The last kPreCabSeconds of the signal going into the cab (the audio thread writes, loadIR reads): an IR is
+    // loudness-matched for what is being played (vamp::cabMatchGainFor). The gain it got is kept in the state
+    // ("irGain"), so a session or preset comes back at the level it had (irLock). preCabLock: prepareToPlay
+    // reallocating the buffer against a load reading it on another thread (the audio thread never takes it).
+    static constexpr int kPreCabSeconds = 60;
+    std::unique_ptr<std::atomic<float>[]> preCab;
+    int preCabSize = 0;
+    std::atomic<long long> preCabPos { 0 }; // samples written in all
+    juce::SpinLock preCabLock;
+    double irGain = 0.0;
+    void loadIRFile (const juce::File& file, double gain); // gain <= 0: matched now
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (VibeAmpProcessor)
 };

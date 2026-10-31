@@ -3,6 +3,7 @@
 #include "PluginEditor.h"
 #include "Parameters.h"
 #include "dsp/CabMatch.h"
+#include <array>
 
 VibeAmpProcessor::VibeAmpProcessor()
     : AudioProcessor (BusesProperties()
@@ -75,6 +76,17 @@ void VibeAmpProcessor::prepareToPlay (double sampleRate, int samplesPerBlock)
     comp1176.prepare (sampleRate, maxBlock);
     amp.prepare (sampleRate, maxBlock);
     cab.prepare (monoSpec);
+    {
+        const juce::SpinLock::ScopedLockType lock (preCabLock);
+        const int preCabWanted = (int) (kPreCabSeconds * sampleRate);
+        if (preCabSize != preCabWanted)
+        {
+            preCab.reset (new std::atomic<float>[(size_t) preCabWanted]);
+            preCabSize = preCabWanted;
+        }
+        for (int i = 0; i < preCabSize; ++i) preCab[(size_t) i].store (0.0f, std::memory_order_relaxed);
+        preCabPos.store (0);
+    }
 
     // Built-in fallback cabinet (used until the user loads an IR; loaded IRs are matched to its loudness)
     vamp::setupFallbackCab (fallbackCab, sampleRate);
@@ -271,6 +283,17 @@ void VibeAmpProcessor::processChunk (juce::AudioBuffer<float>& buffer, int start
     }
 
     // ---- cabinet ----
+    if (preCabSize > 0) // what goes into the cab, for loudness-matching IRs (loadIRFile)
+    {
+        const auto written = preCabPos.load (std::memory_order_relaxed);
+        int pos = (int) (written % preCabSize);
+        for (int i = 0; i < len; ++i)
+        {
+            preCab[(size_t) pos].store (mono[i], std::memory_order_relaxed);
+            if (++pos == preCabSize) pos = 0;
+        }
+        preCabPos.store (written + len, std::memory_order_release);
+    }
     takeIR();
     if (cabOn)
     {
@@ -329,13 +352,20 @@ void VibeAmpProcessor::processChunk (juce::AudioBuffer<float>& buffer, int start
 // ---------------------------------------------------------------------------
 void VibeAmpProcessor::loadIR (const juce::File& file)
 {
+    loadIRFile (file, 0.0);
+}
+
+void VibeAmpProcessor::loadIRFile (const juce::File& file, double gain)
+{
     if (! file.existsAsFile())
         return;
 
-    // The IR's first channel, scaled to the built-in cab's loudness (vamp::cabMatchGain: the amp's spectrum, K-weighted), so
-    // the level does not jump between the built-in cab and IRs or from one IR to another; the tone is untouched.
-    // (JUCE's own normalisation sets every IR to the same energy, which left IRs ~5 dB below the built-in cab and
-    // differing from one another with where their energy lies.)
+    // The IR's first channel, scaled to the built-in cab's loudness, K-weighted, so the level does not jump between the
+    // built-in cab and IRs or from one IR to another; the tone is untouched. For the signal going into the cab over the
+    // last kPreCabSeconds when there is one (vamp::cabMatchGainFor: the player's own settings, e.g. a drive pedal in
+    // front, which a fixed spectrum misjudged by up to ~6 dB on dark IRs), else for the amp's typical spectrum
+    // (vamp::cabMatchGain); a gain from the state is used as it is. (JUCE's own normalisation sets every IR to the same
+    // energy, which left IRs ~5 dB below the built-in cab and differing from one another with where their energy lies.)
     juce::AudioFormatManager formats;
     formats.registerBasicFormats();
     std::unique_ptr<juce::AudioFormatReader> reader (formats.createReaderFor (file));
@@ -345,7 +375,38 @@ void VibeAmpProcessor::loadIR (const juce::File& file)
     juce::AudioBuffer<float> ir (1, len);
     reader->read (&ir, 0, len, 0, true, false);
     const double irRate = reader->sampleRate;
-    ir.applyGain ((float) vamp::cabMatchGain (ir.getReadPointer (0), len, irRate));
+    if (gain <= 0.0)
+    {
+        std::vector<float> x;
+        double xRate = 0.0;
+        {
+            const juce::SpinLock::ScopedLockType lock (preCabLock);
+            const auto written = preCabPos.load (std::memory_order_acquire);
+            const int n = (int) std::min<long long> (written, preCabSize);
+            x.resize ((size_t) n);
+            for (int i = 0; i < n; ++i) // oldest first
+                x[(size_t) i] = preCab[(size_t) ((written - n + i) % preCabSize)].load (std::memory_order_relaxed);
+            xRate = sampleRateHz;
+        }
+        // the 10-band EQ after the cab, designed from its knobs as processBlock does (not the audio thread's filters)
+        std::function<double (double)> post;
+        if (! x.empty() && pEqOn->load() > 0.5f)
+        {
+            std::array<vamp::Biquad, 10> bands;
+            for (int i = 0; i < 10; ++i) bands[(size_t) i].set (vamp::Biquad::Type::peak, xRate, ids::eqFreqs[i], 1.41, pEq[i]->load());
+            post = [bands, fs = xRate] (double f)
+            {
+                const std::complex<double> z1 = std::polar (1.0, -2.0 * juce::MathConstants<double>::pi * f / fs), z2 = z1 * z1;
+                double p = 1.0;
+                for (const auto& b : bands)
+                    p *= std::norm (((double) b.b0 + (double) b.b1 * z1 + (double) b.b2 * z2) / (1.0 + (double) b.a1 * z1 + (double) b.a2 * z2));
+                return p;
+            };
+        }
+        if (! x.empty()) gain = vamp::cabMatchGainFor (ir.getReadPointer (0), len, irRate, x.data(), (int) x.size(), xRate, post);
+    }
+    if (gain <= 0.0) gain = vamp::cabMatchGain (ir.getReadPointer (0), len, irRate);
+    ir.applyGain ((float) gain);
     {
         // to the audio thread (takeIR): a previous IR it has not taken yet is replaced (and freed here)
         const juce::SpinLock::ScopedLockType lock (irPendingLock);
@@ -356,6 +417,7 @@ void VibeAmpProcessor::loadIR (const juce::File& file)
     {
         const juce::SpinLock::ScopedLockType lock (irLock);
         irPath = file.getFullPathName();
+        irGain = gain;
     }
 }
 
@@ -368,6 +430,7 @@ void VibeAmpProcessor::clearIR()
     }
     const juce::SpinLock::ScopedLockType lock (irLock);
     irPath.clear();
+    irGain = 0.0;
 }
 
 // audio thread: hand a newly loaded IR to cab (wait-free: the buffer moves into JUCE's loader, which builds the
@@ -415,6 +478,10 @@ void VibeAmpProcessor::getStateInformation (juce::MemoryBlock& destData)
 {
     auto state = apvts.copyState();
     state.setProperty ("irPath", getIRPath(), nullptr);
+    {
+        const juce::SpinLock::ScopedLockType lock (irLock);
+        if (irPath.isNotEmpty()) state.setProperty ("irGain", irGain, nullptr); // the level it was loaded at (loadIRFile)
+    }
     state.setProperty ("presetName", presets.getCurrentName(), nullptr);
     state.setProperty (kKnobCurvesAttr, kKnobCurvesVersion, nullptr);
     if (auto xml = state.createXml())
@@ -435,7 +502,7 @@ void VibeAmpProcessor::setStateInformation (const void* data, int sizeInBytes)
 
     const auto path = tree.getProperty ("irPath").toString();
     if (path.isNotEmpty() && juce::File::isAbsolutePath (path) && juce::File (path).existsAsFile())
-        loadIR (juce::File (path));
+        loadIRFile (juce::File (path), (double) tree.getProperty ("irGain", 0.0)); // at the level it was saved with
     else
         clearIR();
 }

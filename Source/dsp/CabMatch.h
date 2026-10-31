@@ -2,6 +2,7 @@
 #include <algorithm>
 #include <cmath>
 #include <complex>
+#include <functional>
 #include <vector>
 #include "FFT.h"
 #include "Filters.h"
@@ -99,5 +100,88 @@ inline double cabMatchGain (const float* h, int n, double rate)
     }();
     const double l = cabLoudness (h, n, rate);
     return l > 1e-30 ? std::sqrt (fallback / l) : 1.0;
+}
+
+// The same match for what is actually being played: x is the amp's output ahead of the cab (nx samples at xRate, e.g.
+// the last seconds). The loudness of a cab is the sum over the bins of one FFT of x of |H(f)|^2 K(f) |X(f)|^2 (|H|^2
+// of each IR at the nearest bin of its own FFT): exactly the K-weighted loudness the convolved signal has, so an IR
+// loaded with this gain is as loud as the built-in cabinet for the player's own settings and playing. The fixed
+// spectrum above stands for one setting (no drive pedal): with a pedal in front a dark IR came out 5.8 dB quiet
+// (Neural Donkey, a real 59 s capture, docs/pi_bench.md). post: the power gain at f of what follows the cab (the EQ),
+// so the match holds at the output. Returns 0 when x holds too little signal.
+// |X|^2 is x's averaged spectrum (Welch: Hann segments of kSegment, half overlapping; 2.9 Hz bins at 48 kHz) rather
+// than one FFT of all of x. One 60 s FFT (4M points, 64 MB) flushed the Pi's shared cache: loading an IR overran the
+// audio threads, even from another core (15 such matches: ~340 xruns). 16k segments (256 kB) stay in that core's own L2
+// (40 loads: ~4 overruns, 64k segments 22); the gain differs from the one-FFT match by <= 0.03 dB on 60 s of real
+// playing and 0.13 dB on 20 s, five IRs (docs/pi_bench.md).
+inline double cabMatchGainFor (const float* h, int n, double rate, const float* x, int nx, double xRate,
+                                const std::function<double (double)>& post = {})
+{
+    constexpr int kSegment = 16384;
+    double power = 0.0;
+    for (int i = 0; i < nx; ++i) power += (double) x[i] * x[i];
+    if (nx < (int) xRate || power / nx < 1e-6) return 0.0; // under a second, or quieter than -60 dBFS rms
+    FFT fft;
+    fft.prepare (kSegment);
+    std::vector<std::complex<double>> d ((size_t) kSegment);
+    auto spectrum = [&] (const float* s, int len) // len <= kSegment: one FFT, zero-padded
+    {
+        std::fill (d.begin(), d.end(), std::complex<double> {});
+        for (int i = 0; i < len; ++i) d[(size_t) i] = s[i];
+        fft.transform (d.data(), false);
+        std::vector<double> p ((size_t) kSegment / 2);
+        for (size_t k = 0; k < p.size(); ++k) p[k] = std::norm (d[k]);
+        return p;
+    };
+    std::vector<double> X ((size_t) kSegment / 2, 0.0);
+    {
+        std::vector<double> win ((size_t) kSegment);
+        for (int i = 0; i < kSegment; ++i) win[(size_t) i] = 0.5 - 0.5 * std::cos (2.0 * kPi * i / kSegment);
+        const int hop = kSegment / 2;
+        for (int start = 0; start == 0 || start + kSegment <= nx; start += hop) // at least one segment (zero-padded)
+        {
+            std::fill (d.begin(), d.end(), std::complex<double> {});
+            for (int i = 0; i < kSegment && start + i < nx; ++i) d[(size_t) i] = x[start + i] * win[(size_t) i];
+            fft.transform (d.data(), false);
+            for (size_t k = 0; k < X.size(); ++k) X[k] += std::norm (d[k]);
+        }
+    }
+    std::vector<float> builtin ((size_t) kSegment);
+    {
+        Biquad f[5];
+        setupFallbackCab (f, xRate);
+        for (size_t i = 0; i < builtin.size(); ++i)
+        {
+            float v = i == 0 ? 1.0f : 0.0f;
+            for (auto& b : f) v = b.process (v);
+            builtin[i] = v;
+        }
+    }
+    // the loaded IR at its own resolution, once (up to 65536 samples, 1 MB: 1.4 s at 48 kHz), each |X|^2 bin reading its
+    // nearest bin; the built-in cab (an 80 Hz high-pass and four filters, gone within 0.3 s) at the segments' size
+    std::vector<double> H;
+    {
+        int size = kSegment;
+        while (size < std::min (n, 65536)) size <<= 1;
+        FFT hf;
+        hf.prepare (size);
+        std::vector<std::complex<double>> hd ((size_t) size);
+        for (int i = 0; i < std::min (n, size); ++i) hd[(size_t) i] = h[i];
+        hf.transform (hd.data(), false);
+        H.resize ((size_t) size / 2);
+        for (size_t k = 0; k < H.size(); ++k) H[k] = std::norm (hd[k]);
+    }
+    const auto B = spectrum (builtin.data(), kSegment);
+    const double xBin = xRate / (2.0 * (double) X.size()), hBin = rate / (2.0 * (double) H.size()), bBin = xRate / (2.0 * (double) B.size());
+    double lh = 0.0, lb = 0.0;
+    for (size_t k = 1; k < X.size(); ++k)
+    {
+        const double f = (double) k * xBin;
+        if (f < 20.0 || f > 20000.0 || f >= 0.5 * rate) continue;
+        const double w = X[k] * kWeighting (f) * (post ? post (f) : 1.0);
+        lh += w * H[std::min (H.size() - 1, (size_t) std::lround (f / hBin))];
+        lb += w * B[std::min (B.size() - 1, (size_t) std::lround (f / bBin))];
+    }
+    return lh > 1e-30 ? std::sqrt (lb / lh) : 0.0;
 }
 } // namespace vamp
