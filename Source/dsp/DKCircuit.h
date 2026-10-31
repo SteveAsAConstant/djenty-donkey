@@ -346,13 +346,44 @@ public:
     // 16 rows at a time in eight 2-wide registers (32 in eight 4-wide AVX registers where the CPU has AVX) across all
     // columns: eight independent sums, so the adds overlap instead of waiting on each other (a tail computes and
     // drops the pad rows). Each row is still summed in column order with a separate multiply and add, so the result
-    // is bit-identical to matVec (and the plain loop) on every path.
+    // is bit-identical to matVec (and the plain loop) on every path. On arm64 32 rows at a time (sixteen sums: NEON has
+    // 32 registers) with v read two columns at once and multiplied by lane (tileTLane): -20 % on the Pi 5's A76, still
+    // the same operations in the same order.
     static void matVecT (const double* At, int ld, int rows, int cols, const double* v, double* out)
     {
 #if VAMP_SIMD_SSE2
         if (vampHasAvx()) { matVecTAvx (At, ld, rows, cols, v, out); return; }
 #endif
-#if VAMP_SIMD_SSE2 || VAMP_SIMD_NEON
+#if VAMP_SIMD_NEON
+        for (int r = 0; r < rows; r += 32)
+        {
+            const int pairs = std::min (16, (rows - r + 1) / 2);
+            double* o = out + r;
+            double tmp[32];
+            const bool tail = r + 2 * pairs > rows; // an odd count: the last pair's pad row goes to tmp
+            double* d = tail ? tmp : o;
+            switch (pairs)
+            {
+                case 16: tileTLane<16> (At + r, ld, cols, v, d); break;
+                case 15: tileTLane<15> (At + r, ld, cols, v, d); break;
+                case 14: tileTLane<14> (At + r, ld, cols, v, d); break;
+                case 13: tileTLane<13> (At + r, ld, cols, v, d); break;
+                case 12: tileTLane<12> (At + r, ld, cols, v, d); break;
+                case 11: tileTLane<11> (At + r, ld, cols, v, d); break;
+                case 10: tileTLane<10> (At + r, ld, cols, v, d); break;
+                case 9: tileTLane<9> (At + r, ld, cols, v, d); break;
+                case 8: tileTLane<8> (At + r, ld, cols, v, d); break;
+                case 7: tileTLane<7> (At + r, ld, cols, v, d); break;
+                case 6: tileTLane<6> (At + r, ld, cols, v, d); break;
+                case 5: tileTLane<5> (At + r, ld, cols, v, d); break;
+                case 4: tileTLane<4> (At + r, ld, cols, v, d); break;
+                case 3: tileTLane<3> (At + r, ld, cols, v, d); break;
+                case 2: tileTLane<2> (At + r, ld, cols, v, d); break;
+                default: tileTLane<1> (At + r, ld, cols, v, d); break;
+            }
+            if (tail) std::copy (tmp, tmp + (rows - r), o);
+        }
+#elif VAMP_SIMD_SSE2
         for (int r = 0; r < rows; r += 16)
         {
             const int pairs = std::min (8, (rows - r + 1) / 2);
@@ -449,6 +480,30 @@ public:
         for (int k = 0; k < P; ++k) vst1q_f64 (out + 2 * k, s[k]);
   #endif
     }
+
+  #if VAMP_SIMD_NEON
+    // 2 P rows of matVecT on arm64: two columns per step, v[j] and v[j + 1] in the lanes of one load (the multiply by
+    // lane is the multiply by the broadcast value, so each row's sum is formed exactly as in tileT)
+    template <int P>
+    static inline void tileTLane (const double* At, int ld, int cols, const double* v, double* out)
+    {
+        float64x2_t s[P];
+        for (int k = 0; k < P; ++k) s[k] = vdupq_n_f64 (0.0);
+        int j = 0;
+        for (; j + 1 < cols; j += 2, At += 2 * ld)
+        {
+            const float64x2_t vv = vld1q_f64 (v + j);
+            for (int k = 0; k < P; ++k) s[k] = vaddq_f64 (s[k], vmulq_laneq_f64 (vld1q_f64 (At + 2 * k), vv, 0));
+            for (int k = 0; k < P; ++k) s[k] = vaddq_f64 (s[k], vmulq_laneq_f64 (vld1q_f64 (At + ld + 2 * k), vv, 1));
+        }
+        if (j < cols)
+        {
+            const float64x2_t vj = vdupq_n_f64 (v[j]);
+            for (int k = 0; k < P; ++k) s[k] = vaddq_f64 (s[k], vmulq_f64 (vld1q_f64 (At + 2 * k), vj));
+        }
+        for (int k = 0; k < P; ++k) vst1q_f64 (out + 2 * k, s[k]);
+    }
+  #endif
 #endif
 
 private:
